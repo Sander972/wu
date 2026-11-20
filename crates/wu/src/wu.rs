@@ -1,4 +1,5 @@
 mod app_menus;
+mod git_status_item;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
 #[cfg(target_os = "macos")]
@@ -499,9 +500,11 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let line_ending_indicator =
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
         let git_blame_status = cx.new(|_| git_ui::GitBlameStatus::default());
+        let git_status_item = cx.new(|cx| git_status_item::GitStatusItem::new(workspace, cx));
         workspace.status_bar().update(cx, |status_bar, cx| {
-            status_bar.add_left_item(lsp_button, window, cx);
             status_bar.add_left_item(diagnostic_summary, window, cx);
+            status_bar.add_left_item(git_status_item, window, cx);
+            status_bar.add_left_item(lsp_button, window, cx);
             status_bar.add_left_item(active_file_name, window, cx);
             status_bar.add_left_item(git_blame_status, window, cx);
             status_bar.add_left_item(activity_indicator, window, cx);

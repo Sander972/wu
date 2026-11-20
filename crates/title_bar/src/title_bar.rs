@@ -303,17 +303,13 @@ impl Render for TitleBar {
 
         let title_bar_settings = *TitleBarSettings::get_global(cx);
         let button_layout = title_bar_settings.button_layout;
-        let is_git_enabled = ProjectSettings::get_global(cx).git.enabled.status;
-
         let show_menus = show_menus(cx);
 
         let mut children = <ArrayVec<_, 5>>::new();
 
         let mut project_name = None;
-        let mut repository = None;
-        let mut linked_worktree_name = None;
         if let Some(worktree) = self.effective_active_worktree(cx) {
-            repository = self.get_repository_for_worktree(&worktree, cx);
+            let repository = self.get_repository_for_worktree(&worktree, cx);
             let worktree_abs_path = worktree.read(cx).abs_path();
             project_name = worktree
                 .read(cx)
@@ -323,24 +319,6 @@ impl Render for TitleBar {
             if let Some(repo) = &repository {
                 let repo = repo.read(cx);
                 let identity = repo_identity_path(&repo.common_dir_abs_path, repo.path_style);
-                let identity_fallback =
-                    repo_identity_path_if_local(&repo.common_dir_abs_path, repo.path_style);
-                linked_worktree_name = linked_worktree_name_anchor(
-                    repo.main_worktree_abs_path(),
-                    identity_fallback,
-                    repo.is_linked_worktree(),
-                )
-                .and_then(|name_anchor_path| {
-                    linked_worktree_short_name(
-                        name_anchor_path,
-                        repo.work_directory_abs_path.as_ref(),
-                    )
-                })
-                .or_else(|| {
-                    repo.is_linked_worktree()
-                        .then_some(project_name.clone())
-                        .flatten()
-                });
 
                 let display_name = if identity.extension() == Some(std::ffi::OsStr::new("git")) {
                     identity.file_stem().and_then(|n| n.to_str())
@@ -399,16 +377,12 @@ impl Render for TitleBar {
                                         .children(self.render_project_host(cx))
                                         .child(self.render_project_tabs(project_name, window, cx))
                                 })
-                                .when_some(
-                                    repository.filter(|_| is_git_enabled),
-                                    |title_bar, repository| {
-                                        title_bar.children(self.render_worktree_and_branch(
-                                            repository,
-                                            linked_worktree_name,
-                                            cx,
-                                        ))
-                                    },
-                                )
+                                .children(self.render_git_controls(
+                                    title_bar_settings.show_worktree_name,
+                                    title_bar_settings.show_branch_name,
+                                    gpui::Anchor::TopLeft,
+                                    cx,
+                                ))
                         })
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -931,10 +905,55 @@ impl TitleBar {
             .into_any_element()
     }
 
+    /// Renders the worktree and branch pickers, used by both the title bar and the status bar.
+    pub fn render_git_controls(
+        &self,
+        show_worktree: bool,
+        show_branch: bool,
+        menu_anchor: gpui::Anchor,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !ProjectSettings::get_global(cx).git.enabled.status {
+            return None;
+        }
+        let worktree = self.effective_active_worktree(cx)?;
+        let repository = self.get_repository_for_worktree(&worktree, cx)?;
+        let linked_worktree_name = {
+            let repo = repository.read(cx);
+            let identity_fallback =
+                repo_identity_path_if_local(&repo.common_dir_abs_path, repo.path_style);
+            linked_worktree_name_anchor(
+                repo.main_worktree_abs_path(),
+                identity_fallback,
+                repo.is_linked_worktree(),
+            )
+            .and_then(|name_anchor_path| {
+                linked_worktree_short_name(name_anchor_path, repo.work_directory_abs_path.as_ref())
+            })
+            .or_else(|| {
+                repo.is_linked_worktree()
+                    .then(|| worktree.read(cx).root_name().file_name())
+                    .flatten()
+                    .map(|name| SharedString::from(name.to_string()))
+            })
+        };
+        self.render_worktree_and_branch(
+            repository,
+            linked_worktree_name,
+            show_worktree,
+            show_branch,
+            menu_anchor,
+            cx,
+        )
+    }
+
     fn render_worktree_and_branch(
         &self,
         repository: Entity<project::git_store::Repository>,
         linked_worktree_name: Option<SharedString>,
+        show_worktree: bool,
+        show_branch: bool,
+        menu_anchor: gpui::Anchor,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let workspace = self.workspace.upgrade()?;
@@ -1001,14 +1020,12 @@ impl TitleBar {
             worktree_label.clone()
         };
 
-        let worktree_button = settings.show_worktree_name.then(|| {
+        let worktree_button = show_worktree.then(|| {
             let project = self.project.clone();
             let workspace_handle = workspace.downgrade();
             PopoverMenu::new("worktree-picker-menu")
                 .menu(move |window, cx| {
-                    // When opened from the title bar, focus is on the trigger
-                    // button (not a dock), so `focused_dock` is `None`. That's
-                    // fine — there's no prior dock focus to restore.
+                    // When opened from the title bar or status bar, focus is on the trigger button (not a dock), so `focused_dock` is `None`. That's fine — there's no prior dock focus to restore.
                     Some(cx.new(|cx| {
                         WorktreePicker::new(project.clone(), workspace_handle.clone(), window, cx)
                     }))
@@ -1034,11 +1051,11 @@ impl TitleBar {
                         )
                     },
                 )
-                .anchor(gpui::Anchor::TopLeft)
+                .anchor(menu_anchor)
         });
 
         let branch_picker = branch_name.and_then(|branch_name| {
-            settings.show_branch_name.then(|| {
+            show_branch.then(|| {
                 let branch_tooltip_label = branch_name.clone();
                 let (branch_icon, branch_icon_color) = if settings.show_branch_status_icon {
                     icon_info
@@ -1094,7 +1111,7 @@ impl TitleBar {
                             cx,
                         )
                     })
-                    .anchor(gpui::Anchor::TopLeft)
+                    .anchor(menu_anchor)
             })
         });
 
