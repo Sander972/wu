@@ -340,7 +340,10 @@ impl ChatView {
     }
 
     pub(super) fn render_move_to_panel(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
-        if self.docked || self.subagent.is_some() {
+        if self.docked
+            || self.subagent.is_some()
+            || !AgentChatSettings::get_global(cx).move_to_panel_button
+        {
             return None;
         }
         let color = cx.theme().colors().text_muted.opacity(0.8);

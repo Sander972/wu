@@ -4479,11 +4479,23 @@ fn default_render_tab_bar_buttons(
     (None, right_children)
 }
 
+/// Lets crates that `workspace` can't depend on replace the "+" button of panes that use the default one; returning `None` keeps "New File".
+pub struct TrailingTabButtonOverride(
+    pub fn(&mut Pane, &mut Window, &mut Context<Pane>) -> Option<AnyElement>,
+);
+
+impl gpui::Global for TrailingTabButtonOverride {}
+
 fn default_render_trailing_tab_button(
     pane: &mut Pane,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<Pane>,
 ) -> Option<AnyElement> {
+    if let Some(TrailingTabButtonOverride(render)) = cx.try_global::<TrailingTabButtonOverride>()
+        && let Some(button) = render(pane, window, cx)
+    {
+        return Some(button);
+    }
     let focus_handle = pane.focus_handle.clone();
     Some(
         IconButton::new("new-file", IconName::Plus)

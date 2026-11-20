@@ -250,7 +250,20 @@ impl SavedChats {
     }
 }
 
-fn new_chat_menu(workspace: WeakEntity<Workspace>) -> impl IntoElement {
+fn new_chat_menu(workspace: WeakEntity<Workspace>, cx: &App) -> AnyElement {
+    if let [kind] = *AgentChatSettings::get_global(cx).agents() {
+        return IconButton::new("chat-panel-new-chat-trigger", IconName::Plus)
+            .icon_size(IconSize::Small)
+            .tooltip(Tooltip::text(t!("New Chat")))
+            .on_click(move |_, window, cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        new_chat_in_panel(workspace, kind, window, cx)
+                    })
+                    .log_err();
+            })
+            .into_any_element();
+    }
     PopoverMenu::new("chat-panel-new-chat")
         .trigger_with_tooltip(
             IconButton::new("chat-panel-new-chat-trigger", IconName::Plus)
@@ -274,6 +287,7 @@ fn new_chat_menu(workspace: WeakEntity<Workspace>) -> impl IntoElement {
                 })
             }))
         })
+        .into_any_element()
 }
 
 fn tab_bar_buttons(workspace: WeakEntity<Workspace>) -> AnyElement {
@@ -388,7 +402,7 @@ impl ChatPanel {
             pane.set_zoom_out_on_close(false);
             pane.set_render_trailing_tab_button(cx, {
                 let workspace = workspace.clone();
-                move |_, _, _| Some(new_chat_menu(workspace.clone()).into_any_element())
+                move |_, _, cx| Some(new_chat_menu(workspace.clone(), cx))
             });
             pane.set_render_tab_bar_buttons(cx, {
                 let workspace = workspace.clone();

@@ -183,6 +183,7 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
+ "task",
  "tempfile",
  "theme",
  "theme_settings",

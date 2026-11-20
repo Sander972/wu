@@ -57,6 +57,7 @@ const SPINNER_RING: [[f32; 2]; 3] = [[0.0, 1.0], [5.0, 2.0], [4.0, 3.0]];
 
 pub fn init(cx: &mut App) {
     workspace::register_serializable_item::<ChatView>(cx);
+    cx.set_global(workspace::TrailingTabButtonOverride(new_chat_tab_button));
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace
             .register_action(|workspace, _: &ToggleFocus, window, cx| {
@@ -143,6 +144,18 @@ pub(crate) fn create_session(
         .unwrap_or_else(|| paths::home_dir().clone());
     let store = store_for(workspace, cx);
     Some(store.update(cx, |store, cx| store.create_session(kind, cwd, cx)))
+}
+
+fn terminal_command(kind: AgentKind, native_session_id: Option<&str>) -> (&'static str, Vec<String>) {
+    let (command, resume): (_, &[&str]) = match kind {
+        AgentKind::Claude => ("claude", &["--resume"]),
+        AgentKind::Codex => ("codex", &["resume"]),
+        AgentKind::Opencode => ("opencode", &["--session"]),
+    };
+    let args = native_session_id.map_or_else(Vec::new, |id| {
+        resume.iter().map(|arg| arg.to_string()).chain([id.to_string()]).collect()
+    });
+    (command, args)
 }
 
 pub(crate) fn chat_view_for(
@@ -514,8 +527,21 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn new_chat_menu(&self) -> impl IntoElement {
+    fn new_chat_menu(&self, cx: &App) -> AnyElement {
         let workspace = self.workspace.clone();
+        if let [kind] = *AgentChatSettings::get_global(cx).agents() {
+            return HeaderButton::new(
+                "agent-panel-new-chat-trigger",
+                IconName::Plus,
+                t!("New Chat"),
+            )
+            .on_click(move |_, window, cx| {
+                workspace
+                    .update(cx, |workspace, cx| new_chat(workspace, kind, window, cx))
+                    .log_err();
+            })
+            .into_any_element();
+        }
         PopoverMenu::new("agent-panel-new-chat")
             .trigger(HeaderButton::new(
                 "agent-panel-new-chat-trigger",
@@ -554,6 +580,7 @@ impl AgentPanel {
                     )
                 }))
             })
+            .into_any_element()
     }
 
     fn toggle_saved_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -571,6 +598,7 @@ impl AgentPanel {
 
     fn render_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
+        let settings = AgentChatSettings::get_global(cx);
         v_flex()
             .flex_none()
             .child(
@@ -599,24 +627,41 @@ impl AgentPanel {
                                 },
                             )),
                     )
-                    .child(
-                        HeaderButton::new(
-                            "agent-panel-saved-messages",
-                            IconName::Bookmark,
-                            if self.showing_saved {
-                                t!("Back to Chats")
-                            } else {
-                                t!("Saved Messages")
-                            },
-                        )
-                        .toggle_state(self.showing_saved)
-                        .on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.toggle_saved_messages(window, cx)
-                            }),
-                        ),
+                    .when(
+                        settings.open_in_terminal_button && self.active_session(cx).is_some(),
+                        |this| {
+                            this.child(
+                                HeaderButton::new(
+                                    "agent-panel-open-in-terminal",
+                                    IconName::Terminal,
+                                    t!("Continue in Terminal"),
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_active_chat_in_terminal(window, cx)
+                                })),
+                            )
+                        },
                     )
-                    .child(self.new_chat_menu()),
+                    .when(settings.saved_messages_button || self.showing_saved, |this| {
+                        this.child(
+                            HeaderButton::new(
+                                "agent-panel-saved-messages",
+                                IconName::Bookmark,
+                                if self.showing_saved {
+                                    t!("Back to Chats")
+                                } else {
+                                    t!("Saved Messages")
+                                },
+                            )
+                            .toggle_state(self.showing_saved)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.toggle_saved_messages(window, cx)
+                                }),
+                            ),
+                        )
+                    })
+                    .child(self.new_chat_menu(cx)),
             )
             .child(
                 div().px(px(SPACE_SM)).pb(px(4.)).child(
@@ -706,15 +751,69 @@ impl AgentPanel {
             )
     }
 
-    fn active_chat_id(&self, cx: &App) -> Option<String> {
+    fn active_session(&self, cx: &App) -> Option<Entity<AgentSession>> {
         let workspace = self.workspace.upgrade()?;
         let workspace = workspace.read(cx);
         let view = workspace
             .active_item(cx)
             .and_then(|item| item.downcast::<ChatView>())
             .or_else(|| crate::chat_panel::visible_chat(workspace, cx))?;
-        let id = view.read(cx).session().read(cx).metadata().id.clone();
-        Some(id)
+        Some(view.read(cx).session().clone())
+    }
+
+    fn active_chat_id(&self, cx: &App) -> Option<String> {
+        Some(self.active_session(cx)?.read(cx).metadata().id.clone())
+    }
+
+    fn open_active_chat_in_terminal(&self, window: &mut Window, cx: &mut App) {
+        let Some(session) = self.active_session(cx) else {
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let session = session.read(cx);
+        let metadata = session.metadata();
+        let (command, args) = terminal_command(metadata.kind, metadata.native_session_id.as_deref());
+        let cwd = Some(metadata.cwd.clone());
+        let label = metadata.kind.label().to_string();
+        let id = task::TaskId(format!("agent-chat-terminal-{}", metadata.id));
+        // Two processes appending to one agent session corrupt its history.
+        if session.is_working() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.show_toast(
+                    Toast::new(
+                        NotificationId::unique::<AgentPanel>(),
+                        t!("Stop the agent before opening this chat in a terminal.").to_string(),
+                    )
+                    .autohide(),
+                    cx,
+                )
+            });
+            return;
+        }
+        workspace.update(cx, |workspace, cx| {
+            let shell = workspace.project().read(cx).terminal_settings(&cwd, cx).shell.clone();
+            workspace
+                .spawn_in_terminal(
+                    task::SpawnInTerminal {
+                        id,
+                        full_label: label.clone(),
+                        label: label.clone(),
+                        command: Some(command.to_string()),
+                        args,
+                        command_label: label,
+                        cwd,
+                        use_new_terminal: true,
+                        allow_concurrent_runs: true,
+                        shell,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+                .detach();
+        });
     }
 
     fn rename_field(&self, editor: &Entity<Editor>, cx: &Context<Self>) -> AnyElement {
@@ -1723,6 +1822,50 @@ fn project_name(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
+fn new_chat_tab_button(
+    pane: &mut workspace::Pane,
+    _window: &mut Window,
+    cx: &mut Context<workspace::Pane>,
+) -> Option<AnyElement> {
+    let settings = AgentChatSettings::get_global(cx);
+    if !settings.enabled
+        || !settings.new_chat_from_tab_bar
+        || !pane.items().any(|item| item.downcast::<ChatView>().is_some())
+    {
+        return None;
+    }
+    if let [kind] = *settings.agents() {
+        return Some(
+            IconButton::new("new-chat", IconName::Plus)
+                .icon_size(IconSize::Small)
+                .tooltip(move |_window, cx| {
+                    Tooltip::for_action(t!("New Chat"), &*new_chat_action(kind), cx)
+                })
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(new_chat_action(kind), cx);
+                })
+                .into_any_element(),
+        );
+    }
+    Some(
+        PopoverMenu::new("new-chat-menu")
+            .trigger_with_tooltip(
+                IconButton::new("new-chat", IconName::Plus).icon_size(IconSize::Small),
+                Tooltip::text(t!("New Chat")),
+            )
+            .anchor(gpui::Anchor::TopLeft)
+            .menu(move |window, cx| {
+                let agents = AgentChatSettings::get_global(cx).agents().to_vec();
+                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                    agents.into_iter().fold(menu, |menu, kind| {
+                        menu.action(kind.label(), new_chat_action(kind))
+                    })
+                }))
+            })
+            .into_any_element(),
+    )
+}
+
 pub(crate) fn new_chat_action(kind: AgentKind) -> Box<dyn Action> {
     match kind {
         AgentKind::Claude => Box::new(NewClaudeChat),
@@ -1881,6 +2024,23 @@ impl Panel for AgentPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_command_resumes_each_agents_session() {
+        assert_eq!(
+            terminal_command(AgentKind::Claude, Some("abc")),
+            ("claude", vec!["--resume".to_string(), "abc".to_string()])
+        );
+        assert_eq!(
+            terminal_command(AgentKind::Codex, Some("abc")),
+            ("codex", vec!["resume".to_string(), "abc".to_string()])
+        );
+        assert_eq!(
+            terminal_command(AgentKind::Opencode, Some("abc")),
+            ("opencode", vec!["--session".to_string(), "abc".to_string()])
+        );
+        assert_eq!(terminal_command(AgentKind::Claude, None), ("claude", Vec::new()));
+    }
 
     #[test]
     fn time_ago_uses_compact_units() {
