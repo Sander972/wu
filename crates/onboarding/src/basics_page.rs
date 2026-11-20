@@ -18,7 +18,7 @@ use crate::{
 };
 
 const LIGHT_THEMES: [&str; 3] = ["Wu Light", "Catppuccin Latte", "One Light"];
-const DARK_THEMES: [&str; 3] = ["Wu Dark", "Catppuccin Mocha", "One Dark"];
+const DARK_THEMES: [&str; 3] = ["Wu Dark Opaque", "Catppuccin Mocha", "One Dark"];
 const FAMILY_NAMES: [SharedString; 3] = [
     SharedString::new_static("Wu"),
     SharedString::new_static("Catppuccin"),
