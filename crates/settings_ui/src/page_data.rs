@@ -3469,7 +3469,7 @@ fn window_and_layout_page() -> SettingsPage {
         ]
     }
 
-    fn status_bar_section() -> [SettingsPageItem; 10] {
+    fn status_bar_section() -> [SettingsPageItem; 11] {
         [
             SettingsPageItem::SectionHeader(n!("Status Bar")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3573,6 +3573,26 @@ fn window_and_layout_page() -> SettingsPage {
                             .status_bar
                             .get_or_insert_default()
                             .line_endings_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Git Controls"),
+                description: n!(
+                    "Show the git worktree and branch pickers and the fetch/push/pull button in the status bar."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.git_controls"),
+                    pick: |settings_content| {
+                        settings_content.status_bar.as_ref()?.git_controls.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .git_controls = value;
                     },
                 }),
                 metadata: None,
@@ -7713,7 +7733,7 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
-    fn chat_section() -> [SettingsPageItem; 8] {
+    fn chat_section() -> [SettingsPageItem; 11] {
         [
             SettingsPageItem::SectionHeader(n!("Chat")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -7793,6 +7813,64 @@ fn agent_chat_page() -> SettingsPage {
                     },
                     write: |settings_content, value, _| {
                         settings_content.agent_chat.get_or_insert_default().dictation = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Move to Side Panel Button"),
+                description: n!(
+                    "Show the button next to the usage rings that moves a chat to the side panel."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.move_to_panel_button"),
+                    pick: |settings_content| {
+                        settings_content.agent_chat.as_ref()?.move_to_panel_button.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .move_to_panel_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Saved Messages Button"),
+                description: n!("Show the Saved Messages button in the agent panel's header."),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.saved_messages_button"),
+                    pick: |settings_content| {
+                        settings_content.agent_chat.as_ref()?.saved_messages_button.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .saved_messages_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Open in Terminal Button"),
+                description: n!(
+                    "Show the button in the agent panel's header that continues the active chat in the agent's own CLI in a terminal."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.open_in_terminal_button"),
+                    pick: |settings_content| {
+                        settings_content.agent_chat.as_ref()?.open_in_terminal_button.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .open_in_terminal_button = value;
                     },
                 }),
                 metadata: None,
@@ -7937,9 +8015,29 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
-    fn new_chats_section() -> [SettingsPageItem; 5] {
+    fn new_chats_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader(n!("New Chats")),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("New Chat From Tab Bar"),
+                description: n!(
+                    "When a pane holds agent chats, its tab bar's + button starts a new chat instead of a new file."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.new_chat_from_tab_bar"),
+                    pick: |settings_content| {
+                        settings_content.agent_chat.as_ref()?.new_chat_from_tab_bar.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .new_chat_from_tab_bar = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: n!("Default Effort"),
                 description: n!(

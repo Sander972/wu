@@ -93,11 +93,11 @@ pub struct TitleBarSettingsContent {
     pub show_onboarding_banner: Option<bool>,
     /// Whether to show the branch name button in the titlebar.
     ///
-    /// Default: true
+    /// Default: false
     pub show_branch_name: Option<bool>,
     /// Whether to show the worktree name button in the titlebar.
     ///
-    /// Default: true
+    /// Default: false
     pub show_worktree_name: Option<bool>,
     /// Whether to show the project host and name in the titlebar.
     ///

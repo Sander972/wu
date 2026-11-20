@@ -9,7 +9,7 @@
   "theme": {
     "mode": "system",
     "light": "Wu Light",
-    "dark": "Wu Dark",
+    "dark": "Wu Dark Opaque",
   },
   "icon_theme": {
     "mode": "system",
@@ -115,6 +115,14 @@
     "model_picker": "full",
     // Downloads a speech model on first use.
     "dictation": true,
+    // The button next to the usage rings that moves a chat to the side panel.
+    "move_to_panel_button": false,
+    // When a pane holds agent chats, its tab bar's + button starts a new chat instead of a new file.
+    "new_chat_from_tab_bar": true,
+    // The Saved Messages button in the agent panel's header.
+    "saved_messages_button": true,
+    // The agent panel header button that continues the active chat in the agent's own CLI in a terminal.
+    "open_in_terminal_button": true,
     "sound_when_done": true,
     "sound_when_needs_input": true,
     "sound_on_error": true,
@@ -620,9 +628,9 @@
     // Whether to show git status indicators on the branch icon in the titlebar.
     "show_branch_status_icon": false,
     // Whether to show the branch name button in the titlebar.
-    "show_branch_name": true,
+    "show_branch_name": false,
     // Whether to show the worktree name button in the titlebar.
-    "show_worktree_name": true,
+    "show_worktree_name": false,
     // Whether to show the project host and name in the titlebar.
     "show_project_items": true,
     // Whether to show onboarding banners in the titlebar.
@@ -1639,6 +1647,8 @@
     "cursor_position_button": true,
     // Whether to show active line endings button in the status bar.
     "line_endings_button": false,
+    // Whether to show the git worktree and branch pickers and the fetch/push/pull button in the status bar.
+    "git_controls": true,
     // Control when to show the active encoding in the status bar.
     "active_encoding_button": "non_utf8",
   },

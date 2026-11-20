@@ -1113,6 +1113,22 @@ pub struct AgentChatSettingsContent {
     ///
     /// Default: true
     pub dictation: Option<bool>,
+    /// Show the button next to the usage rings that moves a chat to the side panel.
+    ///
+    /// Default: false
+    pub move_to_panel_button: Option<bool>,
+    /// When a pane holds agent chats, its tab bar's + button starts a new chat instead of a new file.
+    ///
+    /// Default: true
+    pub new_chat_from_tab_bar: Option<bool>,
+    /// Show the Saved Messages button in the agent panel's header.
+    ///
+    /// Default: true
+    pub saved_messages_button: Option<bool>,
+    /// Show the button in the agent panel's header that continues the active chat in the agent's own CLI in a terminal.
+    ///
+    /// Default: true
+    pub open_in_terminal_button: Option<bool>,
     /// Play a sound when an agent finishes.
     ///
     /// Default: true

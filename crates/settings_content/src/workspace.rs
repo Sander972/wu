@@ -611,6 +611,10 @@ pub struct StatusBarSettingsContent {
     ///
     /// Default: false
     pub line_endings_button: Option<bool>,
+    /// Whether to show the git worktree and branch pickers and the fetch/push/pull button in the status bar.
+    ///
+    /// Default: true
+    pub git_controls: Option<bool>,
     /// Whether to show the active encoding button in the status bar.
     ///
     /// Default: non_utf8

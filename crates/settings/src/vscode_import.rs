@@ -782,6 +782,7 @@ impl VsCodeSettings {
             active_language_button: None,
             cursor_position_button: None,
             line_endings_button: None,
+            git_controls: None,
             active_encoding_button: None,
         })
     }
