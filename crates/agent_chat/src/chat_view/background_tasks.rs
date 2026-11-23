@@ -1,4 +1,4 @@
-use super::{ChatView, icon};
+use super::{ChatView, icon, links::FileTarget};
 use crate::chat_style::{Chip, format_elapsed, ink, popover_card, text_faint, ui};
 use crate::session::AgentSession;
 use crate::usage_rings::menu_heading;
@@ -9,7 +9,7 @@ use gpui::{
     px,
 };
 use i18n::t;
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 use theme::ActiveTheme as _;
 use ui::{PopoverMenu, Tooltip, prelude::*};
 use util::ResultExt as _;
@@ -23,6 +23,17 @@ struct TaskRow {
     command: Option<SharedString>,
     elapsed: SharedString,
     subagent: Option<(String, ToolCall)>,
+    output_file: Option<PathBuf>,
+}
+
+// Claude's backgrounded Bash result reads "... Output is being written to: <path>.output. ...".
+fn output_file(tool_output: &str) -> Option<PathBuf> {
+    const MARKER: &str = "Output is being written to: ";
+    const EXTENSION: &str = ".output";
+    let start = tool_output.find(MARKER)? + MARKER.len();
+    let rest = &tool_output[start..];
+    let end = rest.find(EXTENSION)? + EXTENSION.len();
+    Some(PathBuf::from(&rest[..end]))
 }
 
 fn running_label(kind: BackgroundTaskKind) -> SharedString {
@@ -149,6 +160,9 @@ fn background_rows(session: &AgentSession) -> Vec<TaskRow> {
             let subagent = tool
                 .filter(|tool| tool.call.is_subagent_spawn())
                 .map(|tool| (tool.id.clone(), tool.call.clone()));
+            let output_file = tool
+                .and_then(|tool| tool.output.as_deref())
+                .and_then(output_file);
             let title: SharedString = if !task.description.trim().is_empty() {
                 task.description.clone().into()
             } else if let Some(command) = &command {
@@ -162,6 +176,7 @@ fn background_rows(session: &AgentSession) -> Vec<TaskRow> {
                 title,
                 elapsed: format_elapsed(task.started_at.elapsed().as_secs()).into(),
                 subagent,
+                output_file,
             }
         })
         .collect()
@@ -252,6 +267,21 @@ impl Render for BackgroundTasksCard {
                                     cx.emit(DismissEvent);
                                 }))
                         })
+                        .when_some(row.output_file, |this, path| {
+                            let chat = chat.clone();
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(hover))
+                                .tooltip(Tooltip::text(t!("Show output")))
+                                .on_click(cx.listener(move |_, _, window, cx| {
+                                    let target = FileTarget {
+                                        path: path.clone(),
+                                        line: None,
+                                    };
+                                    chat.update(cx, |chat, cx| chat.open_file(target, window, cx))
+                                        .log_err();
+                                    cx.emit(DismissEvent);
+                                }))
+                        })
                         .child(
                             h_flex()
                                 .gap(px(8.))
@@ -317,6 +347,12 @@ mod tests {
                         command: "cargo test --workspace".into(),
                     },
                 },
+                AgentEvent::ToolResult {
+                    id: "toolu_bash".into(),
+                    output: Some("Command running in background with ID: bg1. Output is being written to: C:\\Temp\\claude\\tasks\\bg1.output. You will be notified when it completes.".into()),
+                    is_error: false,
+                    diff: None,
+                },
                 AgentEvent::ToolCall {
                     id: "toolu_agent".into(),
                     call: ToolCall::Unknown {
@@ -375,6 +411,11 @@ mod tests {
                 "the command is the title already"
             );
             assert!(rows[0].subagent.is_none(), "commands don't open a subagent");
+            assert_eq!(
+                rows[0].output_file.as_deref(),
+                Some(std::path::Path::new("C:\\Temp\\claude\\tasks\\bg1.output"))
+            );
+            assert!(rows[1].output_file.is_none());
             assert_eq!(rows[1].title.as_ref(), "Scan the repo");
             assert!(rows[1].command.is_none());
             assert_eq!(

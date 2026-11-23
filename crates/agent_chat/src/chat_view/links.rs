@@ -243,7 +243,12 @@ impl ChatView {
         }
     }
 
-    fn open_file(&mut self, target: FileTarget, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_file(
+        &mut self,
+        target: FileTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match self.host.as_ref().and_then(|host| host.upgrade()) {
             Some(host) => host.update(cx, |host, cx| {
                 host.open_file_in_side_pane(target, window, cx)

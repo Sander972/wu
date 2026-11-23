@@ -1,5 +1,4 @@
 {
-  "%b %-d, %-I:%M %p": "%-m月%-d日 %H:%M",
   "/{name} only works in Claude Code in the terminal.": "/{name} 只能在终端里的 Claude Code 中使用。",
   "Add to favorites": "加星标",
   "Agent Chats": "智能体对话",
@@ -154,6 +153,7 @@
   "Show in Folder": "在文件夹中显示",
   "Show less": "收起",
   "Show more": "显示更多",
+  "Show output": "显示输出",
   "Show source": "显示源代码",
   "Side chat of \"{title}\"": "“{title}”的侧边对话",
   "Sifting": "筛选中",
