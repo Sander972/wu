@@ -852,6 +852,7 @@ fn render_remote_button(
     show_fetch_button: bool,
     in_progress_operation: Option<RemoteOperationKind>,
     menu_handle: PopoverMenuHandle<ContextMenu>,
+    opens_up: bool,
 ) -> Option<impl IntoElement> {
     let id = id.into();
     let upstream = branch.upstream.as_ref();
@@ -865,6 +866,7 @@ fn render_remote_button(
                 id,
                 in_progress_operation,
                 menu_handle,
+                opens_up,
             )),
             (0, 0) => None,
             (ahead, 0) => Some(remote_button::render_push_button(
@@ -873,6 +875,7 @@ fn render_remote_button(
                 ahead,
                 in_progress_operation,
                 menu_handle,
+                opens_up,
             )),
             (ahead, behind) => Some(remote_button::render_pull_button(
                 keybinding_target,
@@ -881,6 +884,7 @@ fn render_remote_button(
                 behind,
                 in_progress_operation,
                 menu_handle,
+                opens_up,
             )),
         },
         Some(Upstream {
@@ -891,12 +895,14 @@ fn render_remote_button(
             id,
             in_progress_operation,
             menu_handle,
+            opens_up,
         )),
         None => Some(remote_button::render_publish_button(
             keybinding_target,
             id,
             in_progress_operation,
             menu_handle,
+            opens_up,
         )),
     }
 }
@@ -1015,6 +1021,7 @@ mod remote_button {
         id: SharedString,
         in_progress_operation: Option<RemoteOperationKind>,
         menu_handle: PopoverMenuHandle<ContextMenu>,
+        opens_up: bool,
     ) -> SplitButton {
         split_button(
             id,
@@ -1025,6 +1032,7 @@ mod remote_button {
             keybinding_target.clone(),
             in_progress_operation,
             menu_handle,
+            opens_up,
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Fetch), cx);
             },
@@ -1046,6 +1054,7 @@ mod remote_button {
         ahead: u32,
         in_progress_operation: Option<RemoteOperationKind>,
         menu_handle: PopoverMenuHandle<ContextMenu>,
+        opens_up: bool,
     ) -> SplitButton {
         split_button(
             id,
@@ -1056,6 +1065,7 @@ mod remote_button {
             keybinding_target.clone(),
             in_progress_operation,
             menu_handle,
+            opens_up,
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Push), cx);
             },
@@ -1078,6 +1088,7 @@ mod remote_button {
         behind: u32,
         in_progress_operation: Option<RemoteOperationKind>,
         menu_handle: PopoverMenuHandle<ContextMenu>,
+        opens_up: bool,
     ) -> SplitButton {
         split_button(
             id,
@@ -1088,6 +1099,7 @@ mod remote_button {
             keybinding_target.clone(),
             in_progress_operation,
             menu_handle,
+            opens_up,
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Pull), cx);
             },
@@ -1108,6 +1120,7 @@ mod remote_button {
         id: SharedString,
         in_progress_operation: Option<RemoteOperationKind>,
         menu_handle: PopoverMenuHandle<ContextMenu>,
+        opens_up: bool,
     ) -> SplitButton {
         split_button(
             id,
@@ -1118,6 +1131,7 @@ mod remote_button {
             keybinding_target.clone(),
             in_progress_operation,
             menu_handle,
+            opens_up,
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Push), cx);
             },
@@ -1138,6 +1152,7 @@ mod remote_button {
         id: SharedString,
         in_progress_operation: Option<RemoteOperationKind>,
         menu_handle: PopoverMenuHandle<ContextMenu>,
+        opens_up: bool,
     ) -> SplitButton {
         split_button(
             id,
@@ -1148,6 +1163,7 @@ mod remote_button {
             keybinding_target.clone(),
             in_progress_operation,
             menu_handle,
+            opens_up,
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Push), cx);
             },
@@ -1192,13 +1208,15 @@ mod remote_button {
         id: impl Into<ElementId>,
         keybinding_target: Option<FocusHandle>,
         menu_handle: PopoverMenuHandle<ContextMenu>,
+        opens_up: bool,
     ) -> impl IntoElement {
         let menu_open = menu_handle.is_deployed();
 
         PopoverMenu::new(id.into())
+            // The chevron points toward where the menu opens and flips once it is open, so an upward menu inverts it.
             .trigger(crate::render_split_button_chevron_trigger(
                 "split-button-right",
-                menu_open,
+                menu_open != opens_up,
             ))
             .with_handle(menu_handle)
             .menu(move |window, cx| {
@@ -1218,10 +1236,14 @@ mod remote_button {
                         .action(t!("Force Push"), git::ForcePush.boxed_clone())
                 }))
             })
-            .anchor(Anchor::TopRight)
+            .anchor(if opens_up {
+                Anchor::BottomRight
+            } else {
+                Anchor::TopRight
+            })
             .offset(gpui::Point {
                 x: px(0.),
-                y: px(2.),
+                y: if opens_up { px(-4.) } else { px(2.) },
             })
     }
 
@@ -1235,6 +1257,7 @@ mod remote_button {
         keybinding_target: Option<FocusHandle>,
         in_progress_operation: Option<RemoteOperationKind>,
         menu_handle: PopoverMenuHandle<ContextMenu>,
+        opens_up: bool,
         left_on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
     ) -> SplitButton {
@@ -1305,6 +1328,7 @@ mod remote_button {
             format!("split-button-right-{}", id),
             keybinding_target,
             menu_handle,
+            opens_up,
         )
         .into_any_element();
 

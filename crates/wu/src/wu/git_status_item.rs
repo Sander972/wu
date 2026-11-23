@@ -68,7 +68,7 @@ impl Render for GitStatusItem {
             .read(cx)
             .panel::<GitPanel>(cx)
             .and_then(|git_panel| {
-                git_panel.update(cx, |git_panel, cx| git_panel.render_remote_button(cx))
+                git_panel.update(cx, |git_panel, cx| git_panel.render_remote_button(true, cx))
             });
         h_flex().gap_1().child(git_controls).children(remote_button)
     }
