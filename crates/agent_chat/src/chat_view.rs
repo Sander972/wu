@@ -1625,23 +1625,29 @@ impl ChatView {
         column(row_element, self.gutter()).into_any_element()
     }
 
+    fn render_message_time(&self, at: i64, cx: &Context<Self>) -> Option<AnyElement> {
+        let time = chrono::DateTime::from_timestamp(at, 0).filter(|_| at > 0)?;
+        Some(
+            h_flex()
+                .w_full()
+                .justify_end()
+                .pb(px(SPACE_SM / 2.))
+                .text_size(ui(12.))
+                .text_color(cx.theme().colors().text_muted.opacity(0.55))
+                .child(time.with_timezone(&chrono::Local).format("%H:%M").to_string())
+                .into_any_element(),
+        )
+    }
+
     fn hover_strip(
         &self,
         reveal: StripReveal,
-        at: i64,
         copy: Option<(SharedString, CopySource)>,
         save: Option<SaveTarget>,
         editable: bool,
         align_end: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let timestamp = chrono::DateTime::from_timestamp(at, 0)
-            .filter(|_| at > 0)
-            .map(|time| {
-                time.with_timezone(&chrono::Local)
-                    .format(&t!("%b %-d, %-I:%M %p"))
-                    .to_string()
-            });
         let muted = cx.theme().colors().text_muted;
         h_flex()
             .h(px(SPACE_SM + SPACE_MD * 2.))
@@ -1652,14 +1658,6 @@ impl ChatView {
             .child(
                 reveal
                     .apply(h_flex().gap(px(SPACE_SM)))
-                    .when_some(timestamp, |this, timestamp| {
-                        this.child(
-                            div()
-                                .text_size(ui(12.))
-                                .text_color(muted.opacity(0.55))
-                                .child(timestamp),
-                        )
-                    })
                     .when(editable, |this| {
                         this.child(
                             div()
@@ -1854,6 +1852,7 @@ impl ChatView {
             .group(group.clone())
             .w_full()
             .items_end()
+            .children(self.render_message_time(*at, cx))
             .when(!attachments.is_empty(), |this| {
                 this.child(
                     h_flex()
@@ -1963,7 +1962,6 @@ impl ChatView {
             )
             .child(self.hover_strip(
                 StripReveal::OnGroupHover(group),
-                *at,
                 copy,
                 save,
                 editable,
@@ -2082,9 +2080,10 @@ impl ChatView {
     }
 
     fn render_reply(&self, index: usize, style: MarkdownStyle, cx: &Context<Self>) -> AnyElement {
-        let Some(Entry::Assistant { markdown, .. }) = self.entries(cx).get(index) else {
+        let Some(Entry::Assistant { markdown, at }) = self.entries(cx).get(index) else {
             return div().into_any_element();
         };
+        let time = self.render_message_time(*at, cx);
         let view = cx.entity().downgrade();
         let link_view = view.clone();
         let cwd = self.session.read(cx).metadata().cwd.clone();
@@ -2105,6 +2104,7 @@ impl ChatView {
                 Animation::new(FADE_IN).with_easing(ease_out_quint()),
                 |this, delta| this.opacity(delta),
             )
+            .children(time)
             .child(
                 MarkdownElement::new(markdown.clone(), style)
                     .code_block_renderer(self.code_block_renderer(index, cx))
@@ -2221,13 +2221,6 @@ impl ChatView {
         turn: &Turn,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let last_at = turn
-            .last_reply
-            .and_then(|index| match self.entries(cx).get(index) {
-                Some(Entry::Assistant { at, .. }) => Some(*at),
-                _ => None,
-            })
-            .unwrap_or_default();
         let save = turn
             .first_reply
             .filter(|_| self.subagent.is_none())
@@ -2245,7 +2238,6 @@ impl ChatView {
         let hovered = self.hovered_row.is_some_and(|row| row.turn == turn_index);
         self.hover_strip(
             StripReveal::When(hovered),
-            last_at,
             copy,
             save,
             false,
