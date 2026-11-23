@@ -1,8 +1,9 @@
 use super::ChatView;
 use crate::chat_style::{accent, ink, page, text_faint};
-use gpui::{App, Context};
-use mermaid_render::DiagramTheme;
-use std::ops::Range;
+use collections::HashSet;
+use gpui::{App, Context, ImageSource, Window};
+use mermaid_render::{Diagram, DiagramTheme};
+use std::{ops::Range, sync::Arc};
 use theme::ActiveTheme as _;
 
 pub(super) fn diagram_theme(cx: &App) -> DiagramTheme {
@@ -64,35 +65,96 @@ pub(super) fn mermaid_blocks(markdown: &str) -> Vec<(Range<usize>, String)> {
 }
 
 impl ChatView {
-    pub(super) fn request_visible_diagrams(&mut self, cx: &mut Context<Self>) {
-        let theme = diagram_theme(cx);
-        let generation = self.diagrams.read(cx).generation();
-        if self.diagram_scan.0 != Some((theme.clone(), generation)) {
-            self.diagram_scan.1.clear();
+    pub(super) fn refresh_diagrams(&mut self, cx: &mut Context<Self>) {
+        if self
+            .diagram_theme
+            .as_ref()
+            .is_some_and(|(theme, _)| Arc::ptr_eq(theme, cx.theme()))
+        {
+            return;
         }
-        let mut scanned = Vec::new();
-        let mut sources = Vec::new();
-        for entry in self.entries(cx) {
-            if let crate::session::Entry::Assistant { markdown, .. } = entry {
-                let source = markdown.read(cx).source();
-                let key = (markdown.entity_id(), source.len());
-                if self.diagram_scan.1.get(&key.0) == Some(&key.1) {
-                    continue;
-                }
-                scanned.push(key);
-                if source.contains("```mermaid") {
-                    sources.extend(mermaid_sources(source));
-                }
-            }
+        let colors = diagram_theme(cx);
+        let same_colors = self
+            .diagram_theme
+            .as_ref()
+            .is_some_and(|(_, known)| *known == colors);
+        self.diagram_theme = Some((cx.theme().clone(), colors));
+        if same_colors {
+            return;
         }
-        self.diagram_scan.1.extend(scanned);
+        let sources = self
+            .entries(cx)
+            .iter()
+            .filter_map(|entry| match entry {
+                crate::session::Entry::Assistant { markdown, .. } => {
+                    Some(markdown.read(cx).source())
+                }
+                _ => None,
+            })
+            .filter(|source| source.contains("```mermaid"))
+            .flat_map(|source| mermaid_sources(source))
+            .collect();
+        self.request_diagrams(sources, cx);
+    }
+
+    pub(super) fn request_diagrams(&mut self, sources: Vec<String>, cx: &mut Context<Self>) {
+        let Some((_, theme)) = &self.diagram_theme else {
+            return;
+        };
+        if sources.is_empty() {
+            return;
+        }
         self.diagrams.update(cx, |diagrams, cx| {
             for source in &sources {
-                diagrams.request(source, &theme, cx);
+                diagrams.request(source, theme, cx);
             }
         });
-        let generation = self.diagrams.read(cx).generation();
-        self.diagram_scan.0 = Some((theme, generation));
+        self.diagram_sources.extend(sources);
+    }
+
+    pub(super) fn release_dropped_diagram_images(&mut self, window: &mut Window, cx: &mut App) {
+        let diagrams = self.diagrams.read(cx);
+        let generation = diagrams.generation();
+        if self.diagram_generation == generation {
+            return;
+        }
+        self.diagram_generation = generation;
+        let kept: HashSet<u64> = self
+            .diagram_sources
+            .iter()
+            .filter_map(|source| match diagrams.get(source) {
+                Some(Diagram::Ready { image, .. }) => Some(image.id()),
+                _ => None,
+            })
+            .collect();
+        let dropped: Vec<u64> = self
+            .diagram_images
+            .keys()
+            .filter(|id| !kept.contains(*id))
+            .copied()
+            .collect();
+        for id in dropped {
+            if let Some(image) = self.diagram_images.remove(&id) {
+                ImageSource::Image(image).evict(Some(&mut *window), cx);
+            }
+        }
+    }
+
+    pub(super) fn track_diagram_images(&mut self, cx: &App) {
+        let diagrams = self.diagrams.read(cx);
+        for source in &self.diagram_sources {
+            if let Some(Diagram::Ready { image, .. }) = diagrams.get(source) {
+                self.diagram_images
+                    .entry(image.id())
+                    .or_insert_with(|| image.clone());
+            }
+        }
+    }
+
+    pub(super) fn release_diagram_images(&mut self, cx: &mut App) {
+        for (_, image) in self.diagram_images.drain() {
+            ImageSource::Image(image).evict(None, cx);
+        }
     }
 
     pub(super) fn drawn_diagram_ranges(&self, markdown: &str, cx: &App) -> Vec<Range<usize>> {

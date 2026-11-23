@@ -28,9 +28,9 @@ use std::time::Duration;
 
 use collections::{HashMap, HashSet};
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Edges, Entity,
-    FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hitbox, Hsla, Image,
-    ImageFormat, ImageSource, KeyContext, Length, MouseButton, MouseDownEvent, MouseEvent,
+    AnyElement, App, BorderStyle, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Display,
+    Edges, Entity, FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hitbox, Hsla,
+    Image, ImageFormat, ImageSource, KeyContext, Length, MouseButton, MouseDownEvent, MouseEvent,
     MouseMoveEvent, MouseUpEvent, Point, ScrollHandle, Stateful, StrikethroughStyle,
     StyleRefinement, StyledImage, StyledText, Task, TextAlign, TextLayout, TextRun, TextStyle,
     TextStyleRefinement, WrappedLineLayout, actions, canvas, img, point, quad, relative, size,
@@ -387,6 +387,7 @@ pub struct Markdown {
     images_by_source_offset: HashMap<usize, Arc<Image>>,
     should_reparse: bool,
     pending_parse: Option<Task<()>>,
+    parse_deferred: bool,
     focus_handle: FocusHandle,
     language_registry: Option<Arc<LanguageRegistry>>,
     fallback_code_block_language: Option<LanguageName>,
@@ -573,9 +574,45 @@ impl Markdown {
         options: MarkdownOptions,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut this = Self::unparsed(
+            source,
+            language_registry,
+            fallback_code_block_language,
+            options,
+            cx,
+        );
+        this.parse(cx);
+        this
+    }
+
+    /// Like [`Markdown::new`], but waits to parse until the markdown is first drawn.
+    pub fn new_deferred(
+        source: SharedString,
+        language_registry: Option<Arc<LanguageRegistry>>,
+        fallback_code_block_language: Option<LanguageName>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::unparsed(
+            source,
+            language_registry,
+            fallback_code_block_language,
+            MarkdownOptions::default(),
+            cx,
+        );
+        this.parse_deferred = true;
+        this
+    }
+
+    fn unparsed(
+        source: SharedString,
+        language_registry: Option<Arc<LanguageRegistry>>,
+        fallback_code_block_language: Option<LanguageName>,
+        options: MarkdownOptions,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        let mut this = Self {
+        Self {
             source,
             selection: Selection::default(),
             pressed_link: None,
@@ -588,6 +625,7 @@ impl Markdown {
             images_by_source_offset: Default::default(),
             parsed_markdown: ParsedMarkdown::default(),
             pending_parse: None,
+            parse_deferred: false,
             focus_handle,
             language_registry,
             fallback_code_block_language,
@@ -600,9 +638,7 @@ impl Markdown {
             context_menu_selected_markdown: None,
             search_highlights: Rc::default(),
             active_search_highlight: None,
-        };
-        this.parse(cx);
-        this
+        }
     }
 
     pub fn new_text(source: SharedString, cx: &mut Context<Self>) -> Self {
@@ -673,7 +709,7 @@ impl Markdown {
     }
 
     pub fn is_parsing(&self) -> bool {
-        self.pending_parse.is_some()
+        self.pending_parse.is_some() || self.parse_deferred
     }
 
     pub fn scroll_to_heading_when_parsed(&mut self, slug: SharedString, cx: &mut Context<Self>) {
@@ -928,6 +964,7 @@ impl Markdown {
     }
 
     fn parse(&mut self, cx: &mut Context<Self>) {
+        self.parse_deferred = false;
         if self.source.is_empty() {
             self.should_reparse = false;
             self.pending_parse.take();
@@ -2269,6 +2306,9 @@ impl Element for MarkdownElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
+        if self.markdown.read(cx).parse_deferred {
+            self.markdown.update(cx, |markdown, cx| markdown.parse(cx));
+        }
         let highlights = {
             let markdown = self.markdown.read(cx);
             let colors = cx.theme().colors();
@@ -2489,7 +2529,6 @@ impl Element for MarkdownElement {
 
                                     let code_block = div()
                                         .id(("code-block", range.start))
-                                        .when(hide_code, |code_block| code_block.hidden())
                                         .rounded_lg()
                                         .map(|code_block| {
                                             if let Some(scroll_handle) = scroll_handle.as_ref() {
@@ -2501,7 +2540,9 @@ impl Element for MarkdownElement {
                                             } else {
                                                 code_block.w_full()
                                             }
-                                        });
+                                        })
+                                        // Last, because the scrolling setup above sets the display too.
+                                        .when(hide_code, |code_block| code_block.hidden());
 
                                     builder.push_text_style(self.style.code_block.text.to_owned());
                                     builder.push_code_block(language);
@@ -3494,6 +3535,7 @@ impl MarkdownHighlights {
 struct DivStackEntry {
     div: AnyDiv,
     line_break_mode: LineBreakMode,
+    hidden: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -3504,9 +3546,12 @@ enum LineBreakMode {
 
 impl DivStackEntry {
     fn new(div: impl Into<AnyDiv>) -> Self {
+        let mut div = div.into();
+        let hidden = div.style().display == Some(Display::None);
         Self {
-            div: div.into(),
+            div,
             line_break_mode: LineBreakMode::TextLayout,
+            hidden,
         }
     }
 }
@@ -3907,7 +3952,11 @@ impl MarkdownElementBuilder {
             code_chips: line.code_chips.into_iter().collect(),
             table_bounds: self.table.bounds.clone(),
         });
-        if rendered_line.highlights.is_empty() && rendered_line.code_chips.is_empty() {
+        // Text in a hidden block is never laid out, so it has no position to click or select.
+        let hidden = self.div_stack.iter().any(|entry| entry.hidden);
+        if hidden {
+            self.append_child(text.into_any());
+        } else if rendered_line.highlights.is_empty() && rendered_line.code_chips.is_empty() {
             self.rendered_lines.push(rendered_line);
             self.append_child(text.into_any());
         } else {
@@ -4911,23 +4960,35 @@ mod tests {
         struct PreviewMarkdown {
             markdown: Entity<Markdown>,
             seen: Arc<std::sync::Mutex<Vec<String>>>,
+            hide_code: bool,
+            scrolls_sideways: bool,
         }
 
         impl Render for PreviewMarkdown {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 let seen = self.seen.clone();
-                MarkdownElement::new(self.markdown.clone(), MarkdownStyle::default())
-                    .code_block_preview(move |kind, code, _, _| {
-                        seen.lock().expect("lock").push(code.to_string());
-                        matches!(kind, CodeBlockKind::FencedLang(language) if language.as_ref() == "mermaid")
-                            .then(|| CodeBlockPreview {
-                                element: div()
-                                    .size(px(10.))
-                                    .debug_selector(|| "code-block-preview".into())
-                                    .into_any_element(),
-                                hide_code: true,
-                            })
-                    })
+                let hide_code = self.hide_code;
+                let style = MarkdownStyle {
+                    code_block_overflow_x_scroll: self.scrolls_sideways,
+                    ..Default::default()
+                };
+                div()
+                    .debug_selector(|| "previewed-markdown".into())
+                    .child(
+                        MarkdownElement::new(self.markdown.clone(), style).code_block_preview(
+                            move |kind, code, _, _| {
+                                seen.lock().expect("lock").push(code.to_string());
+                                matches!(kind, CodeBlockKind::FencedLang(language) if language.as_ref() == "mermaid")
+                                    .then(|| CodeBlockPreview {
+                                        element: div()
+                                            .size(px(10.))
+                                            .debug_selector(|| "code-block-preview".into())
+                                            .into_any_element(),
+                                        hide_code,
+                                    })
+                            },
+                        ),
+                    )
             }
         }
 
@@ -4942,16 +5003,32 @@ mod tests {
             )
         });
         cx.run_until_parked();
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        cx.draw(Default::default(), size(px(600.0), px(600.0)), |_, cx| {
-            cx.new(|_| PreviewMarkdown {
-                markdown: markdown.clone(),
-                seen: seen.clone(),
-            })
-            .into_any_element()
-        });
-        assert_eq!(*seen.lock().expect("lock"), ["flowchart TD\n"]);
-        assert!(cx.debug_bounds("code-block-preview").is_some());
+        for scrolls_sideways in [false, true] {
+            let mut heights = Vec::new();
+            for hide_code in [true, false] {
+                let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+                cx.draw(Default::default(), size(px(600.0), px(600.0)), |_, cx| {
+                    cx.new(|_| PreviewMarkdown {
+                        markdown: markdown.clone(),
+                        seen: seen.clone(),
+                        hide_code,
+                        scrolls_sideways,
+                    })
+                    .into_any_element()
+                });
+                assert_eq!(*seen.lock().expect("lock"), ["flowchart TD\n"]);
+                assert!(cx.debug_bounds("code-block-preview").is_some());
+                let drawn = cx
+                    .debug_bounds("previewed-markdown")
+                    .expect("markdown is drawn");
+                cx.simulate_click(drawn.center(), gpui::Modifiers::default());
+                heights.push(drawn.size.height);
+            }
+            assert!(
+                heights[0] < heights[1],
+                "hidden code takes no room (sideways scrolling: {scrolls_sideways}): {heights:?}"
+            );
+        }
     }
 
     #[gpui::test]
@@ -5007,6 +5084,35 @@ mod tests {
 
     fn render_markdown(markdown: &str, cx: &mut TestAppContext) -> RenderedText {
         render_markdown_with_language_registry(markdown, None, cx)
+    }
+
+    #[gpui::test]
+    fn test_deferred_markdown_parses_when_first_drawn(cx: &mut TestAppContext) {
+        struct TestWindow;
+
+        impl Render for TestWindow {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        let markdown = cx.new(|cx| Markdown::new_deferred("**bold**".into(), None, None, cx));
+        cx.run_until_parked();
+        markdown.read_with(cx, |markdown, _| {
+            assert!(markdown.is_parsing());
+            assert!(markdown.parsed_markdown().source().is_empty());
+        });
+
+        cx.draw(Default::default(), size(px(600.0), px(600.0)), |_, _| {
+            MarkdownElement::new(markdown.clone(), MarkdownStyle::default()).into_any_element()
+        });
+        cx.run_until_parked();
+        markdown.read_with(cx, |markdown, _| {
+            assert!(!markdown.is_parsing());
+            assert_eq!(markdown.parsed_markdown().source().as_ref(), "**bold**");
+        });
     }
 
     #[gpui::test]

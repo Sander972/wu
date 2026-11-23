@@ -1222,6 +1222,7 @@ pub enum AgentChatAgent {
     Codex,
     #[strum(serialize = "OpenCode")]
     Opencode,
+    Antigravity,
 }
 
 #[with_fallible_options]
@@ -1233,6 +1234,8 @@ pub struct AgentChatDefaultPermissionContent {
     pub codex: Option<CodexPermissionDefault>,
     /// Default: "auto"
     pub opencode: Option<OpencodePermissionDefault>,
+    /// Default: "auto"
+    pub antigravity: Option<AntigravityPermissionDefault>,
 }
 
 #[with_fallible_options]
@@ -1244,6 +1247,8 @@ pub struct AgentChatAgentsContent {
     pub codex: Option<bool>,
     /// Default: true
     pub opencode: Option<bool>,
+    /// Default: true
+    pub antigravity: Option<bool>,
 }
 
 #[with_fallible_options]
@@ -1343,6 +1348,31 @@ pub enum CodexPermissionDefault {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum OpencodePermissionDefault {
+    Ask,
+    #[strum(serialize = "Accept Edits")]
+    AcceptEdits,
+    #[default]
+    Auto,
+    #[strum(serialize = "Full Access")]
+    FullAccess,
+}
+
+#[with_fallible_options]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    Default,
+    PartialEq,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AntigravityPermissionDefault {
     Ask,
     #[strum(serialize = "Accept Edits")]
     AcceptEdits,
