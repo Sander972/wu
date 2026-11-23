@@ -58,3 +58,7 @@ xcuserdata/
 /video
 /notes
 .cache
+
+# Windows build dependencies downloaded locally
+/AGS_SDK-6.3.0/
+/conpty/
