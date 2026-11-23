@@ -62,3 +62,5 @@ xcuserdata/
 # Windows build dependencies downloaded locally
 /AGS_SDK-6.3.0/
 /conpty/
+AGS_SDK_v6.3.0.zip
+Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg
