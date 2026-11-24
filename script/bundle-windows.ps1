@@ -3,7 +3,7 @@ Param(
     [Parameter()][Alias('i')][switch]$Install,
     [Parameter()][Alias('h')][switch]$Help,
     [Parameter()][Alias('a')][string]$Architecture,
-    [Parameter()][Alias('c')][string]$Channel
+    [Parameter()][Alias('c')][ValidateSet('dev', 'stable')][string]$Channel
 )
 
 # https://stackoverflow.com/questions/57949031/powershell-script-stops-if-program-fails-like-bash-set-o-errexit
@@ -61,7 +61,8 @@ $workspace = (Resolve-Path "$PSScriptRoot\..").Path
 $env:ZED_WORKSPACE = $workspace
 
 Push-Location -Path "$workspace\crates\wu"
-$channel = if ($Channel) { $Channel } else { Get-Content "RELEASE_CHANNEL" }
+# ValidateSet ignores case, but the binary only accepts a lowercase channel name.
+$channel = if ($Channel) { $Channel.ToLowerInvariant() } else { Get-Content "RELEASE_CHANNEL" }
 $env:ZED_RELEASE_CHANNEL = $channel
 $env:RELEASE_CHANNEL = $channel
 Pop-Location
