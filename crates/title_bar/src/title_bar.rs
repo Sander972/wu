@@ -405,33 +405,27 @@ impl Render for TitleBar {
         );
 
         if show_menus {
+            // Equal-growth side columns keep the project items centered in a single title bar row.
+            let mut children = children.into_iter();
+            let project_items = children.next();
+            let row = [
+                h_flex()
+                    .flex_1()
+                    .children(self.application_menu.clone())
+                    .into_any_element(),
+            ]
+            .into_iter()
+            .chain(project_items)
+            .chain([h_flex()
+                .flex_1()
+                .justify_end()
+                .children(children)
+                .into_any_element()]);
             self.platform_titlebar.update(cx, |this, _| {
                 this.set_button_layout(button_layout);
-                this.set_children(
-                    self.application_menu
-                        .clone()
-                        .map(|menu| menu.into_any_element()),
-                );
+                this.set_children(row);
             });
-
-            let height = platform_title_bar_height(window);
-            let title_bar_color = self.platform_titlebar.update(cx, |platform_titlebar, cx| {
-                platform_titlebar.title_bar_color(window, cx)
-            });
-
-            v_flex()
-                .w_full()
-                .child(self.platform_titlebar.clone().into_any_element())
-                .child(
-                    h_flex()
-                        .bg(title_bar_color)
-                        .h(height)
-                        .pl_2()
-                        .justify_between()
-                        .w_full()
-                        .children(children),
-                )
-                .into_any_element()
+            self.platform_titlebar.clone().into_any_element()
         } else {
             self.platform_titlebar.update(cx, |this, _| {
                 this.set_button_layout(button_layout);
