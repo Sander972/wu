@@ -4225,6 +4225,7 @@ impl Render for SettingsWindow {
         client_side_decorations(
             v_flex()
                 .text_color(cx.theme().colors().text)
+                .bg(cx.theme().colors().background)
                 .size_full()
                 .children(self.title_bar.clone())
                 .child(
