@@ -33,10 +33,7 @@ use settings::Settings as _;
 use std::path::Path;
 use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
-use ui::{
-    ButtonLike, IconWithIndicator, Indicator, PopoverMenu, TintColor, Tooltip, prelude::*,
-    utils::platform_title_bar_height,
-};
+use ui::{ButtonLike, IconWithIndicator, Indicator, PopoverMenu, TintColor, Tooltip, prelude::*};
 use update_version::UpdateVersion;
 use util::ResultExt;
 use workspace::{
@@ -407,13 +404,19 @@ impl Render for TitleBar {
         if show_menus {
             // Equal-growth side columns keep the project items centered in a single title bar row.
             let mut children = children.into_iter();
-            let project_items = children.next();
-            let row = [
+            // The project items clip instead of pushing the menus and update button under the window controls.
+            let project_items = children.next().map(|items| {
                 h_flex()
-                    .flex_1()
-                    .children(self.application_menu.clone())
-                    .into_any_element(),
-            ]
+                    .h_full()
+                    .min_w_0()
+                    .overflow_x_hidden()
+                    .child(items)
+                    .into_any_element()
+            });
+            let row = [h_flex()
+                .flex_1()
+                .children(self.application_menu.clone())
+                .into_any_element()]
             .into_iter()
             .chain(project_items)
             .chain([h_flex()
