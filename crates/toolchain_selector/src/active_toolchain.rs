@@ -276,4 +276,8 @@ impl StatusItemView for ActiveToolchain {
         // language with toolchain support.
         None
     }
+
+    fn status_bar_item(&self, _: &App) -> workspace::StatusBarItem {
+        workspace::StatusBarItem::Toolchain
+    }
 }

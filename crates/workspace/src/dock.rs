@@ -1692,6 +1692,14 @@ impl StatusItemView for PanelButtons {
         // button's own context menu.
         None
     }
+
+    fn status_bar_item(&self, cx: &App) -> crate::StatusBarItem {
+        match self.dock.read(cx).position() {
+            DockPosition::Left => crate::StatusBarItem::LeftDock,
+            DockPosition::Right => crate::StatusBarItem::RightDock,
+            DockPosition::Bottom => crate::StatusBarItem::BottomDock,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]

@@ -1,9 +1,13 @@
 use git_ui::git_panel::GitPanel;
-use gpui::{App, Context, IntoElement, ParentElement, Render, Subscription, WeakEntity, Window};
-use project::git_store::GitStoreEvent;
+use gpui::{
+    Action as _, App, Context, Entity, IntoElement, ParentElement, Render, Subscription,
+    WeakEntity, Window,
+};
+use i18n::t;
+use project::{Project, git_store::GitStoreEvent};
 use settings::Settings as _;
 use title_bar::TitleBar;
-use ui::prelude::*;
+use ui::{Tooltip, prelude::*};
 use workspace::{HideStatusItem, StatusBarSettings, StatusItemView, Workspace, item::ItemHandle};
 
 /// Worktree and branch pickers plus the Fetch/Push/Pull button, shown in the status bar.
@@ -89,5 +93,73 @@ impl StatusItemView for GitStatusItem {
         Some(HideStatusItem::new(|settings| {
             settings.status_bar.get_or_insert_default().git_controls = Some(false);
         }))
+    }
+
+    fn status_bar_item(&self, _: &App) -> workspace::StatusBarItem {
+        workspace::StatusBarItem::Git
+    }
+
+    fn is_visible(&self, cx: &App) -> bool {
+        StatusBarSettings::get_global(cx).git_controls
+    }
+}
+
+/// Opens the git graph; shown in the status bar while the project has a repository.
+pub struct GitGraphButton {
+    project: Entity<Project>,
+    _subscription: Subscription,
+}
+
+impl GitGraphButton {
+    pub fn new(workspace: &Workspace, cx: &mut Context<Self>) -> Self {
+        let project = workspace.project().clone();
+        let git_store = project.read(cx).git_store().clone();
+        let subscription = cx.subscribe(&git_store, |_, _, event, cx| {
+            if let GitStoreEvent::ActiveRepositoryChanged(_) = event {
+                cx.notify();
+            }
+        });
+        Self {
+            project,
+            _subscription: subscription,
+        }
+    }
+}
+
+impl Render for GitGraphButton {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        IconButton::new("status-bar-git-graph", IconName::GitGraph)
+            .icon_size(IconSize::Small)
+            .tooltip(|_window, cx| {
+                Tooltip::for_action(t!("Open Git Graph"), &git_ui::git_graph::Open, cx)
+            })
+            .on_click(|_, window, cx| {
+                window.dispatch_action(git_ui::git_graph::Open.boxed_clone(), cx)
+            })
+    }
+}
+
+impl StatusItemView for GitGraphButton {
+    fn set_active_pane_item(
+        &mut self,
+        _active_pane_item: Option<&dyn ItemHandle>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+
+    fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
+        Some(HideStatusItem::new(|settings| {
+            settings.status_bar.get_or_insert_default().git_graph_button = Some(false);
+        }))
+    }
+
+    fn status_bar_item(&self, _: &App) -> workspace::StatusBarItem {
+        workspace::StatusBarItem::GitGraph
+    }
+
+    fn is_visible(&self, cx: &App) -> bool {
+        StatusBarSettings::get_global(cx).git_graph_button
+            && self.project.read(cx).active_repository(cx).is_some()
     }
 }

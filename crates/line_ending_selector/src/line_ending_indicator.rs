@@ -80,4 +80,8 @@ impl StatusItemView for LineEndingIndicator {
                 .line_endings_button = Some(false);
         }))
     }
+
+    fn status_bar_item(&self, _: &App) -> workspace::StatusBarItem {
+        workspace::StatusBarItem::LineEndings
+    }
 }

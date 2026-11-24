@@ -238,7 +238,10 @@ pub struct StatusBarSettings {
     pub line_endings_button: bool,
     pub git_controls: bool,
     pub worktree_button: bool,
+    pub git_graph_button: bool,
     pub active_encoding_button: EncodingDisplayOptions,
+    pub left_items: Vec<settings::StatusBarItem>,
+    pub right_items: Vec<settings::StatusBarItem>,
 }
 
 impl Settings for StatusBarSettings {
@@ -252,7 +255,10 @@ impl Settings for StatusBarSettings {
             line_endings_button: status_bar.line_endings_button.unwrap(),
             git_controls: status_bar.git_controls.unwrap(),
             worktree_button: status_bar.worktree_button.unwrap(),
+            git_graph_button: status_bar.git_graph_button.unwrap(),
             active_encoding_button: status_bar.active_encoding_button.unwrap(),
+            left_items: status_bar.left_items.unwrap(),
+            right_items: status_bar.right_items.unwrap(),
         }
     }
 }

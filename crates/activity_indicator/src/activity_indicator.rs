@@ -901,4 +901,8 @@ impl StatusItemView for ActivityIndicator {
         // Activity indicator auto-hides when there's no work to display.
         None
     }
+
+    fn status_bar_item(&self, _: &App) -> workspace::StatusBarItem {
+        workspace::StatusBarItem::ActivityIndicator
+    }
 }

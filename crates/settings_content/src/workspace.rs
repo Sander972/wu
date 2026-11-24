@@ -619,10 +619,43 @@ pub struct StatusBarSettingsContent {
     ///
     /// Default: true
     pub worktree_button: Option<bool>,
+    /// Whether to show the git graph button in the status bar.
+    ///
+    /// Default: true
+    pub git_graph_button: Option<bool>,
     /// Whether to show the active encoding button in the status bar.
     ///
     /// Default: non_utf8
     pub active_encoding_button: Option<EncodingDisplayOptions>,
+    /// Items pinned to the left side of the status bar, in left-to-right order. Pinned items sit at the left edge; unlisted items keep their default side and order.
+    ///
+    /// Default: []
+    pub left_items: Option<Vec<StatusBarItem>>,
+    /// Items pinned to the right side of the status bar, in left-to-right order. Pinned items sit at the right edge; unlisted items keep their default side and order. An item listed in both lists goes left.
+    ///
+    /// Default: ["language_server"]
+    pub right_items: Option<Vec<StatusBarItem>>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusBarItem {
+    LeftDock,
+    RightDock,
+    BottomDock,
+    Diagnostics,
+    Git,
+    GitGraph,
+    LanguageServer,
+    ActiveFile,
+    GitBlame,
+    ActivityIndicator,
+    Encoding,
+    Language,
+    Toolchain,
+    LineEndings,
+    CursorPosition,
+    ImageInfo,
 }
 
 #[derive(

@@ -108,4 +108,8 @@ impl StatusItemView for ImageInfo {
         // The image info is only visible when an image viewer item is active.
         None
     }
+
+    fn status_bar_item(&self, _: &App) -> workspace::StatusBarItem {
+        workspace::StatusBarItem::ImageInfo
+    }
 }

@@ -1653,8 +1653,15 @@
     "git_controls": true,
     // Whether to show the git worktree picker in the status bar. Only applies when `git_controls` is enabled.
     "worktree_button": true,
+    // Whether to show the git graph button in the status bar.
+    "git_graph_button": true,
     // Control when to show the active encoding in the status bar.
     "active_encoding_button": "non_utf8",
+    // Items pinned to the left edge of the status bar, in left-to-right order. Unlisted items keep their default side and order.
+    // Available items: "left_dock", "right_dock", "bottom_dock", "diagnostics", "git", "git_graph", "language_server", "active_file", "git_blame", "activity_indicator", "encoding", "language", "toolchain", "line_endings", "cursor_position", "image_info".
+    "left_items": [],
+    // Items pinned to the right edge of the status bar, in left-to-right order. An item listed in both lists goes left.
+    "right_items": ["language_server"],
   },
   // Settings specific to the terminal
   "terminal": {

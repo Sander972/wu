@@ -316,6 +316,10 @@ impl StatusItemView for CursorPosition {
                 .cursor_position_button = Some(false);
         }))
     }
+
+    fn status_bar_item(&self, _: &App) -> workspace::StatusBarItem {
+        workspace::StatusBarItem::CursorPosition
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, RegisterSetting)]

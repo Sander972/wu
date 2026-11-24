@@ -3412,9 +3412,9 @@ fn search_and_files_page() -> SettingsPage {
 }
 
 fn window_and_layout_page() -> SettingsPage {
-    fn activity_bar_section() -> [SettingsPageItem; 4] {
+    fn activity_bar_section() -> [SettingsPageItem; 5] {
         [
-            SettingsPageItem::SectionHeader(n!("Activity Bar")),
+            SettingsPageItem::SectionHeader(n!("Side Bar (Activity Bar)")),
             SettingsPageItem::SettingItem(SettingItem {
                 title: n!("Show Activity Bar"),
                 description: n!(
@@ -3466,15 +3466,9 @@ fn window_and_layout_page() -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
-        ]
-    }
-
-    fn status_bar_section() -> [SettingsPageItem; 12] {
-        [
-            SettingsPageItem::SectionHeader(n!("Status Bar")),
             SettingsPageItem::SettingItem(SettingItem {
                 title: n!("Project Panel Button"),
-                description: n!("Show the project panel button in the status bar."),
+                description: n!("Show the project panel button."),
                 field: Box::new(SettingField {
                     json_path: Some("project_panel.button"),
                     pick: |settings_content| {
@@ -3490,6 +3484,12 @@ fn window_and_layout_page() -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
+        ]
+    }
+
+    fn status_bar_section() -> [SettingsPageItem; 14] {
+        [
+            SettingsPageItem::SectionHeader(n!("Bottom Bar (Status Bar)")),
             SettingsPageItem::SettingItem(SettingItem {
                 title: n!("Active Language Button"),
                 description: n!("Show the active language button in the status bar."),
@@ -3617,6 +3617,24 @@ fn window_and_layout_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Git Graph Button"),
+                description: n!("Show the git graph button in the status bar."),
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.git_graph_button"),
+                    pick: |settings_content| {
+                        settings_content.status_bar.as_ref()?.git_graph_button.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .git_graph_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: n!("Terminal Button"),
                 description: n!("Show the terminal button in the status bar."),
                 field: Box::new(SettingField {
@@ -3677,12 +3695,52 @@ fn window_and_layout_page() -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Left Items Order"),
+                description: n!(
+                    "Items pinned to the left edge of the status bar, in left-to-right order. Unlisted items keep their default side and order."
+                ),
+                field: Box::new(
+                    SettingField {
+                        json_path: Some("status_bar.left_items"),
+                        pick: |settings_content| {
+                            settings_content.status_bar.as_ref()?.left_items.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.status_bar.get_or_insert_default().left_items = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Right Items Order"),
+                description: n!(
+                    "Items pinned to the right edge of the status bar, in left-to-right order. Unlisted items keep their default side and order."
+                ),
+                field: Box::new(
+                    SettingField {
+                        json_path: Some("status_bar.right_items"),
+                        pick: |settings_content| {
+                            settings_content.status_bar.as_ref()?.right_items.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.status_bar.get_or_insert_default().right_items = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
         ]
     }
 
     fn title_bar_section() -> [SettingsPageItem; 8] {
         [
-            SettingsPageItem::SectionHeader(n!("Title Bar")),
+            SettingsPageItem::SectionHeader(n!("Top Bar (Title Bar)")),
             SettingsPageItem::SettingItem(SettingItem {
                 title: n!("Show Branch Status Icon"),
                 description: n!("Show git status indicators on the branch icon in the titlebar."),
@@ -4638,8 +4696,8 @@ fn window_and_layout_page() -> SettingsPage {
         title: n!("Window & Layout"),
         items: concat_sections![
             activity_bar_section(),
-            status_bar_section(),
             title_bar_section(),
+            status_bar_section(),
             tab_bar_section(),
             tab_settings_section(),
             preview_tabs_section(),

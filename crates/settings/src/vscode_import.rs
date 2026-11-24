@@ -784,7 +784,10 @@ impl VsCodeSettings {
             line_endings_button: None,
             git_controls: None,
             worktree_button: None,
+            git_graph_button: None,
             active_encoding_button: None,
+            left_items: None,
+            right_items: None,
         })
     }
 

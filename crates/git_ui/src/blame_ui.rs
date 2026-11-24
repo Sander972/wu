@@ -131,6 +131,10 @@ impl workspace::StatusItemView for GitBlameStatus {
     fn hide_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
         None
     }
+
+    fn status_bar_item(&self, _: &App) -> workspace::StatusBarItem {
+        workspace::StatusBarItem::GitBlame
+    }
 }
 
 impl BlameRenderer for GitBlameRenderer {

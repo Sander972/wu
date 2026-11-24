@@ -114,6 +114,7 @@ use settings::{
 };
 
 use activity_bar::ActivityBar;
+pub use settings::StatusBarItem;
 use sqlez::{
     bindable::{Bind, Column, StaticColumnCount},
     statement::Statement,

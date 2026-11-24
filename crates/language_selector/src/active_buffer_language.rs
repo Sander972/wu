@@ -97,4 +97,8 @@ impl StatusItemView for ActiveBufferLanguage {
                 .active_language_button = Some(false);
         }))
     }
+
+    fn status_bar_item(&self, _: &App) -> workspace::StatusBarItem {
+        workspace::StatusBarItem::Language
+    }
 }

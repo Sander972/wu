@@ -1,10 +1,10 @@
-use crate::{ItemHandle, MultiWorkspace, Pane};
+use crate::{ItemHandle, MultiWorkspace, Pane, StatusBarSettings};
 use gpui::{
     AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement, ParentElement,
     Render, Role, SharedString, Styled, Subscription, WeakEntity, Window,
 };
 use i18n::t;
-use settings::{SettingsContent, update_settings_file};
+use settings::{Settings, SettingsContent, StatusBarItem, update_settings_file};
 use std::{any::TypeId, sync::Arc};
 use theme::CLIENT_SIDE_DECORATION_ROUNDING;
 use ui::{ContextMenu, IconPosition, prelude::*, right_click_menu};
@@ -54,6 +54,14 @@ pub trait StatusItemView: Render {
     /// that the status bar can show a "Hide Button" entry in its
     /// right-click menu.
     fn hide_setting(&self, cx: &App) -> Option<HideStatusItem>;
+
+    /// Identifies the item in the `status_bar.left_items` / `status_bar.right_items` settings.
+    fn status_bar_item(&self, cx: &App) -> StatusBarItem;
+
+    /// Hidden items are left out of the status bar entirely, so they don't leave an empty gap.
+    fn is_visible(&self, _cx: &App) -> bool {
+        true
+    }
 }
 
 trait StatusItemViewHandle: Send {
@@ -66,6 +74,8 @@ trait StatusItemViewHandle: Send {
     );
     fn item_type(&self) -> TypeId;
     fn hide_setting(&self, cx: &App) -> Option<HideStatusItem>;
+    fn status_bar_item(&self, cx: &App) -> StatusBarItem;
+    fn is_visible(&self, cx: &App) -> bool;
 }
 
 pub struct StatusBar {
@@ -146,40 +156,95 @@ impl Render for StatusBar {
                     .border_b(px(1.0))
                     .border_color(cx.theme().colors().status_bar_background),
             })
-            .child(self.render_left_tools(cx))
-            .child(self.render_right_tools(cx))
+            .map(|el| {
+                let (left, right) = self.arranged_items(cx);
+                el.child(self.render_left_tools(left, cx))
+                    .child(self.render_right_tools(right, cx))
+            })
     }
 }
 
 impl StatusBar {
-    fn render_left_tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_left_tools(
+        &self,
+        left: Vec<&dyn StatusItemViewHandle>,
+        cx: &App,
+    ) -> impl IntoElement {
         h_flex().gap_1().min_w_0().overflow_x_hidden().children(
-            self.left_items.iter().enumerate().map(|(index, item)| {
-                render_hideable_item("status-bar-left", index, item.as_ref(), cx)
-            }),
+            left.into_iter()
+                .filter(|item| item.is_visible(cx))
+                .map(|item| render_hideable_item("status-bar-left", item, cx)),
         )
     }
 
-    fn render_right_tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_right_tools(
+        &self,
+        right: Vec<&dyn StatusItemViewHandle>,
+        cx: &App,
+    ) -> impl IntoElement {
         h_flex()
             .flex_shrink_0()
             .gap_1()
             .overflow_x_hidden()
             .children(
-                self.right_items
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .map(|(index, item)| {
-                        render_hideable_item("status-bar-right", index, item.as_ref(), cx)
-                    }),
+                right
+                    .into_iter()
+                    .filter(|item| item.is_visible(cx))
+                    .map(|item| render_hideable_item("status-bar-right", item, cx)),
             )
+    }
+
+    /// Returns the left and right items in visual left-to-right order: items pinned via settings sit at the outer edges, the rest keep their registered side and order.
+    fn arranged_items(
+        &self,
+        cx: &App,
+    ) -> (
+        Vec<&dyn StatusItemViewHandle>,
+        Vec<&dyn StatusItemViewHandle>,
+    ) {
+        let settings = StatusBarSettings::get_global(cx);
+        let registered = self.left_items.iter().chain(self.right_items.iter());
+        let pinned =
+            |list: &[StatusBarItem], skip: &[StatusBarItem]| -> Vec<&dyn StatusItemViewHandle> {
+                list.iter()
+                    .enumerate()
+                    .filter(|(index, key)| !skip.contains(key) && !list[..*index].contains(key))
+                    .flat_map(|(_, key)| {
+                        registered
+                            .clone()
+                            .filter(move |item| item.status_bar_item(cx) == *key)
+                            .map(|item| item.as_ref())
+                    })
+                    .collect()
+            };
+        let is_pinned = |item: &&Box<dyn StatusItemViewHandle>| {
+            let key = item.status_bar_item(cx);
+            settings.left_items.contains(&key) || settings.right_items.contains(&key)
+        };
+
+        let mut left = pinned(&settings.left_items, &[]);
+        left.extend(
+            self.left_items
+                .iter()
+                .filter(|item| !is_pinned(item))
+                .map(|item| item.as_ref()),
+        );
+
+        // Right items are registered from the right edge inward, hence the reversal.
+        let mut right: Vec<&dyn StatusItemViewHandle> = self
+            .right_items
+            .iter()
+            .rev()
+            .filter(|item| !is_pinned(item))
+            .map(|item| item.as_ref())
+            .collect();
+        right.extend(pinned(&settings.right_items, &settings.left_items));
+        (left, right)
     }
 }
 
 fn render_hideable_item(
     side: &'static str,
-    index: usize,
     item: &dyn StatusItemViewHandle,
     cx: &App,
 ) -> impl IntoElement {
@@ -188,7 +253,7 @@ fn render_hideable_item(
         return view.into_any_element();
     };
 
-    let menu_id: SharedString = format!("{side}-item-menu-{index}").into();
+    let menu_id: SharedString = format!("{side}-item-menu-{}", view.entity_id()).into();
     right_click_menu(menu_id)
         .trigger(move |_is_active, _window, _cx| view)
         .menu(move |window, cx| {
@@ -384,6 +449,14 @@ impl<T: StatusItemView> StatusItemViewHandle for Entity<T> {
 
     fn hide_setting(&self, cx: &App) -> Option<HideStatusItem> {
         self.read(cx).hide_setting(cx)
+    }
+
+    fn status_bar_item(&self, cx: &App) -> StatusBarItem {
+        self.read(cx).status_bar_item(cx)
+    }
+
+    fn is_visible(&self, cx: &App) -> bool {
+        self.read(cx).is_visible(cx)
     }
 }
 

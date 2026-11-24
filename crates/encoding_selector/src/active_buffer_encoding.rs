@@ -136,4 +136,8 @@ impl StatusItemView for ActiveBufferEncoding {
                 .active_encoding_button = Some(EncodingDisplayOptions::Disabled);
         }))
     }
+
+    fn status_bar_item(&self, _: &App) -> workspace::StatusBarItem {
+        workspace::StatusBarItem::Encoding
+    }
 }

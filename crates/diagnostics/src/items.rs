@@ -266,6 +266,10 @@ impl StatusItemView for DiagnosticIndicator {
             settings.diagnostics.get_or_insert_default().button = Some(false);
         }))
     }
+
+    fn status_bar_item(&self, _: &App) -> workspace::StatusBarItem {
+        workspace::StatusBarItem::Diagnostics
+    }
 }
 
 fn error_count_text(count: usize) -> SharedString {
