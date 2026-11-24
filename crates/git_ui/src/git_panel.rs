@@ -10512,6 +10512,16 @@ impl RenderOnce for PanelRepoFooter {
                     })
                     .child(div().child(branch_selector).min_w_0()),
             )
+            .child(
+                IconButton::new("footer-git-graph-button", IconName::GitGraph)
+                    .icon_size(IconSize::Small)
+                    .tooltip(|_window, cx| {
+                        Tooltip::for_action(t!("Open Git Graph"), &crate::git_graph::Open, cx)
+                    })
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(crate::git_graph::Open.boxed_clone(), cx)
+                    }),
+            )
             .children(if let Some(git_panel) = self.git_panel {
                 git_panel.update(cx, |git_panel, cx| {
                     git_panel.render_remote_button(false, cx)
