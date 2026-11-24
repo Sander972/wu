@@ -2,7 +2,8 @@
 Param(
     [Parameter()][Alias('i')][switch]$Install,
     [Parameter()][Alias('h')][switch]$Help,
-    [Parameter()][Alias('a')][string]$Architecture
+    [Parameter()][Alias('a')][string]$Architecture,
+    [Parameter()][Alias('c')][string]$Channel
 )
 
 # https://stackoverflow.com/questions/57949031/powershell-script-stops-if-program-fails-like-bash-set-o-errexit
@@ -39,10 +40,11 @@ function Get-VSArch {
 $target = "$Architecture-pc-windows-msvc"
 
 if ($Help) {
-    Write-Output "Usage: bundle-windows.ps1 [-Architecture x86_64|aarch64] [-Install] [-Help]"
+    Write-Output "Usage: bundle-windows.ps1 [-Architecture x86_64|aarch64] [-Channel dev|stable] [-Install] [-Help]"
     Write-Output "Build the installer for Windows."
     Write-Output "Options:"
     Write-Output "  -Architecture, -a Which architecture to build (x86_64 or aarch64)"
+    Write-Output "  -Channel, -c      Release channel to build (dev or stable), defaults to crates/wu/RELEASE_CHANNEL"
     Write-Output "  -Install, -i      Run the installer after building."
     Write-Output "  -Help, -h         Show this help message."
     exit 0
@@ -59,7 +61,7 @@ $workspace = (Resolve-Path "$PSScriptRoot\..").Path
 $env:ZED_WORKSPACE = $workspace
 
 Push-Location -Path "$workspace\crates\wu"
-$channel = Get-Content "RELEASE_CHANNEL"
+$channel = if ($Channel) { $Channel } else { Get-Content "RELEASE_CHANNEL" }
 $env:ZED_RELEASE_CHANNEL = $channel
 $env:RELEASE_CHANNEL = $channel
 Pop-Location
