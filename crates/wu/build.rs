@@ -85,6 +85,8 @@ fn main() {
             println!("cargo:rustc-link-arg=/stack:{}", 8 * 1024 * 1024);
             println!("cargo:rustc-link-arg=/DELAYLOAD:windowsperformancerecordercontrol");
             println!("cargo:rustc-link-lib=delayimp");
+            // tree-sitter's C code declares the wasmtime C API as dllimport, but wasmtime is linked statically; the link resolves fine, so silence LNK4217.
+            println!("cargo:rustc-link-arg=/IGNORE:4217");
         }
 
         if cfg!(target_arch = "x86_64") || cfg!(target_arch = "aarch64") {
@@ -123,15 +125,15 @@ fn main() {
                 Ok(output) if output.status.success() => {
                     println!("Downloaded conpty nupkg successfully");
 
-                    let extract_script = format!(
-                        "$ProgressPreference = 'SilentlyContinue'; Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-                        nupkg_path.display(),
-                        extract_dir.display()
-                    );
-
-                    let extract_result = Command::new("powershell")
-                        .args(["-NoProfile", "-NonInteractive", "-Command", &extract_script])
-                        .output();
+                    // Expand-Archive exits successfully but extracts nothing when cargo runs under pwsh 7, so use the bsdtar that ships in System32 (it reads .zip).
+                    let extract_result = std::fs::create_dir_all(&extract_dir).and_then(|()| {
+                        Command::new("tar")
+                            .arg("-xf")
+                            .arg(&nupkg_path)
+                            .arg("-C")
+                            .arg(&extract_dir)
+                            .output()
+                    });
 
                     match extract_result {
                         Ok(output) if output.status.success() => {
@@ -181,7 +183,7 @@ fn main() {
                         }
                         Err(e) => {
                             println!(
-                                "cargo::warning=Failed to run PowerShell for extraction: {}",
+                                "cargo::warning=Failed to run tar for extraction: {}",
                                 e
                             );
                         }
