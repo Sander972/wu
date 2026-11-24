@@ -501,9 +501,11 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
         let git_blame_status = cx.new(|_| git_ui::GitBlameStatus::default());
         let git_status_item = cx.new(|cx| git_status_item::GitStatusItem::new(workspace, cx));
+        let git_graph_button = cx.new(|cx| git_status_item::GitGraphButton::new(workspace, cx));
         workspace.status_bar().update(cx, |status_bar, cx| {
             status_bar.add_left_item(diagnostic_summary, window, cx);
             status_bar.add_left_item(git_status_item, window, cx);
+            status_bar.add_left_item(git_graph_button, window, cx);
             status_bar.add_left_item(lsp_button, window, cx);
             status_bar.add_left_item(active_file_name, window, cx);
             status_bar.add_left_item(git_blame_status, window, cx);
