@@ -615,6 +615,10 @@ pub struct StatusBarSettingsContent {
     ///
     /// Default: true
     pub git_controls: Option<bool>,
+    /// Whether to show the git worktree picker in the status bar. Only applies when `git_controls` is enabled.
+    ///
+    /// Default: true
+    pub worktree_button: Option<bool>,
     /// Whether to show the active encoding button in the status bar.
     ///
     /// Default: non_utf8

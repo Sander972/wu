@@ -3469,7 +3469,7 @@ fn window_and_layout_page() -> SettingsPage {
         ]
     }
 
-    fn status_bar_section() -> [SettingsPageItem; 11] {
+    fn status_bar_section() -> [SettingsPageItem; 12] {
         [
             SettingsPageItem::SectionHeader(n!("Status Bar")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3593,6 +3593,24 @@ fn window_and_layout_page() -> SettingsPage {
                             .status_bar
                             .get_or_insert_default()
                             .git_controls = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Worktree Button"),
+                description: n!("Show the git worktree picker in the status bar."),
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.worktree_button"),
+                    pick: |settings_content| {
+                        settings_content.status_bar.as_ref()?.worktree_button.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .worktree_button = value;
                     },
                 }),
                 metadata: None,

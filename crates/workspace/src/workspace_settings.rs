@@ -237,6 +237,7 @@ pub struct StatusBarSettings {
     pub cursor_position_button: bool,
     pub line_endings_button: bool,
     pub git_controls: bool,
+    pub worktree_button: bool,
     pub active_encoding_button: EncodingDisplayOptions,
 }
 
@@ -250,6 +251,7 @@ impl Settings for StatusBarSettings {
             cursor_position_button: status_bar.cursor_position_button.unwrap(),
             line_endings_button: status_bar.line_endings_button.unwrap(),
             git_controls: status_bar.git_controls.unwrap(),
+            worktree_button: status_bar.worktree_button.unwrap(),
             active_encoding_button: status_bar.active_encoding_button.unwrap(),
         }
     }

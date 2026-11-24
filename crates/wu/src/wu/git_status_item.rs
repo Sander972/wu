@@ -46,9 +46,11 @@ impl GitStatusItem {
 
 impl Render for GitStatusItem {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !StatusBarSettings::get_global(cx).git_controls {
+        let status_bar_settings = StatusBarSettings::get_global(cx);
+        if !status_bar_settings.git_controls {
             return h_flex();
         }
+        let show_worktree = status_bar_settings.worktree_button;
         let Some(workspace) = self.workspace.upgrade() else {
             return h_flex();
         };
@@ -58,7 +60,7 @@ impl Render for GitStatusItem {
             .and_then(|item| item.downcast::<TitleBar>().ok());
         let git_controls = title_bar.and_then(|title_bar| {
             title_bar.update(cx, |title_bar, cx| {
-                title_bar.render_git_controls(true, true, gpui::Anchor::BottomLeft, cx)
+                title_bar.render_git_controls(show_worktree, true, gpui::Anchor::BottomLeft, cx)
             })
         });
         let Some(git_controls) = git_controls else {
