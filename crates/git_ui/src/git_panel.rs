@@ -9208,6 +9208,17 @@ impl GitPanel {
             (stage_title, restore_title)
         };
         let is_bulk = bulk_entries.len() > 1;
+        let add_to_chat = self
+            .active_repository
+            .as_ref()
+            .filter(|_| agent_chat::AgentChatSettings::get_global(cx).enabled)
+            .map(|repository| {
+                let repository = repository.read(cx);
+                bulk_entries
+                    .iter()
+                    .map(|entry| repository.repo_path_to_abs_path(&entry.repo_path))
+                    .collect::<Vec<_>>()
+            });
         let context_menu = ContextMenu::build(window, cx, |context_menu, _, _| {
             let is_created = entry.status.is_created();
             context_menu
@@ -9220,6 +9231,12 @@ impl GitPanel {
                 .separator()
                 .action(t!("Copy Path"), CopyPath.boxed_clone())
                 .action(t!("Copy Relative Path"), CopyRelativePath.boxed_clone())
+                .when_some(add_to_chat, |context_menu, paths| {
+                    context_menu.action(
+                        t!("Add to Chat"),
+                        wu_actions::agent::AddToChat { paths }.boxed_clone(),
+                    )
+                })
                 .separator()
                 .action_disabled_when(
                     !is_created || is_bulk,

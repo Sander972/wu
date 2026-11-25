@@ -9,6 +9,7 @@
   "Add Folders to Project…": "将文件夹添加到项目…",
   "Add to .git/info/exclude": "添加到 .git/info/exclude",
   "Add to .gitignore": "添加到 .gitignore",
+  "Add to Chat": "添加到聊天",
   "Are you sure you want to delete the following {count} files?\n{files}": "确定要删除以下 {count} 个文件吗？\n{files}",
   "Are you sure you want to delete {name}?": "确定要删除 {name} 吗？",
   "Are you sure you want to permanently delete the following {count} files?\n{files}": "确定要永久删除以下 {count} 个文件吗？\n{files}",

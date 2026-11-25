@@ -11929,6 +11929,58 @@ async fn test_context_menu_opens_at_mouse_position(cx: &mut gpui::TestAppContext
 }
 
 #[gpui::test]
+async fn test_context_menu_adds_marked_files_to_chat_when_agent_chat_is_enabled(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+    let (panel, mut cx) = open_panel_with_files(3, DockSide::Left, cx).await;
+    let cx = &mut cx;
+    let add_to_chat_paths = |panel: &Entity<ProjectPanel>, cx: &mut VisualTestContext| {
+        let entry_id = find_project_entry(panel, "root/file_1.txt", cx)
+            .expect("file should exist for this test");
+        panel.update_in(cx, |panel, window, cx| {
+            panel.deploy_context_menu(ContextMenuPlacement::AtEntry, entry_id, window, cx);
+        });
+        panel.read_with(cx, |panel, cx| {
+            let menu = panel
+                .context_menu
+                .as_ref()
+                .expect("context menu should be deployed");
+            menu.menu.read(cx).entry_actions().find_map(|action| {
+                action
+                    .as_any()
+                    .downcast_ref::<wu_actions::agent::AddToChat>()
+                    .map(|add_to_chat| add_to_chat.paths.clone())
+            })
+        })
+    };
+    cx.update(|_, cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.agent_chat.get_or_insert_default().enabled = Some(false);
+            });
+        });
+    });
+    assert_eq!(add_to_chat_paths(&panel, cx), None);
+
+    cx.update(|_, cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.agent_chat.get_or_insert_default().enabled = Some(true);
+            });
+        });
+    });
+    select_path_with_mark(&panel, "root/file_1.txt", cx);
+    select_path_with_mark(&panel, "root/file_2.txt", cx);
+    let paths = add_to_chat_paths(&panel, cx).expect("Add to Chat should be in the menu");
+    let names: Vec<_> = paths
+        .iter()
+        .filter_map(|path| path.file_name()?.to_str())
+        .collect();
+    assert_eq!(names, ["file_1.txt", "file_2.txt"]);
+}
+
+#[gpui::test]
 async fn test_context_menu_for_entry_in_upper_half_opens_downwards(cx: &mut gpui::TestAppContext) {
     init_test(cx);
     let (panel, mut cx) = open_panel_with_files(3, DockSide::Left, cx).await;

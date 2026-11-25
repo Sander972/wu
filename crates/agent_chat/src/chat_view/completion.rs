@@ -609,7 +609,7 @@ impl ChatView {
         cx.notify();
     }
 
-    pub(super) fn insert_mentions(
+    pub(crate) fn insert_mentions(
         &mut self,
         paths: Vec<PathBuf>,
         window: &mut Window,

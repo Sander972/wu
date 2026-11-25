@@ -13,6 +13,7 @@
   "Add repo to project": "将仓库添加到项目",
   "Add to .git/info/exclude": "添加到 .git/info/exclude",
   "Add to .gitignore": "添加到 .gitignore",
+  "Add to Chat": "添加到聊天",
   "All Branches": "所有分支",
   "All conflicts marked as resolved": "所有冲突均已标记为已解决",
   "Already up to date with {name}": "已与 {name} 保持同步",

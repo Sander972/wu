@@ -28,7 +28,7 @@ use gpui::{
 use i18n::t;
 use serde::{Deserialize, Serialize};
 use settings::{Settings as _, SettingsStore};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use util::ResultExt as _;
 use workspace::{MultiWorkspace, SaveIntent, Workspace};
 
@@ -135,6 +135,11 @@ pub fn init(shell_env_loaded: Option<futures::channel::oneshot::Receiver<()>>, c
                 insert_mention(workspace, window, cx)
             },
         );
+        workspace.register_action(
+            |workspace, action: &wu_actions::agent::AddToChat, window, cx| {
+                add_to_chat(workspace, action.paths.clone(), window, cx)
+            },
+        );
     })
     .detach();
     watch_enabled(cx);
@@ -196,18 +201,40 @@ fn mention_in_last_chat(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    let Some(chat) = reveal_last_chat(workspace, window, cx) else {
+        return;
+    };
+    chat.update(cx, |chat, cx| {
+        chat.insert_file_mention(path, lines, window, cx)
+    });
+}
+
+fn add_to_chat(
+    workspace: &mut Workspace,
+    paths: Vec<PathBuf>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !agent_panel::agent_chat_enabled(cx) || paths.is_empty() {
+        return;
+    }
+    let Some(chat) = reveal_last_chat(workspace, window, cx) else {
+        return;
+    };
+    chat.update(cx, |chat, cx| chat.insert_mentions(paths, window, cx));
+}
+
+fn reveal_last_chat(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Option<Entity<ChatView>> {
     let chat = match last_focused_chat(workspace, cx) {
         Some(chat) => chat,
         None => {
-            let Some(session) = agent_panel::create_session(workspace, AgentKind::Claude, cx)
-            else {
-                return;
-            };
+            let session = agent_panel::create_session(workspace, AgentKind::Claude, cx)?;
             agent_panel::open_chat(workspace, session.clone(), window, cx);
-            let Some(chat) = agent_panel::chat_view_for(workspace, &session, cx) else {
-                return;
-            };
-            chat
+            agent_panel::chat_view_for(workspace, &session, cx)?
         }
     };
     if chat.read(cx).is_docked() {
@@ -215,7 +242,7 @@ fn mention_in_last_chat(
     } else {
         workspace.activate_item(&chat, true, true, window, cx);
     }
-    chat.update(cx, |chat, cx| chat.insert_file_mention(path, lines, window, cx));
+    Some(chat)
 }
 
 fn watch_enabled(cx: &mut App) {
@@ -474,6 +501,43 @@ mod tests {
         assert_eq!(
             composer_text(&chats[0], cx),
             "@src/a.rs#5-10 @src/a.rs#5-10 "
+        );
+    }
+
+    #[gpui::test]
+    async fn add_to_chat_inserts_mentions_for_every_path(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        std::fs::create_dir(directory.path().join("dir")).expect("create dir");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let chat = workspace.update_in(cx, |workspace, window, cx| {
+            let weak = cx.entity().downgrade();
+            let chat = cx
+                .new(|cx| ChatView::new(session, store.clone(), project.clone(), weak, window, cx));
+            workspace.add_item_to_active_pane(Box::new(chat.clone()), None, true, window, cx);
+            chat
+        });
+        let paths = ["a.rs", "b.rs", "dir"]
+            .map(|name| directory.path().join(name))
+            .to_vec();
+        workspace.update_in(cx, |workspace, window, cx| {
+            add_to_chat(workspace, paths, window, cx)
+        });
+        assert_eq!(
+            chat.read_with(cx, |chat, cx| chat.composer_text_for_test(cx)),
+            "@a.rs @b.rs @dir/ "
         );
     }
 }

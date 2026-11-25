@@ -944,6 +944,13 @@ impl ContextMenu {
         self.selected_index
     }
 
+    pub fn entry_actions(&self) -> impl Iterator<Item = &dyn Action> {
+        self.items.iter().filter_map(|item| match item {
+            ContextMenuItem::Entry(entry) => entry.action.as_deref(),
+            _ => None,
+        })
+    }
+
     pub fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.selected_index else {
             return;

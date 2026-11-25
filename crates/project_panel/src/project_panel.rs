@@ -1209,6 +1209,14 @@ impl ProjectPanel {
             };
 
             let has_pasteable_content = self.has_pasteable_content(cx);
+            let agent_chat_enabled = cx
+                .global::<SettingsStore>()
+                .merged_settings()
+                .agent_chat
+                .as_ref()
+                .and_then(|settings| settings.enabled)
+                .unwrap_or(false);
+            let add_to_chat = agent_chat_enabled.then(|| self.effective_absolute_paths(cx));
             let context_menu = ContextMenu::build(window, cx, |menu, _, _| {
                 menu.context(self.focus_handle.clone()).map(|menu| {
                     if is_read_only {
@@ -1281,6 +1289,12 @@ impl ProjectPanel {
                                 t!("Copy Relative Path"),
                                 Box::new(wu_actions::workspace::CopyRelativePath),
                             )
+                            .when_some(add_to_chat, |menu, paths| {
+                                menu.action(
+                                    t!("Add to Chat"),
+                                    Box::new(wu_actions::agent::AddToChat { paths }),
+                                )
+                            })
                             .when(has_git_repo, |menu| {
                                 menu.separator()
                                     .when(!is_dir && self.has_git_changes(entry_id), |menu| {
@@ -4087,6 +4101,22 @@ impl ProjectPanel {
     fn duplicate(&mut self, _: &Duplicate, window: &mut Window, cx: &mut Context<Self>) {
         self.copy(&Copy {}, window, cx);
         self.paste(&Paste {}, window, cx);
+    }
+
+    fn effective_absolute_paths(&self, cx: &App) -> Vec<PathBuf> {
+        let project = self.project.read(cx);
+        self.effective_entries()
+            .into_iter()
+            .filter_map(|entry| {
+                let entry_path = project.path_for_entry(entry.entry_id, cx)?.path;
+                Some(
+                    project
+                        .worktree_for_id(entry.worktree_id, cx)?
+                        .read(cx)
+                        .absolutize(&entry_path),
+                )
+            })
+            .collect()
     }
 
     fn copy_path(

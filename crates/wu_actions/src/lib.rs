@@ -214,7 +214,10 @@ pub mod editor {
 }
 
 pub mod agent {
-    use gpui::actions;
+    use gpui::{Action, actions};
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+    use std::path::PathBuf;
 
     actions!(
         agent,
@@ -223,6 +226,13 @@ pub mod agent {
             InsertMention
         ]
     );
+
+    /// Inserts @-mentions of the given files and folders into the agent chat.
+    #[derive(Clone, PartialEq, Debug, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent, no_json)]
+    pub struct AddToChat {
+        pub paths: Vec<PathBuf>,
+    }
 }
 
 pub mod dev {
