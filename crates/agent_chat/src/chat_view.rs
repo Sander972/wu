@@ -16,7 +16,7 @@ mod search;
 mod side_pane;
 mod todo_panel;
 
-pub(crate) use editor_context::mention_target;
+pub(crate) use editor_context::{FixWithClaude, mention_target};
 
 use crate::{
     AgentChatSettings, AgentKind, MoveChatToPanel, MoveChatToTab, RenameChat, Send, Stop,
@@ -4625,6 +4625,7 @@ mod tests {
         AcceptCommand, AgentKind, DismissCommands, SelectNextCommand, SelectPreviousCommand,
         session::tests::{feed_prompt, new_store, run_until},
     };
+    use editor::CodeActionProvider as _;
     use gpui::{KeyBinding, TestAppContext, VisualTestContext};
     use project::FakeFs;
 
@@ -6251,5 +6252,103 @@ mod tests {
         view.update(cx, |view, cx| view.toggle_editor_context(cx));
         let shown = send_and_record(&view, directory.path(), "and now", cx);
         assert!(shown.contains("the lines 1 to 2 from "), "{shown}");
+    }
+
+    /// Puts an error on the first line of the editor's file and returns its buffer.
+    fn add_error_on_first_line(
+        editor: &Entity<Editor>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<language::Buffer> {
+        let buffer = editor
+            .read_with(cx, |editor, cx| editor.buffer().read(cx).as_singleton())
+            .expect("a single buffer");
+        buffer.update(cx, |buffer, cx| {
+            let error = language::DiagnosticEntry::new(
+                language::PointUtf16::new(0, 0)..language::PointUtf16::new(0, 3),
+                language::Diagnostic {
+                    severity: language::DiagnosticSeverity::ERROR,
+                    message: "mismatched types".into(),
+                    source_kind: language::DiagnosticSourceKind::Pushed,
+                    is_primary: true,
+                    ..Default::default()
+                },
+            );
+            let diagnostics = language::DiagnosticSet::new([error], &buffer.text_snapshot());
+            buffer.update_diagnostics(language::LanguageServerId(0), diagnostics, cx);
+        });
+        cx.run_until_parked();
+        buffer
+    }
+
+    async fn fix_actions(
+        buffer: &Entity<language::Buffer>,
+        row: u32,
+        cx: &mut VisualTestContext,
+    ) -> Vec<project::CodeAction> {
+        let task = cx.update(|window, cx| {
+            let snapshot = buffer.read(cx).snapshot();
+            let position = snapshot.anchor_before(language::Point::new(row, 1));
+            FixWithClaude.code_actions(buffer, position..position, window, cx)
+        });
+        task.await.expect("code actions")
+    }
+
+    #[gpui::test]
+    async fn fix_action_is_offered_only_on_diagnostics(cx: &mut TestAppContext) {
+        cx.update(crate::offer_fix_actions);
+        let files = serde_json::json!({ "main.rs": FOUR_LINES });
+        let (_view, editor, _directory, cx) = editor_context_chat(files, "/proj/main.rs", cx).await;
+        let buffer = add_error_on_first_line(&editor, cx);
+
+        let on_error = fix_actions(&buffer, 0, cx).await;
+        let titles: Vec<String> = on_error
+            .iter()
+            .map(|action| action.lsp_action.title().to_string())
+            .collect();
+        assert_eq!(titles, ["Fix with Claude"]);
+        assert!(fix_actions(&buffer, 2, cx).await.is_empty());
+
+        let offered = |row: u32, cx: &mut VisualTestContext| {
+            select_rows(&editor, row..row, cx);
+            cx.executor()
+                .advance_clock(editor::CODE_ACTIONS_DEBOUNCE_TIMEOUT * 2);
+            cx.run_until_parked();
+            editor.read_with(cx, |editor, _| {
+                editor.has_available_code_actions_for_selection()
+            })
+        };
+        assert!(offered(0, cx), "the editor lists the action on the error");
+        assert!(!offered(2, cx));
+    }
+
+    #[gpui::test]
+    async fn fix_action_prefills_without_sending(cx: &mut TestAppContext) {
+        let files = serde_json::json!({ "main.rs": FOUR_LINES });
+        let (view, editor, directory, cx) = editor_context_chat(files, "/proj/main.rs", cx).await;
+        let buffer = add_error_on_first_line(&editor, cx);
+        let action = fix_actions(&buffer, 0, cx)
+            .await
+            .pop()
+            .expect("a fix action");
+        let apply = editor.update_in(cx, |_, window, cx| {
+            FixWithClaude.apply_code_action(buffer.clone(), action, true, window, cx)
+        });
+        apply.await.expect("applied");
+        cx.run_until_parked();
+
+        let composer = view.read_with(cx, |view, cx| view.composer_text_for_test(cx));
+        assert!(
+            composer.starts_with("Fix this problem in @") && composer.ends_with("main.rs#L1-1 "),
+            "{composer}"
+        );
+        let session = view.read_with(cx, |view, _| view.session.clone());
+        assert!(session.read_with(cx, |session, _| session.entries().is_empty()));
+        assert!(!directory.path().join(".sent-prompts").exists());
+
+        let sent = send_and_record(&view, directory.path(), "scenario:record", cx);
+        assert!(sent.contains("error: mismatched types (line 1)"), "{sent}");
+        assert!(sent.contains("main.rs#L1-1 scenario:record"), "{sent}");
+        let next = send_and_record(&view, directory.path(), "and again", cx);
+        assert!(!next.contains("mismatched types"), "{next}");
     }
 }

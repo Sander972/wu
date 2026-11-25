@@ -3122,6 +3122,23 @@ impl Editor {
         self.semantics_provider = provider;
     }
 
+    pub fn add_code_action_provider(
+        &mut self,
+        provider: Rc<dyn CodeActionProvider>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .code_action_providers
+            .iter()
+            .any(|existing| existing.id() == provider.id())
+        {
+            return;
+        }
+        self.code_action_providers.push(provider);
+        self.refresh_code_actions_for_selection(window, cx);
+    }
+
     pub fn placeholder_text(&self, cx: &mut App) -> Option<String> {
         self.placeholder_display_map
             .as_ref()

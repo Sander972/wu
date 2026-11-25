@@ -101,7 +101,7 @@ fn skill_display_name(name: &str) -> String {
         .join(" ")
 }
 
-fn relative_mention_path(path: &Path, is_dir: bool, cwd: &Path) -> String {
+pub(super) fn relative_mention_path(path: &Path, is_dir: bool, cwd: &Path) -> String {
     let mut shown = path
         .strip_prefix(cwd)
         .unwrap_or(path)

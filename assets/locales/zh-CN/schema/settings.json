@@ -359,6 +359,7 @@
   "Normalize line endings to CRLF (`\\r\\n`) during format and save.": "格式化和保存时将行尾符统一为 CRLF（`\\r\\n`）。",
   "Normalize line endings to LF (`\\n`) during format and save.": "格式化和保存时将行尾符统一为 LF（`\\n`）。",
   "Number of lines to search for modelines at the beginning and end of files.\nModelines contain editor directives (e.g., vim/emacs settings) that configure\nthe editor behavior for specific files.\n\nDefault: 5": "在文件开头和结尾搜索模式行的行数。模式行包含编辑器指令（例如 vim/emacs 设置），用于为特定文件配置编辑器行为。\n\n默认值：5",
+  "Offer \"Fix with Claude\" in the code actions of an error or warning.\n\nDefault: true": "在错误或警告的代码操作中提供“用 Claude 修复”。\n\n默认值：true",
   "One line per commit, with a branch graph.": "每个提交占一行，并显示分支图。",
   "Only if LSP response errors or times out,\nuse document's words to show completions.": "只有当 LSP 响应出错或超时时，才使用文档中的单词显示补全。",
   "Only lines with unstaged changes are formatted on save.\nIf no git diff is available (e.g., when source control is\nunavailable) or if the LSP doesn't support range formatting,\nfalls back to formatting the whole file.": "保存时只格式化有未暂存更改的行。如果没有可用的 Git 差异（例如源代码管理不可用），或 LSP 不支持范围格式化，会回退为格式化整个文件。",

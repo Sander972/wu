@@ -1195,6 +1195,10 @@ pub struct AgentChatSettingsContent {
     ///
     /// Default: true
     pub attach_open_file: Option<bool>,
+    /// Offer "Fix with Claude" in the code actions of an error or warning.
+    ///
+    /// Default: true
+    pub show_fix_actions: Option<bool>,
     /// How the Git panel writes commit messages.
     pub commit_message: Option<AgentChatCommitMessageContent>,
 }

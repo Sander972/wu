@@ -45828,3 +45828,17 @@ async fn test_lsp_show_document_unsupported_uri(cx: &mut TestAppContext) {
         .expect("show document request should not error");
     assert_eq!(response, lsp::ShowDocumentResult { success: false });
 }
+
+#[gpui::test]
+async fn added_provider_is_not_duplicated(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let project = Project::test(FakeFs::new(cx.executor()), [], cx).await;
+    let buffer = cx.update(|cx| MultiBuffer::build_simple("", cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| build_editor(buffer, window, cx));
+    editor.update_in(cx, |editor, window, cx| {
+        assert!(editor.code_action_providers.is_empty());
+        editor.add_code_action_provider(Rc::new(project.clone()), window, cx);
+        editor.add_code_action_provider(Rc::new(project.clone()), window, cx);
+        assert_eq!(editor.code_action_providers.len(), 1);
+    });
+}

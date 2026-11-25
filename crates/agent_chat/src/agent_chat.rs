@@ -142,7 +142,21 @@ pub fn init(shell_env_loaded: Option<futures::channel::oneshot::Receiver<()>>, c
         );
     })
     .detach();
+    offer_fix_actions(cx);
     watch_enabled(cx);
+}
+
+fn offer_fix_actions(cx: &mut App) {
+    cx.observe_new(|editor: &mut editor::Editor, window, cx| {
+        if let Some(window) = window
+            && editor.mode().is_full()
+            && editor.project().is_some()
+        {
+            let provider = std::rc::Rc::new(chat_view::FixWithClaude);
+            editor.add_code_action_provider(provider, window, cx);
+        }
+    })
+    .detach();
 }
 
 fn insert_mention(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {

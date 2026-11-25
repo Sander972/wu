@@ -1,22 +1,25 @@
-use super::ChatView;
+use super::{ChatView, completion::relative_mention_path};
 use crate::{
     AgentChatSettings, AgentKind,
     chat_style::{icon, ink},
 };
-use editor::{Anchor, Editor, EditorEvent, ToPoint as _};
+use anyhow::Context as _;
+use editor::{Anchor, CodeActionProvider, Editor, EditorEvent, ToPoint as _};
 use gpui::{
     AnyElement, App, Context, Entity, EntityId, IntoElement, ParentElement, SharedString, Styled,
-    Subscription, WeakEntity, div, px,
+    Subscription, Task, WeakEntity, Window, div, px,
 };
 use i18n::t;
-use language::File as _;
+use language::{Buffer, DiagnosticSeverity, File as _, LanguageServerId, Point};
+use project::{CodeAction, LspAction, ProjectTransaction};
 use settings::Settings as _;
 use std::{
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use ui::{IconName, Tooltip, prelude::*};
-use workspace::Workspace;
+use workspace::{MultiWorkspace, Workspace};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EditorContext {
@@ -80,6 +83,8 @@ pub(super) struct EditorContextState {
     sent: Option<ShownContext>,
     dismissed: Option<ShownContext>,
     hidden: bool,
+    /// Blocks "Fix with Claude" added, sent with the next message whatever the chip shows.
+    fixes: Vec<String>,
     _active_editor: Option<Subscription>,
 }
 
@@ -200,6 +205,128 @@ fn selected_lines(editor: &Editor, cx: &App) -> Option<(Range<Anchor>, u32, u32)
     Some((anchors, range.start.row + 1, end))
 }
 
+/// Each diagnostic is (start line, end line, severity, message), lines 1-based. Returns the composer text and the context block.
+pub(crate) fn fix_prompt(
+    relative_path: &str,
+    diagnostics: &[(u32, u32, String, String)],
+) -> (String, String) {
+    let start = diagnostics
+        .iter()
+        .map(|problem| problem.0)
+        .min()
+        .unwrap_or(1);
+    let end = diagnostics
+        .iter()
+        .map(|problem| problem.1)
+        .max()
+        .unwrap_or(start);
+    let what = if diagnostics.len() == 1 {
+        "this problem"
+    } else {
+        "these problems"
+    };
+    let attachment = diagnostics
+        .iter()
+        .map(|(line, _, severity, message)| format!("{severity}: {message} (line {line})"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (
+        format!("Fix {what} in @{relative_path}#L{start}-{end} "),
+        attachment,
+    )
+}
+
+/// The errors and warnings in `range`, as `fix_prompt` takes them.
+fn fixable_problems(
+    buffer: &Buffer,
+    range: Range<language::Anchor>,
+) -> Vec<(u32, u32, String, String)> {
+    buffer
+        .snapshot()
+        .diagnostics_in_range::<_, Point>(range, false)
+        .filter(|entry| entry.diagnostic.is_primary)
+        .filter_map(|entry| {
+            let severity = match entry.diagnostic.severity {
+                DiagnosticSeverity::ERROR => "error",
+                DiagnosticSeverity::WARNING => "warning",
+                _ => return None,
+            };
+            Some((
+                entry.range.start.row + 1,
+                entry.range.end.row + 1,
+                severity.to_string(),
+                entry.diagnostic.message.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// The "Fix with Claude" code action, offered on errors and warnings.
+pub(crate) struct FixWithClaude;
+
+impl CodeActionProvider for FixWithClaude {
+    fn id(&self) -> Arc<str> {
+        "fix_with_claude".into()
+    }
+
+    fn code_actions(
+        &self,
+        buffer: &Entity<Buffer>,
+        range: Range<language::Anchor>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<CodeAction>>> {
+        let settings = AgentChatSettings::get_global(cx);
+        let offered = settings.enabled
+            && settings.show_fix_actions
+            && !fixable_problems(buffer.read(cx), range.clone()).is_empty();
+        let action = offered.then(|| CodeAction {
+            server_id: LanguageServerId(0),
+            range,
+            lsp_action: LspAction::Action(Box::new(lsp::CodeAction {
+                title: t!("Fix with Claude").to_string(),
+                kind: Some(lsp::CodeActionKind::QUICKFIX),
+                ..Default::default()
+            })),
+            resolved: true,
+        });
+        Task::ready(Ok(action.into_iter().collect()))
+    }
+
+    fn apply_code_action(
+        &self,
+        buffer: Entity<Buffer>,
+        action: CodeAction,
+        _push_to_history: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<ProjectTransaction>> {
+        let workspace = window
+            .root::<MultiWorkspace>()
+            .flatten()
+            .map(|multi_workspace| multi_workspace.read(cx).workspace().clone());
+        // The editor applying the action is still being updated, so revealing the chat waits until it's done.
+        window.spawn(cx, async move |cx| {
+            let workspace = workspace.context("no workspace to fix in")?;
+            workspace.update_in(cx, |workspace, window, cx| {
+                let buffer = buffer.read(cx);
+                let problems = fixable_problems(buffer, action.range);
+                let path = project::File::from_dyn(buffer.file())
+                    .and_then(|file| Some(file.as_local()?.abs_path(cx)));
+                let (Some(path), false) = (path, problems.is_empty()) else {
+                    return;
+                };
+                if let Some(chat) = crate::reveal_last_chat(workspace, window, cx) {
+                    chat.update(cx, |chat, cx| {
+                        chat.prefill_fix(&path, &problems, window, cx)
+                    });
+                }
+            })?;
+            Ok(ProjectTransaction::default())
+        })
+    }
+}
+
 pub(crate) fn context_block(context: &EditorContext) -> String {
     let path = context.absolute_path.display();
     match context.selection.as_ref().filter(|_| !context.path_only) {
@@ -253,11 +380,12 @@ impl ChatView {
         if self.editing_queued.is_some() || agent_harness::leading_command(text).is_some() {
             return Vec::new();
         }
+        let mut blocks = std::mem::take(&mut self.editor_context.fixes);
         let on_chip = self.editor_context.shown().cloned();
         self.refresh_editor_context(cx);
         let state = &mut self.editor_context;
         if state.hidden {
-            return Vec::new();
+            return blocks;
         }
         // A context that changed since the chip last showed it waits for the next message, once the chip shows it.
         let Some(shown) = state
@@ -265,14 +393,29 @@ impl ChatView {
             .filter(|shown| Some(*shown) == on_chip.as_ref())
             .cloned()
         else {
-            return Vec::new();
+            return blocks;
         };
         let Some(context) = shown.full(cx) else {
-            return Vec::new();
+            return blocks;
         };
         state.sent = Some(shown);
         cx.notify();
-        vec![context_block(&context)]
+        blocks.push(context_block(&context));
+        blocks
+    }
+
+    /// Fills the composer with a request to fix `problems` in `path`, never sending it.
+    pub(crate) fn prefill_fix(
+        &mut self,
+        path: &Path,
+        problems: &[(u32, u32, String, String)],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = self.session.read(cx).metadata().cwd.clone();
+        let (text, block) = fix_prompt(&relative_mention_path(path, false, &cwd), problems);
+        self.insert_text_at_cursor(text.trim_end(), window, cx);
+        self.editor_context.fixes.push(block);
     }
 
     /// The agent forgets an edited message, so its context goes out again.
@@ -382,6 +525,26 @@ mod tests {
                 "{path} {lines:?}"
             );
         }
+    }
+
+    #[test]
+    fn fix_prompt_single_and_plural() {
+        let error = (3, 3, "error".to_string(), "mismatched types".to_string());
+        let warning = (7, 8, "warning".to_string(), "unused variable".to_string());
+        assert_eq!(
+            fix_prompt("src/a.rs", std::slice::from_ref(&error)),
+            (
+                "Fix this problem in @src/a.rs#L3-3 ".to_string(),
+                "error: mismatched types (line 3)".to_string()
+            )
+        );
+        assert_eq!(
+            fix_prompt("src/a.rs", &[warning, error]),
+            (
+                "Fix these problems in @src/a.rs#L3-8 ".to_string(),
+                "warning: unused variable (line 7)\nerror: mismatched types (line 3)".to_string()
+            )
+        );
     }
 
     #[test]

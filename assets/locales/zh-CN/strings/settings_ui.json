@@ -437,6 +437,8 @@
   "Notifications": "通知",
   "Number of lines to search for modelines (set to 0 to disable).": "搜索模式行的行数（设为 0 可停用）。",
   "Off: Do not request semantic tokens from language servers.\nCombined: Use LSP semantic tokens together with tree-sitter highlighting.\nFull: Use LSP semantic tokens exclusively, replacing tree-sitter highlighting.": "关：不向语言服务器请求语义标记。\n组合：将 LSP 语义标记与 tree-sitter 高亮一起使用。\n完整：只使用 LSP 语义标记，替代 tree-sitter 高亮。",
+  "Offer \"Fix with Claude\" in the code actions of an error or warning.": "在错误或警告的代码操作中提供“用 Claude 修复”。",
+  "Offer Fix with Claude": "提供“用 Claude 修复”",
   "On Last Window Closed": "关闭最后一个窗口时",
   "On: format the whole buffer.\nOff: do not format.\nModifications: format only lines with unstaged changes; skips formatting when a git diff or LSP range formatting is unavailable.\nModifications If Available: same, but falls back to formatting the whole buffer.": "开：格式化整个缓冲区。\n关：不格式化。\n仅修改部分：只格式化有未暂存更改的行；无法使用 Git 差异或 LSP 范围格式化时跳过格式化。\n修改部分（如可用）：同上，但无法使用时会格式化整个缓冲区。",
   "Only In Background": "仅在后台时",

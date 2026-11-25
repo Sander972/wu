@@ -161,6 +161,8 @@
     "attach_selection": true,
     // Tells Claude Code which file is open in the editor when you send a message.
     "attach_open_file": true,
+    // Offers "Fix with Claude" in the code actions of an error or warning.
+    "show_fix_actions": true,
     // How the Git panel writes commit messages.
     "commit_message": {
       // "claude_code", "codex", "opencode" or "antigravity". When unset, the first installed agent.

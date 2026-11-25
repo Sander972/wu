@@ -8268,7 +8268,7 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
-    fn agents_section() -> [SettingsPageItem; 9] {
+    fn agents_section() -> [SettingsPageItem; 10] {
         [
             SettingsPageItem::SectionHeader(n!("Agents")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -8355,6 +8355,30 @@ fn agent_chat_page() -> SettingsPage {
                             .agent_chat
                             .get_or_insert_default()
                             .attach_open_file = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Offer Fix with Claude"),
+                description: n!(
+                    "Offer \"Fix with Claude\" in the code actions of an error or warning."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.show_fix_actions"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent_chat
+                            .as_ref()?
+                            .show_fix_actions
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .show_fix_actions = value;
                     },
                 }),
                 metadata: None,
