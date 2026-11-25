@@ -511,7 +511,7 @@ imara-diff = "0.2.0"
 indexmap = { version = "2.7.0", features = ["serde"] }
 indoc = "2"
 inventory = "0.3.19"
-itertools = "0.14.0"
+itertools = "0.15"
 js-sys = "0.3"
 json_dotpath = "1.1"
 jsonschema = { version = "0.51", default-features = false }
