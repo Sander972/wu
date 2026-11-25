@@ -6,7 +6,10 @@ use crate::{
 };
 use agent_harness::{PermissionDecision, PermissionMode, PermissionPrompt};
 use i18n::t;
-use workspace::{OpenOptions, OpenVisible, Toast, notifications::NotificationId};
+use workspace::{
+    OpenOptions, OpenVisible, Toast,
+    notifications::{NotificationId, NotifyTaskExt as _},
+};
 
 const PERMISSION_DESTINATIONS: [&str; 4] = [
     "localSettings",
@@ -757,6 +760,24 @@ impl ChatView {
         });
     }
 
+    pub(super) fn review_in_editor(
+        &mut self,
+        question_id: String,
+        prompt: &PermissionPrompt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        super::edit_review::open_review(
+            self.session.clone(),
+            question_id,
+            prompt,
+            self.workspace.clone(),
+            window,
+            cx,
+        )
+        .detach_and_notify_err(self.workspace.clone(), window, cx);
+    }
+
     fn cycle_permission_destination(&mut self, question_id: &str, cx: &mut Context<Self>) {
         let Some(editors) = self.permission_editors.get_mut(question_id) else {
             return;
@@ -1302,6 +1323,26 @@ impl ChatView {
                                 this.question_pages
                                     .insert(pending_id.to_string(), page_index - 1);
                                 cx.notify();
+                            }))
+                            .into_any_element()
+                    } else if let Some(prompt) = question
+                        .permission
+                        .clone()
+                        .filter(super::edit_review::is_reviewable)
+                    {
+                        let question_id = question.id.clone();
+                        div()
+                            .id("agent-question-review")
+                            .px(px(12.))
+                            .py(px(6.))
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .text_size(ui(13.))
+                            .text_color(colors.text_muted)
+                            .hover(move |style| style.bg(back_hover).text_color(colors.text))
+                            .child(t!("Review in editor"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.review_in_editor(question_id.clone(), &prompt, window, cx)
                             }))
                             .into_any_element()
                     } else {

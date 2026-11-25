@@ -1,10 +1,262 @@
-use agent_harness::PermissionDecision;
-use anyhow::{Result, anyhow};
+use crate::{AcceptProposedChanges, RejectProposedChanges, session::AgentSession};
+use agent_harness::{PermissionDecision, PermissionPrompt};
+use anyhow::{Context as _, Result, anyhow};
+use fs::Fs;
+use git_ui_core::file_diff_view::{FileDiffView, build_buffer_diff};
+use gpui::{
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    Render, SharedString, Subscription, Task, WeakEntity, Window,
+};
+use i18n::t;
+use language::{Buffer, LineEnding};
 use serde_json::{Value, json};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use theme::ActiveTheme as _;
+use ui::{Button, ButtonStyle, Icon, IconName, prelude::*};
+use workspace::{
+    Workspace,
+    item::{Item, ItemEvent},
+    notifications::NotifyTaskExt as _,
+};
 
 const REVERTED_ALL: &str = "User reverted all proposed changes in the diff view";
+const CANCEL_EDIT: &str = "User cancelled the edit";
+const CANCEL_WRITE: &str = "User cancelled the write";
 const STALE_ON_DISK: &str =
     "The file changed on disk while the edit was being reviewed. Read it again before editing.";
+
+pub(crate) fn is_reviewable(prompt: &PermissionPrompt) -> bool {
+    matches!(prompt.tool_name.as_str(), "Edit" | "Write")
+}
+
+fn cancel_decision(tool_name: &str) -> PermissionDecision {
+    let message = if tool_name == "Write" {
+        CANCEL_WRITE
+    } else {
+        CANCEL_EDIT
+    };
+    PermissionDecision::Deny {
+        message: message.into(),
+        interrupt: true,
+    }
+}
+
+/// Both the snapshot taken when the review opens and the re-read at Accept go through here, so a CRLF file is not mistaken for one that changed on disk.
+async fn read_disk_text(fs: &dyn Fs, path: &Path) -> Result<String> {
+    if !fs.is_file(path).await {
+        return Ok(String::new());
+    }
+    let mut text = fs.load(path).await?;
+    LineEnding::normalize(&mut text);
+    Ok(text)
+}
+
+fn is_pending(session: &AgentSession, question_id: &str) -> bool {
+    session
+        .pending_questions()
+        .iter()
+        .any(|pending| pending.id() == question_id)
+}
+
+pub(crate) fn open_review(
+    session: Entity<AgentSession>,
+    question_id: String,
+    prompt: &PermissionPrompt,
+    workspace: WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Task<Result<()>> {
+    let tool_name = prompt.tool_name.clone();
+    let input = prompt.input.clone();
+    window.spawn(cx, async move |cx| {
+        let path = PathBuf::from(
+            input["file_path"]
+                .as_str()
+                .context("the proposed change has no `file_path`")?,
+        );
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone())?;
+        let (fs, languages) = project.read_with(cx, |project, _| {
+            (project.fs().clone(), project.languages().clone())
+        });
+        let original = read_disk_text(fs.as_ref(), &path).await?;
+        let proposed = proposed_text(&tool_name, &input, &original)?;
+        let language = languages.load_language_for_file_path(&path).await.ok();
+        let (old_buffer, new_buffer) = project.update(cx, |project, cx| {
+            (
+                project.create_local_buffer(&original, language.clone(), false, cx),
+                project.create_local_buffer(&proposed, language, false, cx),
+            )
+        });
+        let diff = build_buffer_diff(&old_buffer, &new_buffer, cx).await?;
+        workspace.update_in(cx, |workspace, window, cx| {
+            if !is_pending(session.read(cx), &question_id) {
+                return;
+            }
+            let open = workspace
+                .items_of_type::<ProposedEditReview>(cx)
+                .find(|review| review.read(cx).question_id == question_id);
+            if let Some(review) = open {
+                workspace.activate_item(&review, true, true, window, cx);
+                return;
+            }
+            let workspace_entity = cx.entity();
+            let weak_workspace = workspace_entity.downgrade();
+            let diff_view = cx.new(|cx| {
+                FileDiffView::new(
+                    old_buffer,
+                    new_buffer.clone(),
+                    diff,
+                    project,
+                    workspace_entity,
+                    window,
+                    cx,
+                )
+            });
+            let file_name = path
+                .file_name()
+                .map_or_else(|| path.to_string_lossy(), |name| name.to_string_lossy())
+                .into_owned();
+            let review = cx.new(|cx| ProposedEditReview {
+                _subscriptions: vec![
+                    cx.observe(&session, |this: &mut ProposedEditReview, session, cx| {
+                        if !is_pending(session.read(cx), &this.question_id) {
+                            cx.emit(ItemEvent::CloseItem);
+                        }
+                    }),
+                    // Closing the tab without answering must not leave the agent waiting.
+                    cx.on_release(|this: &mut ProposedEditReview, cx| {
+                        this.decide(cancel_decision(&this.tool_name), cx)
+                    }),
+                ],
+                title: t!("{file} (proposed)", file = file_name),
+                session,
+                question_id,
+                tool_name,
+                input,
+                path,
+                original,
+                proposed,
+                new_buffer,
+                diff_view,
+                fs,
+                workspace: weak_workspace,
+            });
+            workspace.add_item_to_active_pane(Box::new(review), None, true, window, cx);
+        })
+    })
+}
+
+pub(crate) struct ProposedEditReview {
+    session: Entity<AgentSession>,
+    question_id: String,
+    tool_name: String,
+    input: Value,
+    path: PathBuf,
+    original: String,
+    proposed: String,
+    new_buffer: Entity<Buffer>,
+    diff_view: Entity<FileDiffView>,
+    fs: Arc<dyn Fs>,
+    workspace: WeakEntity<Workspace>,
+    title: SharedString,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl ProposedEditReview {
+    fn accept(&mut self, _: &AcceptProposedChanges, window: &mut Window, cx: &mut Context<Self>) {
+        let final_text = self.new_buffer.read(cx).text();
+        let fs = self.fs.clone();
+        let path = self.path.clone();
+        cx.spawn(async move |this, cx| {
+            let disk_text = read_disk_text(fs.as_ref(), &path).await?;
+            this.update(cx, |this, cx| {
+                let decision = review_decision(
+                    &this.tool_name,
+                    &this.input,
+                    &this.original,
+                    &this.proposed,
+                    &final_text,
+                    &disk_text,
+                );
+                this.decide(decision, cx);
+            })
+        })
+        .detach_and_notify_err(self.workspace.clone(), window, cx);
+    }
+
+    fn reject(&mut self, _: &RejectProposedChanges, _: &mut Window, cx: &mut Context<Self>) {
+        self.decide(cancel_decision(&self.tool_name), cx);
+    }
+
+    fn decide(&self, decision: PermissionDecision, cx: &mut App) {
+        self.session.update(cx, |session, cx| {
+            session.decide_permission(&self.question_id, decision, cx)
+        });
+    }
+}
+
+impl EventEmitter<ItemEvent> for ProposedEditReview {}
+
+impl Focusable for ProposedEditReview {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.diff_view.focus_handle(cx)
+    }
+}
+
+impl Item for ProposedEditReview {
+    type Event = ItemEvent;
+
+    fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
+        self.title.clone()
+    }
+
+    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
+        Some(Icon::new(IconName::Diff).color(Color::Muted))
+    }
+
+    fn tab_tooltip_text(&self, _cx: &App) -> Option<SharedString> {
+        Some(self.path.to_string_lossy().into_owned().into())
+    }
+
+    fn to_item_events(event: &ItemEvent, f: &mut dyn FnMut(ItemEvent)) {
+        f(*event)
+    }
+}
+
+impl Render for ProposedEditReview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .key_context("ProposedEditReview")
+            .size_full()
+            .on_action(cx.listener(Self::accept))
+            .on_action(cx.listener(Self::reject))
+            .child(
+                h_flex()
+                    .w_full()
+                    .p_1()
+                    .gap_1()
+                    .justify_end()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(
+                        Button::new("reject-proposed-changes", t!("Reject")).on_click(cx.listener(
+                            |this, _, window, cx| this.reject(&RejectProposedChanges, window, cx),
+                        )),
+                    )
+                    .child(
+                        Button::new("accept-proposed-changes", t!("Accept"))
+                            .style(ButtonStyle::Filled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.accept(&AcceptProposedChanges, window, cx)
+                            })),
+                    ),
+            )
+            .child(self.diff_view.clone())
+    }
+}
 
 pub(crate) fn proposed_text(tool_name: &str, input: &Value, original: &str) -> Result<String> {
     if tool_name == "Write" {
@@ -149,6 +401,210 @@ mod tests {
                 interrupt: true
             }
         );
+    }
+
+    struct ReviewSetup {
+        workspace: Entity<Workspace>,
+        session: Entity<AgentSession>,
+        store: Entity<crate::session::AgentStore>,
+        project: Entity<project::Project>,
+        prompt: PermissionPrompt,
+        answers: tokio::sync::oneshot::Receiver<Vec<agent_harness::UserInputAnswer>>,
+        _directory: tempfile::TempDir,
+    }
+
+    async fn open_edit_review<'a>(
+        file_text: &str,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (ReviewSetup, &'a mut gpui::VisualTestContext) {
+        let (setup, cx) = review_setup(file_text, cx).await;
+        setup
+            .workspace
+            .update_in(cx, |workspace, window, cx| {
+                open_review(
+                    setup.session.clone(),
+                    "q".into(),
+                    &setup.prompt,
+                    workspace.weak_handle(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("the review opens");
+        cx.run_until_parked();
+        assert_eq!(reviews(&setup.workspace, cx), 1);
+        (setup, cx)
+    }
+
+    /// Leaves an `Edit` of `a.rs` from "one" to "two" waiting for permission, with no review open yet.
+    async fn review_setup<'a>(
+        file_text: &str,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (ReviewSetup, &'a mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+            crate::init(None, cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = crate::session::tests::new_store(directory.path(), cx);
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(util::path!("/project"), json!({ "a.rs": file_text }))
+            .await;
+        let project = project::Project::test(fs, [util::path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        let session = store.update(cx, |store, cx| {
+            store.create_session(crate::AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let prompt = PermissionPrompt {
+            tool_name: "Edit".into(),
+            input: json!({
+                "file_path": util::path!("/project/a.rs"),
+                "old_string": "one",
+                "new_string": "two",
+                "replace_all": false,
+            }),
+            ..PermissionPrompt::default()
+        };
+        let answers = session.update(cx, |session, _| {
+            crate::session::tests::push_permission(session, "q", prompt.clone())
+        });
+        (
+            ReviewSetup {
+                workspace,
+                session,
+                store,
+                project,
+                prompt,
+                answers,
+                _directory: directory,
+            },
+            cx,
+        )
+    }
+
+    fn reviews(workspace: &Entity<Workspace>, cx: &mut gpui::VisualTestContext) -> usize {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.items_of_type::<ProposedEditReview>(cx).count()
+        })
+    }
+
+    fn decision(setup: &mut ReviewSetup) -> Option<PermissionDecision> {
+        setup
+            .answers
+            .try_recv()
+            .expect("the agent got an answer")
+            .first()
+            .and_then(|answer| answer.decision.clone())
+    }
+
+    #[gpui::test]
+    async fn accepting_a_review_allows_the_edit(cx: &mut gpui::TestAppContext) {
+        let (mut setup, cx) = open_edit_review("one\n", cx).await;
+        cx.dispatch_action(AcceptProposedChanges);
+        cx.run_until_parked();
+        assert_eq!(
+            decision(&mut setup),
+            Some(PermissionDecision::Allow {
+                updated_input: None,
+                updated_permissions: vec![]
+            })
+        );
+        assert_eq!(reviews(&setup.workspace, cx), 0);
+    }
+
+    #[gpui::test]
+    async fn accepting_a_crlf_file_is_not_mistaken_for_a_change_on_disk(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut setup, cx) = open_edit_review("one\r\nkeep\r\n", cx).await;
+        cx.dispatch_action(AcceptProposedChanges);
+        cx.run_until_parked();
+        assert_eq!(
+            decision(&mut setup),
+            Some(PermissionDecision::Allow {
+                updated_input: None,
+                updated_permissions: vec![]
+            })
+        );
+    }
+
+    #[gpui::test]
+    async fn rejecting_a_review_denies_with_cancel_message(cx: &mut gpui::TestAppContext) {
+        let (mut setup, cx) = open_edit_review("one\n", cx).await;
+        cx.dispatch_action(RejectProposedChanges);
+        cx.run_until_parked();
+        assert_eq!(
+            decision(&mut setup),
+            Some(PermissionDecision::Deny {
+                message: CANCEL_EDIT.into(),
+                interrupt: true
+            })
+        );
+        assert_eq!(reviews(&setup.workspace, cx), 0);
+    }
+
+    #[gpui::test]
+    async fn closing_the_review_tab_rejects(cx: &mut gpui::TestAppContext) {
+        let (mut setup, cx) = open_edit_review("one\n", cx).await;
+        setup
+            .workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.active_pane().update(cx, |pane, cx| {
+                    pane.close_active_item(&Default::default(), window, cx)
+                })
+            })
+            .await
+            .expect("the tab closes");
+        cx.run_until_parked();
+        assert_eq!(
+            decision(&mut setup),
+            Some(PermissionDecision::Deny {
+                message: CANCEL_EDIT.into(),
+                interrupt: true
+            })
+        );
+    }
+
+    #[gpui::test]
+    async fn ask_mode_opens_the_review_automatically(cx: &mut gpui::TestAppContext) {
+        let (setup, cx) = review_setup("one\n", cx).await;
+        setup.session.update(cx, |session, cx| {
+            session.update_settings(
+                |settings| settings.permission = agent_harness::PermissionMode::Ask,
+                cx,
+            )
+        });
+        setup.workspace.update_in(cx, |workspace, window, cx| {
+            let chat = cx.new(|cx| {
+                crate::ChatView::new(
+                    setup.session.clone(),
+                    setup.store.clone(),
+                    setup.project.clone(),
+                    workspace.weak_handle(),
+                    window,
+                    cx,
+                )
+            });
+            workspace.add_item_to_active_pane(Box::new(chat), None, true, window, cx);
+        });
+        setup.session.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(reviews(&setup.workspace, cx), 1);
+    }
+
+    #[gpui::test]
+    async fn answering_in_the_chat_closes_the_review(cx: &mut gpui::TestAppContext) {
+        let (setup, cx) = open_edit_review("one\n", cx).await;
+        setup
+            .session
+            .update(cx, |session, cx| session.answer_permission("q", true, cx));
+        cx.run_until_parked();
+        assert_eq!(reviews(&setup.workspace, cx), 0);
     }
 
     #[test]

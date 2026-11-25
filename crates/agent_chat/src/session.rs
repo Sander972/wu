@@ -4695,6 +4695,32 @@ pub(crate) mod tests {
         panic!("the agent never reached the expected state");
     }
 
+    pub(crate) fn push_permission(
+        session: &mut AgentSession,
+        id: &str,
+        prompt: agent_harness::PermissionPrompt,
+    ) -> tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>> {
+        let (responder, receiver) = tokio::sync::oneshot::channel();
+        session.pending_questions.push(PendingQuestion {
+            questions: vec![UserInputQuestion {
+                id: id.into(),
+                header: agent_harness::claude::PERMISSION_HEADER.into(),
+                question: format!("Allow {}?", prompt.tool_name),
+                options: vec![
+                    agent_harness::claude::PERMISSION_ALLOW.into(),
+                    agent_harness::claude::PERMISSION_DENY.into(),
+                ],
+                multi_select: false,
+                prefill: None,
+                multiline: false,
+                accepts_typed_answer: false,
+                permission: Some(prompt),
+            }],
+            responder: Some(responder),
+        });
+        receiver
+    }
+
     #[gpui::test]
     async fn says_once_when_claude_did_not_start_in_auto(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().expect("temporary directory");

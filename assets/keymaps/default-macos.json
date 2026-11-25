@@ -1360,6 +1360,13 @@
     },
   },
   {
+    "context": "ProposedEditReview > Editor",
+    "bindings": {
+      "cmd-enter": "agent_chat::AcceptProposedChanges",
+      "cmd-shift-backspace": "agent_chat::RejectProposedChanges",
+    },
+  },
+  {
     "context": "AgentComposer && command_menu > Editor",
     "bindings": {
       "up": "agent_chat::SelectPreviousCommand",

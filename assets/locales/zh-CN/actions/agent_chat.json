@@ -3,6 +3,10 @@
     "name": "接受命令",
     "description": "选择斜杠命令菜单中高亮显示的命令。"
   },
+  "agent_chat::AcceptProposedChanges": {
+    "name": "接受拟议修改",
+    "description": "接受审阅标签页中智能体拟议的文件修改。"
+  },
   "agent_chat::ContinueSavedChat": {
     "name": "继续已保存的对话",
     "description": "继续在 Claude Code、Codex、OpenCode 或 Antigravity 中开始的对话。"
@@ -34,6 +38,10 @@
   "agent_chat::NewOpencodeChat": {
     "name": "新建 OpenCode 对话",
     "description": "开始新的 OpenCode 对话。"
+  },
+  "agent_chat::RejectProposedChanges": {
+    "name": "拒绝拟议修改",
+    "description": "拒绝审阅标签页中智能体拟议的文件修改。"
   },
   "agent_chat::RenameChat": {
     "name": "重命名对话",

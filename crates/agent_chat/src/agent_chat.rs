@@ -69,6 +69,10 @@ actions!(
         MoveChatToPanel,
         /// Moves a chat from the chat panel back into a tab.
         MoveChatToTab,
+        /// Accepts the agent's proposed file change shown in the review tab.
+        AcceptProposedChanges,
+        /// Rejects the agent's proposed file change shown in the review tab.
+        RejectProposedChanges,
     ]
 );
 

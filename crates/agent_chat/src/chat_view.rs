@@ -569,6 +569,20 @@ impl ChatView {
             .collect();
         self.permission_editors
             .retain(|question_id, _| permissions.iter().any(|(id, _, _, _)| id == question_id));
+        let asks =
+            self.session.read(cx).settings().permission == agent_harness::PermissionMode::Ask;
+        let new_reviews: Vec<(String, agent_harness::PermissionPrompt)> = self
+            .session
+            .read(cx)
+            .pending_questions()
+            .iter()
+            .flat_map(|pending| &pending.questions)
+            .filter(|question| asks && !self.permission_editors.contains_key(&question.id))
+            .filter_map(|question| {
+                let prompt = question.permission.as_ref()?;
+                edit_review::is_reviewable(prompt).then(|| (question.id.clone(), prompt.clone()))
+            })
+            .collect();
         self.answer_editors.retain(|question_id, _| {
             free_text.iter().any(|(id, _, _)| id == question_id)
         });
@@ -645,6 +659,9 @@ impl ChatView {
                     _plan_subscription: plan_subscription,
                 },
             );
+        }
+        for (question_id, prompt) in new_reviews {
+            self.review_in_editor(question_id, &prompt, window, cx);
         }
         for (question_id, standalone, multi_select) in free_text {
             if self.answer_editors.contains_key(&question_id) {
