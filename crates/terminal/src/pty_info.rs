@@ -6,6 +6,7 @@ use std::{path::PathBuf, sync::Arc};
 use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
 
 use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use util::ResultExt as _;
 
 use crate::{Event, Terminal};
 
@@ -85,7 +86,7 @@ pub(crate) struct PtyProcessInfo {
 }
 
 impl PtyProcessInfo {
-    pub(crate) fn new(pid_getter: ProcessIdGetter) -> PtyProcessInfo {
+    pub(crate) fn new(pid_getter: ProcessIdGetter) -> anyhow::Result<PtyProcessInfo> {
         // Task enumeration is on by default and would retain a `Process` entry
         // per thread, each pinning an open `/proc/<pid>/task/<tid>/stat` handle
         // on Linux (#58651).
@@ -99,21 +100,21 @@ impl PtyProcessInfo {
         // retaining one open procfs handle per process for the lifetime of the
         // terminal (#58651). Refresh only the spawned child so that
         // `kill_child_process` works before the first foreground refresh.
-        let mut system = System::new();
+        let mut system = System::new()?;
         system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid_getter.fallback_pid()]),
             true,
             process_refresh_kind,
         );
 
-        PtyProcessInfo {
+        Ok(PtyProcessInfo {
             system: RwLock::new(system),
             refresh_kind: process_refresh_kind,
             pid_getter,
             last_foreground_pid: Mutex::new(None),
             current: RwLock::new(None),
             task: Mutex::new(None),
-        }
+        })
     }
 
     pub(crate) fn pid_getter(&self) -> &ProcessIdGetter {
@@ -130,7 +131,9 @@ impl PtyProcessInfo {
         // long as this terminal lives (#58651). Rebuild the `System` whenever
         // the foreground process changes to keep the map bounded.
         if self.last_foreground_pid.lock().replace(pid) != Some(pid) {
-            *system = System::new();
+            if let Some(new_system) = System::new().log_err() {
+                *system = new_system;
+            }
         }
         let pids = [pid, fallback_pid];
         let pids = if pid == fallback_pid {
@@ -298,7 +301,8 @@ mod tests {
         reason = "the test needs real short-lived child processes and may block"
     )]
     fn process_map_stays_bounded() {
-        let mut info = PtyProcessInfo::new(ProcessIdGetter::new(-1, std::process::id()));
+        let mut info = PtyProcessInfo::new(ProcessIdGetter::new(-1, std::process::id()))
+            .expect("failed to create process info");
         assert!(
             info.get_child().is_some(),
             "the spawned child must be inspectable for kill_child_process \

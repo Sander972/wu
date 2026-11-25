@@ -1283,7 +1283,7 @@ impl TerminalBuilder {
                     }
                 };
 
-                let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
+                let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty))?;
 
                 //And connect them together
                 let pty_tx =

@@ -857,9 +857,12 @@ pub(crate) fn execute_proxy(
 
 fn kill_running_server(pid: u32, paths: &ServerPaths) -> Result<(), ExecuteProxyError> {
     log::info!("killing existing server with PID {}", pid);
-    let system = sysinfo::System::new_with_specifics(
+    let Some(system) = sysinfo::System::new_with_specifics(
         sysinfo::RefreshKind::nothing().with_processes(sysinfo::ProcessRefreshKind::nothing()),
-    );
+    )
+    .log_err() else {
+        return Err(ExecuteProxyError::KillRunningServer { pid });
+    };
 
     if let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) {
         let killed = process.kill();
@@ -1025,7 +1028,11 @@ fn check_pid_file(path: &Path) -> Result<Option<u32>, CheckPidError> {
 
     let system = sysinfo::System::new_with_specifics(
         sysinfo::RefreshKind::nothing().with_processes(sysinfo::ProcessRefreshKind::nothing()),
-    );
+    )
+    .map_err(|source| CheckPidError {
+        source: std::io::Error::other(source),
+        pid,
+    })?;
 
     if system.process(sysinfo::Pid::from_u32(pid)).is_some() {
         log::debug!(
@@ -1222,9 +1229,14 @@ fn is_new_version(version: &str) -> bool {
 }
 
 fn is_file_in_use(file_name: &OsStr) -> bool {
-    let info = sysinfo::System::new_with_specifics(sysinfo::RefreshKind::nothing().with_processes(
-        sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::Always),
-    ));
+    let Some(info) =
+        sysinfo::System::new_with_specifics(sysinfo::RefreshKind::nothing().with_processes(
+            sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::Always),
+        ))
+        .log_err()
+    else {
+        return false;
+    };
 
     for process in info.processes().values() {
         if process
