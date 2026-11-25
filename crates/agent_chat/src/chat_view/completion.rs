@@ -120,6 +120,20 @@ fn mention_text(path: &Path, is_dir: bool, cwd: &Path, lines: Option<(u32, u32)>
     mention_text_with_lines(&relative_mention_path(path, is_dir, cwd), lines)
 }
 
+fn follows_word(editor: &mut editor::Editor, cx: &mut Context<editor::Editor>) -> bool {
+    let snapshot = editor.display_snapshot(cx);
+    let start = editor
+        .selections
+        .newest::<MultiBufferOffset>(&snapshot)
+        .start
+        .0;
+    editor
+        .text(cx)
+        .get(..start)
+        .and_then(|before| before.chars().next_back())
+        .is_some_and(|character| !character.is_whitespace())
+}
+
 /// Splits a typed `#5` or `#5-10` off the end of a mention query.
 fn split_line_suffix(query: &str) -> (&str, Option<(u32, u32)>) {
     let Some((path, range)) = query.rsplit_once('#') else {
@@ -293,6 +307,17 @@ impl ChatView {
     #[cfg(test)]
     pub(crate) fn composer_text_for_test(&self, cx: &App) -> String {
         self.composer.read(cx).text(cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_composer_text_for_test(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composer
+            .update(cx, |editor, cx| editor.set_text(text, window, cx));
     }
 
     pub(super) fn completion_count(&self, cx: &App) -> usize {
@@ -634,7 +659,12 @@ impl ChatView {
             .collect::<Vec<_>>()
             .join(" ");
         let end = self.composer.update(cx, |editor, cx| {
-            editor.insert(&format!("{prefix}{text} "), window, cx);
+            let separator = if prefix.is_empty() || !follows_word(editor, cx) {
+                ""
+            } else {
+                " "
+            };
+            editor.insert(&format!("{separator}{prefix}{text} "), window, cx);
             let snapshot = editor.display_snapshot(cx);
             editor
                 .selections
@@ -670,14 +700,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) {
         self.composer.update(cx, |editor, cx| {
-            let snapshot = editor.display_snapshot(cx);
-            let start = editor.selections.newest::<MultiBufferOffset>(&snapshot).start.0;
-            let after_word = editor
-                .text(cx)
-                .get(..start)
-                .and_then(|before| before.chars().next_back())
-                .is_some_and(|character| !character.is_whitespace());
-            let separator = if after_word { " " } else { "" };
+            let separator = if follows_word(editor, cx) { " " } else { "" };
             editor.insert(&format!("{separator}{text} "), window, cx);
         });
         window.focus(&self.composer.focus_handle(cx), cx);
