@@ -200,7 +200,7 @@ case "$first" in
   ;;
 
 *scenario:plan-approval*)
-  # The Allow must come after the CLI confirmed the mode change; "auto-refused" refuses auto like a plan without it.
+  # The Allow must come after the CLI confirmed the mode change; "auto-refused" refuses auto like a plan without it, "auto-exits" quits without answering.
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-plan","permissionMode":"plan"}'
   emit '{"type":"control_request","request_id":"cr-plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# Plan"},"tool_use_id":"tu-plan"}}'
   confirmed=plan
@@ -210,6 +210,7 @@ case "$first" in
       rid=$(request_id "$line")
       mode=$(printf '%s\n' "$line" | sed 's/.*"mode":"\([^"]*\)".*/\1/')
       case "$first:$mode" in
+      *auto-exits*:auto) exit 0 ;;
       *auto-refused*:auto)
         emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$rid\",\"error\":\"auto mode is unavailable\"}}"
         ;;
@@ -343,6 +344,9 @@ case "$first" in
     case "$1" in
     *'"subtype":"get_plan"'*)
       emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{\"exists\":true,\"content\":\"the plan\",\"path\":\"plan.md\"}}}"
+      ;;
+    *'"subtype":"set_permission_mode"'*)
+      emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{}}}"
       ;;
     *'"subtype":"mcp_status"'*)
       emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$rid\",\"error\":\"MCP servers are unavailable\"}}"

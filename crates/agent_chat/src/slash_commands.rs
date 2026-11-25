@@ -78,7 +78,7 @@ fn token_of_kind(text: &str, cursor: usize, kind: TokenKind) -> Option<CommandTo
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AppCommand {
     Model,
     New,
@@ -88,10 +88,11 @@ pub(crate) enum AppCommand {
     Files,
     Terminal,
     Stop,
+    Plan { task: Option<String>, open: bool },
 }
 
 impl AppCommand {
-    const ALL: [AppCommand; 8] = [
+    const ALL: [AppCommand; 9] = [
         AppCommand::Model,
         AppCommand::New,
         AppCommand::Resume,
@@ -100,9 +101,13 @@ impl AppCommand {
         AppCommand::Files,
         AppCommand::Terminal,
         AppCommand::Stop,
+        AppCommand::Plan {
+            task: None,
+            open: false,
+        },
     ];
 
-    fn name(self) -> &'static str {
+    fn name(&self) -> &'static str {
         match self {
             AppCommand::Model => "model",
             AppCommand::New => "new",
@@ -112,10 +117,11 @@ impl AppCommand {
             AppCommand::Files => "files",
             AppCommand::Terminal => "terminal",
             AppCommand::Stop => "stop",
+            AppCommand::Plan { .. } => "plan",
         }
     }
 
-    fn description(self) -> SharedString {
+    fn description(&self) -> SharedString {
         match self {
             AppCommand::Model => t!("Wu: choose model and reasoning"),
             AppCommand::New => t!("Wu: start a new chat"),
@@ -125,17 +131,22 @@ impl AppCommand {
             AppCommand::Files => t!("Wu: open project files"),
             AppCommand::Terminal => t!("Wu: open a terminal"),
             AppCommand::Stop => t!("Wu: stop the agent"),
+            AppCommand::Plan { .. } => t!("Wu: plan before making changes"),
         }
     }
 
     /// Dispatched by name so this crate needn't depend on every panel crate.
-    pub fn action_name(self) -> Option<&'static str> {
+    pub fn action_name(&self) -> Option<&'static str> {
         match self {
             AppCommand::Settings => Some("wu::OpenSettings"),
             AppCommand::Diff => Some("git_panel::ToggleFocus"),
             AppCommand::Files => Some("project_panel::ToggleFocus"),
             AppCommand::Terminal => Some("terminal_panel::ToggleFocus"),
-            AppCommand::Model | AppCommand::New | AppCommand::Resume | AppCommand::Stop => None,
+            AppCommand::Model
+            | AppCommand::New
+            | AppCommand::Resume
+            | AppCommand::Stop
+            | AppCommand::Plan { .. } => None,
         }
     }
 }
@@ -205,9 +216,19 @@ pub(crate) fn filter_commands(query: &str, items: Vec<CommandItem>) -> Vec<Comma
 }
 
 pub(crate) fn app_command_for_text(text: &str, items: &[CommandItem]) -> Option<AppCommand> {
-    let name = text.trim().strip_prefix('/')?;
-    items.iter().find_map(|item| match item.target {
-        CommandTarget::App(command) if item.name == name => Some(command),
+    let text = text.trim().strip_prefix('/')?;
+    let (name, argument) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    let argument = argument.trim();
+    items.iter().find_map(|item| match &item.target {
+        CommandTarget::App(AppCommand::Plan { .. }) if item.name == name => {
+            Some(AppCommand::Plan {
+                task: (!argument.is_empty() && argument != "open").then(|| argument.to_string()),
+                open: argument == "open",
+            })
+        }
+        CommandTarget::App(command) if item.name == name && argument.is_empty() => {
+            Some(command.clone())
+        }
         _ => None,
     })
 }
@@ -277,6 +298,27 @@ mod tests {
         assert_eq!(app_command_for_text("/model", &items), None);
         assert_eq!(app_command_for_text("/new", &items), Some(AppCommand::New));
         assert_eq!(app_command_for_text("/new chat", &items), None);
+    }
+
+    #[test]
+    fn plan_takes_a_task_or_open() {
+        let items = command_items(&[]);
+        let plan = |task: Option<&str>, open| AppCommand::Plan {
+            task: task.map(str::to_string),
+            open,
+        };
+        assert_eq!(
+            app_command_for_text("/plan", &items),
+            Some(plan(None, false))
+        );
+        assert_eq!(
+            app_command_for_text("/plan open", &items),
+            Some(plan(None, true))
+        );
+        assert_eq!(
+            app_command_for_text("/plan fix the build", &items),
+            Some(plan(Some("fix the build"), false))
+        );
     }
 
     #[test]

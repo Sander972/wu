@@ -8,7 +8,7 @@ use crate::{
         completion_token, filter_commands,
     },
 };
-use agent_harness::SkillRef;
+use agent_harness::{PermissionMode, SkillRef};
 use editor::{FoldPlaceholder, MultiBufferOffset, SelectionEffects, display_map::Crease};
 use file_icons::FileIcons;
 use gpui::{
@@ -179,7 +179,13 @@ impl ChatView {
     pub(super) fn command_items(&self, cx: &App) -> Vec<CommandItem> {
         let (kind, cwd) = self.session_kind_and_cwd(cx);
         let catalog = self.store.read(cx).commands(kind, &cwd);
-        command_items(catalog.map_or(&[], |catalog| catalog.commands.as_slice()))
+        let mut items = command_items(catalog.map_or(&[], |catalog| catalog.commands.as_slice()));
+        // Other agents have no plan mode: theirs would quietly fall back to Auto.
+        if kind != AgentKind::Claude {
+            items
+                .retain(|item| !matches!(item.target, CommandTarget::App(AppCommand::Plan { .. })));
+        }
+        items
     }
 
     fn rows(&self, cx: &App) -> Vec<Row> {
@@ -535,12 +541,13 @@ impl ChatView {
         let range = menu.token.range;
         let cwd = self.session.read(cx).metadata().cwd.clone();
         let text = match &row {
+            // Inserted like an agent command so a task can follow it.
             Row::Command(CommandItem {
                 target: CommandTarget::App(command),
                 ..
-            }) => {
+            }) if !matches!(command, AppCommand::Plan { .. }) => {
                 self.insert_at_token(range, String::new(), window, cx);
-                self.run_app_command(*command, window, cx);
+                self.run_app_command(command.clone(), window, cx);
                 cx.notify();
                 return;
             }
@@ -638,6 +645,18 @@ impl ChatView {
             },
             AppCommand::Resume => window.dispatch_action(Box::new(ToggleFocus), cx),
             AppCommand::Stop => self.session.update(cx, |session, cx| session.stop(cx)),
+            AppCommand::Plan { open: true, .. } => self.open_plan(window, cx),
+            AppCommand::Plan { task, open: false } => {
+                self.session.update(cx, |session, cx| {
+                    session
+                        .update_settings(|settings| settings.permission = PermissionMode::Plan, cx)
+                });
+                if let Some(task) = task {
+                    self.session
+                        .update(cx, |session, cx| session.send_message(task, cx));
+                    self.glide_to_bottom(cx);
+                }
+            }
             AppCommand::Settings | AppCommand::Diff | AppCommand::Files | AppCommand::Terminal => {
                 let Some(name) = command.action_name() else {
                     return;

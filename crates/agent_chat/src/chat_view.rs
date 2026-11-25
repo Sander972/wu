@@ -141,8 +141,10 @@ struct PermissionEditors {
     command: Option<Entity<Editor>>,
     destination: String,
     plan: Option<Entity<Markdown>>,
+    plan_quote: Option<String>,
     plan_comments: Vec<composer::PlanComment>,
     _command_subscription: Option<Subscription>,
+    _plan_subscription: Option<Subscription>,
 }
 
 #[derive(Clone)]
@@ -611,6 +613,24 @@ impl ChatView {
             let plan = plan.map(|plan| {
                 cx.new(|cx| Markdown::new(plan.into(), Some(languages.clone()), None, cx))
             });
+            let plan_subscription = plan.as_ref().map(|plan| {
+                let question_id = question_id.clone();
+                // Clicking "Comment" clears the plan's selection first, so the latest one is kept.
+                cx.observe(plan, move |this, plan, cx| {
+                    let quote = plan
+                        .read(cx)
+                        .selected_source()
+                        .map(|quote| quote.trim().to_string())
+                        .filter(|quote| !quote.is_empty());
+                    if let Some(quote) = quote
+                        && let Some(editors) = this.permission_editors.get_mut(&question_id)
+                        && editors.plan_quote.as_ref() != Some(&quote)
+                    {
+                        editors.plan_quote = Some(quote);
+                        cx.notify();
+                    }
+                })
+            });
             self.permission_editors.insert(
                 question_id,
                 PermissionEditors {
@@ -618,8 +638,10 @@ impl ChatView {
                     command,
                     destination,
                     plan,
+                    plan_quote: None,
                     plan_comments: Vec::new(),
                     _command_subscription: command_subscription,
+                    _plan_subscription: plan_subscription,
                 },
             );
         }
@@ -5649,6 +5671,49 @@ mod tests {
             assert!(matches!(
                 session.entries().first(),
                 Some(Entry::User { text, .. }) if text.as_ref() == "/nothing-like-this"
+            ))
+        });
+    }
+
+    #[gpui::test]
+    async fn plan_command_switches_mode_and_sends_task(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        bind_composer_keys(cx);
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                session.clone(),
+                store.clone(),
+                project,
+                WeakEntity::new_invalid(),
+                window,
+                cx,
+            )
+        });
+        view.update_in(cx, |view, window, cx| {
+            window.focus(&view.composer.focus_handle(cx), cx)
+        });
+
+        cx.simulate_input("/plan fix the build");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(composer_text(&view, cx), "");
+        session.read_with(cx, |session, _| {
+            assert_eq!(
+                session.settings().permission,
+                agent_harness::PermissionMode::Plan
+            );
+            assert!(matches!(
+                session.entries().first(),
+                Some(Entry::User { text, .. }) if text.as_ref() == "fix the build"
             ))
         });
     }

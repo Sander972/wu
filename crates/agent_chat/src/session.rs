@@ -1019,6 +1019,18 @@ impl PendingQuestion {
     }
 }
 
+/// The agent answered a control request with an error, unlike a stop or a timeout.
+#[derive(Debug)]
+struct ControlRefused(String);
+
+impl std::fmt::Display for ControlRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ControlRefused {}
+
 async fn agent_stopped_waiting(
     mut agent: tokio::sync::oneshot::Sender<Vec<UserInputAnswer>>,
     chat: tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>,
@@ -1141,6 +1153,7 @@ pub struct AgentSession {
     pending_questions: Vec<PendingQuestion>,
     noticed_auto_unavailable: bool,
     permission_before_plan: Option<PermissionMode>,
+    deciding_plans: HashSet<String>,
     languages: Arc<LanguageRegistry>,
     save_metadata_task: Task<()>,
     save_entries_task: Task<()>,
@@ -1218,6 +1231,7 @@ impl AgentSession {
             pending_questions: Vec::new(),
             noticed_auto_unavailable: false,
             permission_before_plan: None,
+            deciding_plans: HashSet::default(),
             languages,
             save_metadata_task: Task::ready(()),
             save_entries_task: Task::ready(()),
@@ -1899,6 +1913,11 @@ impl AgentSession {
         previous == Some(PermissionMode::Auto)
     }
 
+    /// While wu waits for the CLI to confirm a plan's mode, the plan already has its answer.
+    pub fn is_deciding_plan(&self, id: &str) -> bool {
+        self.deciding_plans.contains(id)
+    }
+
     /// Wu switches to `mode` itself before answering, waiting for a live CLI to confirm it; otherwise a `setMode` in the reply switches the CLI and the session follows.
     pub fn decide_plan(
         &mut self,
@@ -1907,6 +1926,9 @@ impl AgentSession {
         decision: PermissionDecision,
         cx: &mut Context<Self>,
     ) {
+        if self.deciding_plans.contains(id) {
+            return;
+        }
         if let Some(mode) = mode
             && self.run.is_some()
         {
@@ -1917,6 +1939,8 @@ impl AgentSession {
                 vec![mode]
             };
             let id = id.to_string();
+            self.deciding_plans.insert(id.clone());
+            cx.notify();
             cx.spawn(async move |this, cx| {
                 let mut confirmed = None;
                 for candidate in candidates {
@@ -1924,18 +1948,30 @@ impl AgentSession {
                         "subtype": "set_permission_mode",
                         "mode": agent_harness::claude::permission_mode_name(candidate),
                     });
-                    let reply = this.update(cx, |session, cx| session.control(request, cx))?;
+                    // Without a run, `control` would start a one-off CLI and the mode would never reach this run.
+                    let reply = this.update(cx, |session, cx| {
+                        session.run.is_some().then(|| session.control(request, cx))
+                    })?;
+                    let Some(reply) = reply else {
+                        break;
+                    };
                     match reply.await {
                         Ok(_) => {
                             confirmed = Some(candidate);
                             break;
                         }
                         Err(error) => {
-                            log::warn!("Claude refused permission mode {candidate:?}: {error}")
+                            log::warn!(
+                                "Claude did not switch to permission mode {candidate:?}: {error}"
+                            );
+                            if error.downcast_ref::<ControlRefused>().is_none() {
+                                break;
+                            }
                         }
                     }
                 }
                 this.update(cx, |session, cx| {
+                    session.deciding_plans.remove(&id);
                     if let Some(mode) = confirmed {
                         session.adopt_permission(mode, cx);
                     }
@@ -2008,7 +2044,7 @@ impl AgentSession {
         self.answer(id, answers, cx);
     }
 
-    /// Asks the running agent, or a one-off agent process for this chat when none runs.
+    /// Asks the running agent, or a one-off agent process for this chat when none runs; a running agent's error reply comes back as `ControlRefused`.
     pub fn control(
         &mut self,
         request: serde_json::Value,
@@ -2029,7 +2065,7 @@ impl AgentSession {
                     answer
                         .await
                         .map_err(|_| stopped())?
-                        .map_err(anyhow::Error::msg)
+                        .map_err(|message| anyhow::Error::new(ControlRefused(message)))
                 })
             }
             None => {
@@ -5120,11 +5156,10 @@ pub(crate) mod tests {
         });
     }
 
-    fn approve_live_plan(
+    fn start_live_plan(
         prompt: &str,
-        mode: PermissionMode,
         cx: &mut TestAppContext,
-    ) -> (Entity<AgentSession>, tempfile::TempDir) {
+    ) -> (Entity<AgentSession>, tempfile::TempDir, String) {
         let directory = tempfile::tempdir().expect("temporary directory");
         let store = new_store(directory.path(), cx);
         let session = store.update(cx, |store, cx| {
@@ -5142,8 +5177,19 @@ pub(crate) mod tests {
                     .is_some_and(PendingQuestion::is_plan)
             })
         });
+        let id = session.read_with(cx, |session, _| {
+            session.pending_questions()[0].id().to_string()
+        });
+        (session, directory, id)
+    }
+
+    fn approve_live_plan(
+        prompt: &str,
+        mode: PermissionMode,
+        cx: &mut TestAppContext,
+    ) -> (Entity<AgentSession>, tempfile::TempDir) {
+        let (session, directory, id) = start_live_plan(prompt, cx);
         session.update(cx, |session, cx| {
-            let id = session.pending_questions()[0].id().to_string();
             let allow = PermissionDecision::Allow {
                 updated_input: None,
                 updated_permissions: Vec::new(),
@@ -5151,9 +5197,49 @@ pub(crate) mod tests {
             session.decide_plan(&id, Some(mode), allow, cx);
         });
         run_until(cx, |cx| {
-            session.read_with(cx, |session, _| !session.is_working())
+            session.read_with(cx, |session, _| {
+                !session.is_working() && !session.is_deciding_plan(&id)
+            })
         });
         (session, directory)
+    }
+
+    #[gpui::test]
+    async fn a_second_plan_decision_is_ignored_while_the_first_switches_modes(
+        cx: &mut TestAppContext,
+    ) {
+        let (session, _directory, id) = start_live_plan("scenario:plan-approval", cx);
+        session.update(cx, |session, cx| {
+            let allow = PermissionDecision::Allow {
+                updated_input: None,
+                updated_permissions: Vec::new(),
+            };
+            session.decide_plan(&id, Some(PermissionMode::AcceptEdits), allow, cx);
+            assert!(session.is_deciding_plan(&id));
+            let keep_planning = PermissionDecision::Deny {
+                message: agent_harness::claude::KEEP_PLANNING.into(),
+                interrupt: true,
+            };
+            session.decide_plan(&id, None, keep_planning, cx);
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| {
+                !session.is_working() && !session.is_deciding_plan(&id)
+            })
+        });
+        assert_eq!(last_reply(&session, cx), "approved in acceptEdits");
+    }
+
+    #[gpui::test]
+    async fn a_run_that_stops_while_switching_to_auto_does_not_fall_back(cx: &mut TestAppContext) {
+        let (session, _directory) = approve_live_plan(
+            "scenario:plan-approval auto-exits",
+            PermissionMode::Auto,
+            cx,
+        );
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.settings().permission, PermissionMode::Plan)
+        });
     }
 
     #[gpui::test]
