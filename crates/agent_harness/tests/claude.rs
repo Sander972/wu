@@ -1,6 +1,3 @@
-
-#![cfg(unix)]
-
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,11 +13,16 @@ use agent_harness::{
     CancellationToken, ClaudeHarness, Harness, HarnessError, RunControls, Steer, SteerMessage,
 };
 
+#[cfg(windows)]
+const FAKE_CLAUDE: &str = "fake-claude.cmd";
+#[cfg(not(windows))]
+const FAKE_CLAUDE: &str = "fake-claude.sh";
+
 fn fixture_path() -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("fake-claude.sh");
+        .join(FAKE_CLAUDE);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -582,6 +584,34 @@ async fn missing_binary_is_not_installed() {
     assert!(matches!(err, HarnessError::NotInstalled(_)), "{err:?}");
 }
 
+fn write_replayer(directory: &std::path::Path, frames: &std::path::Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let cli = directory.join("replay.cmd");
+        std::fs::write(&cli, format!("@type \"{}\"\r\n", frames.display()))
+            .expect("replayer written");
+        cli
+    }
+    #[cfg(not(windows))]
+    {
+        let cli = directory.join("replay.sh");
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\nread -r _first || exit 1\ncat '{}'\n",
+                frames.display()
+            ),
+        )
+        .expect("replayer written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        cli
+    }
+}
+
 #[tokio::test]
 async fn captured_live_text_deltas_stream_one_by_one() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -594,20 +624,7 @@ async fn captured_live_text_deltas_stream_one_by_one() {
     std::fs::create_dir_all(&dir).expect("tmp dir");
     let frames = dir.join("frames.jsonl");
     std::fs::write(&frames, &script).expect("frames written");
-    let cli = dir.join("replay.sh");
-    std::fs::write(
-        &cli,
-        format!(
-            "#!/bin/sh\nread -r _first || exit 1\ncat '{}'\n",
-            frames.display()
-        ),
-    )
-    .expect("replayer written");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let cli = write_replayer(&dir, &frames);
 
     let harness = ClaudeHarness::new().with_executable(&cli);
     let (controls, _steer, _token) = controls("A");
@@ -633,20 +650,7 @@ async fn captured_live_background_subagent_frames_replay_correctly() {
     std::fs::create_dir_all(&dir).expect("tmp dir");
     let frames = dir.join("frames.jsonl");
     std::fs::write(&frames, &script).expect("frames written");
-    let cli = dir.join("replay.sh");
-    std::fs::write(
-        &cli,
-        format!(
-            "#!/bin/sh\nread -r _first || exit 1\ncat '{}'\n",
-            frames.display()
-        ),
-    )
-    .expect("replayer written");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let cli = write_replayer(&dir, &frames);
 
     let harness = ClaudeHarness::new().with_executable(&cli);
     let (controls, _steer, _token) = controls("A");
@@ -762,7 +766,6 @@ async fn live_real_cli_single_turn() {
         })
     ));
 }
-
 
 #[tokio::test]
 async fn a_replay_confirms_superseded_steers_and_the_turn_ends() {
@@ -928,7 +931,10 @@ async fn denied_tool_permissions_reach_the_cli_as_deny() {
 async fn slash_commands_come_from_initialize_in_the_chat_folder() {
     let cwd = tempfile::tempdir().expect("temporary directory");
     let commands = harness().commands(cwd.path()).await.expect("commands");
-    let names: Vec<&str> = commands.iter().map(|command| command.name.as_str()).collect();
+    let names: Vec<&str> = commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
     assert_eq!(names, ["review", "compact"]);
     assert_eq!(commands[0].description, "Review a pull request");
     assert_eq!(commands[0].input_hint.as_deref(), Some("[pr number]"));

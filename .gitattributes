@@ -3,3 +3,6 @@
 
 # Ensure the WSL script always has LF line endings, even on Windows
 crates/wu/resources/windows/zed.sh text eol=lf
+
+# The fake Claude CLI fixture is run through bash, which rejects CRLF line endings
+crates/agent_harness/tests/fixtures/*.sh text eol=lf

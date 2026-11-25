@@ -4414,8 +4414,38 @@ pub(crate) mod tests {
     use gpui::TestAppContext;
 
     fn fake_claude() -> PathBuf {
+        let name = if cfg!(windows) {
+            "fake-claude.cmd"
+        } else {
+            "fake-claude.sh"
+        };
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../agent_harness/tests/fixtures/fake-claude.sh")
+            .join("../agent_harness/tests/fixtures")
+            .join(name)
+    }
+
+    /// Makes a `#!/bin/sh` fixture script runnable as the Claude executable: marks it executable on Unix, and on Windows returns a `.cmd` launcher that runs it with Git's bash because a bare `bash` can resolve to WSL.
+    fn make_launchable(script: PathBuf) -> PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("make fixture executable");
+            script
+        }
+        #[cfg(windows)]
+        {
+            let launcher = script.with_extension("cmd");
+            std::fs::write(
+                &launcher,
+                format!(
+                    "@echo off\r\nset \"GITBASH=bash\"\r\nif exist \"%ProgramFiles%\\Git\\bin\\bash.exe\" set \"GITBASH=%ProgramFiles%\\Git\\bin\\bash.exe\"\r\n\"%GITBASH%\" \"{}\" %*\r\n",
+                    script.display()
+                ),
+            )
+            .expect("write fixture launcher");
+            launcher
+        }
     }
 
     pub(crate) fn new_store(directory: &Path, cx: &mut TestAppContext) -> Entity<AgentStore> {
@@ -5012,10 +5042,8 @@ pub(crate) mod tests {
         })
     }
 
-    #[cfg(unix)]
     #[gpui::test]
     async fn changed_settings_restart_the_agent_with_new_flags(cx: &mut TestAppContext) {
-        use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().expect("temporary directory");
         let script = directory.path().join("echo-args-claude");
         std::fs::write(
@@ -5031,8 +5059,7 @@ done
 "#,
         )
         .expect("write fixture");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("make fixture executable");
+        let script = make_launchable(script);
         let store = new_store(directory.path(), cx);
         store.update(cx, |store, _| {
             store.harnesses.insert(
@@ -5077,10 +5104,8 @@ done
         assert!(second.contains("--resume=sess-args"), "{second}");
     }
 
-    #[cfg(unix)]
     #[gpui::test]
     async fn manual_compaction_reloads_claude_on_the_next_message(cx: &mut TestAppContext) {
-        use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().expect("temporary directory");
         let script = directory.path().join("steer-aware-claude");
         std::fs::write(
@@ -5108,8 +5133,7 @@ done
 "#,
         )
         .expect("write fixture");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("make fixture executable");
+        let script = make_launchable(script);
         let store = new_store(directory.path(), cx);
         store.update(cx, |store, _| {
             store.harnesses.insert(
@@ -7210,10 +7234,8 @@ done
         );
     }
 
-    #[cfg(unix)]
     #[gpui::test]
     async fn an_idle_agent_is_ended_and_the_next_message_resumes_it(cx: &mut TestAppContext) {
-        use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().expect("temporary directory");
         let script = directory.path().join("echo-args-claude");
         std::fs::write(
@@ -7229,8 +7251,7 @@ done
 "#,
         )
         .expect("write fixture");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("make fixture executable");
+        let script = make_launchable(script);
         let store = new_store(directory.path(), cx);
         store.update(cx, |store, _| {
             store.harnesses.insert(

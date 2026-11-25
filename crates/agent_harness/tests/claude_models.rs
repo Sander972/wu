@@ -1,14 +1,22 @@
-#![cfg(unix)]
 use agent_harness::ReasoningLevel;
 use agent_harness::{ClaudeHarness, Harness};
 use serde_json::json;
-use std::os::unix::fs::PermissionsExt;
 
 fn fixture(response: serde_json::Value) -> (tempfile::TempDir, ClaudeHarness) {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("claude");
     std::fs::write(&script, include_str!("fixtures/fake-claude-models.py")).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(windows)]
+    let script = {
+        let launcher = dir.path().join("claude.cmd");
+        std::fs::write(&launcher, "@python \"%~dp0claude\" %*\r\n").unwrap();
+        launcher
+    };
     std::fs::write(dir.path().join("response.json"), response.to_string()).unwrap();
     (dir, ClaudeHarness::new().with_executable(script))
 }

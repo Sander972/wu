@@ -11,7 +11,7 @@ root = pathlib.Path(__file__).parent
 request = json.loads(sys.stdin.readline())
 assert request["type"] == "control_request"
 assert request["request"]["subtype"] == "initialize"
-with (root / "calls").open("a") as calls:
+with (root / "calls").open("a", newline="") as calls:
     calls.write("initialize\n")
 response = json.loads((root / "response.json").read_text())
 response["request_id"] = request["request_id"]
