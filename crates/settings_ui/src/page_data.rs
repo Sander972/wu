@@ -8268,7 +8268,7 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
-    fn agents_section() -> [SettingsPageItem; 7] {
+    fn agents_section() -> [SettingsPageItem; 9] {
         [
             SettingsPageItem::SectionHeader(n!("Agents")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -8307,6 +8307,54 @@ fn agent_chat_page() -> SettingsPage {
                     },
                     write: |settings_content, value, _| {
                         settings_content.agent_chat.get_or_insert_default().autosave = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Send the Editor Selection"),
+                description: n!(
+                    "Send the lines selected in the editor with your next message to Claude Code."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.attach_selection"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent_chat
+                            .as_ref()?
+                            .attach_selection
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .attach_selection = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Send the Open File"),
+                description: n!(
+                    "Tell Claude Code which file is open in the editor when you send a message."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.attach_open_file"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent_chat
+                            .as_ref()?
+                            .attach_open_file
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .attach_open_file = value;
                     },
                 }),
                 metadata: None,

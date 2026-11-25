@@ -157,6 +157,10 @@
     "claude_in_chrome": true,
     // Saves unsaved changes in an open file before Claude Code reads or edits it.
     "autosave": true,
+    // Sends the lines selected in the editor with your next message to Claude Code.
+    "attach_selection": true,
+    // Tells Claude Code which file is open in the editor when you send a message.
+    "attach_open_file": true,
     // How the Git panel writes commit messages.
     "commit_message": {
       // "claude_code", "codex", "opencode" or "antigravity". When unset, the first installed agent.

@@ -154,6 +154,9 @@ pub struct RunRequest {
     /// The agent doesn't keep this run as a saved chat.
     #[serde(default)]
     pub ephemeral: bool,
+    /// Text blocks sent ahead of the prompt, such as the editor selection. Agents without a way to send them ignore them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

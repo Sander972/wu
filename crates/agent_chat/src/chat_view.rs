@@ -5,6 +5,7 @@ mod composer;
 mod dictation;
 mod diff_view;
 mod edit_review;
+mod editor_context;
 mod image_viewer;
 mod links;
 mod mermaid;
@@ -227,6 +228,7 @@ pub struct ChatView {
     outline_hover: Option<usize>,
     expanded_work: HashSet<usize>,
     todo_panel: todo_panel::TodoPanelState,
+    editor_context: editor_context::EditorContextState,
     known_paths: HashMap<std::path::PathBuf, links::PathState>,
     next_path_recheck: Option<Instant>,
     link_menu: Option<links::LinkMenu>,
@@ -306,7 +308,7 @@ impl ChatView {
         list.set_follow_mode(FollowMode::Tail);
         let diagrams = cx.new(|_| MermaidDiagrams::default());
         let images = image_viewer::ChatImageCache::new(cx);
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.observe_in(&session, window, |this, session, window, cx| {
                 if session.read(cx).is_deleted() {
                     cx.emit(ItemEvent::CloseItem);
@@ -351,7 +353,22 @@ impl ChatView {
                 this.track_diagram_images(cx);
                 cx.notify();
             }),
+            cx.observe_global::<settings::SettingsStore>(|this, cx| {
+                this.refresh_editor_context(cx)
+            }),
         ];
+        if let Some(workspace) = workspace.upgrade() {
+            subscriptions.push(cx.subscribe(
+                &workspace,
+                |this, _, event: &workspace::Event, cx| {
+                    if matches!(event, workspace::Event::ActiveItemChanged) {
+                        this.watch_active_editor(cx);
+                    }
+                },
+            ));
+        }
+        // The workspace may be mid-update while it creates this chat, so read it once that's over.
+        cx.defer_in(window, |this, _, cx| this.watch_active_editor(cx));
         let mut view = Self {
             session,
             subagent,
@@ -419,6 +436,7 @@ impl ChatView {
             outline_hover: None,
             expanded_work: HashSet::default(),
             todo_panel: Default::default(),
+            editor_context: Default::default(),
             known_paths: HashMap::default(),
             next_path_recheck: None,
             link_menu: None,
@@ -1007,10 +1025,12 @@ impl ChatView {
             .into_iter()
             .filter(|skill| text.contains(&format!("${}", skill.name)))
             .collect();
+        let context = self.take_editor_context(&text, cx);
         let prompt = Prompt {
             text,
             attachments: std::mem::take(&mut self.attachments),
             skills,
+            context,
         };
         self.attachment_error = None;
         if self.editing_queued.is_some() {
@@ -6002,5 +6022,170 @@ mod tests {
                 Some(Entry::User { text, .. }) if text.as_ref() == "fix the build"
             ))
         });
+    }
+
+    /// A Claude chat in a tab next to `open`, with the fake CLI logging each message it gets.
+    async fn editor_context_chat<'a>(
+        files: serde_json::Value,
+        open: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (
+        Entity<ChatView>,
+        Entity<Editor>,
+        tempfile::TempDir,
+        &'a mut VisualTestContext,
+    ) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        bind_composer_keys(cx);
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(&directory.path().join("chats"), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/proj", files).await;
+        let project = project::Project::test(fs, [std::path::Path::new("/proj")], cx).await;
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        cx.run_until_parked();
+        let editor = workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_abs_path(open.into(), Default::default(), window, cx)
+            })
+            .await
+            .expect("open file")
+            .downcast::<Editor>()
+            .expect("an editor");
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            let weak = cx.entity().downgrade();
+            let chat = cx.new(|cx| {
+                ChatView::new(
+                    session.clone(),
+                    store.clone(),
+                    project.clone(),
+                    weak,
+                    window,
+                    cx,
+                )
+            });
+            workspace.add_item_to_active_pane(Box::new(chat.clone()), None, true, window, cx);
+            chat
+        });
+        cx.run_until_parked();
+        (view, editor, directory, cx)
+    }
+
+    fn select_rows(editor: &Entity<Editor>, rows: Range<u32>, cx: &mut VisualTestContext) {
+        editor.update_in(cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                selections.select_ranges([
+                    language::Point::new(rows.start, 0)..language::Point::new(rows.end, 0)
+                ])
+            })
+        });
+    }
+
+    /// Sends `text` from the composer and returns the line the agent got.
+    fn send_and_record(
+        view: &Entity<ChatView>,
+        directory: &std::path::Path,
+        text: &str,
+        cx: &mut VisualTestContext,
+    ) -> String {
+        let log = directory.join(".sent-prompts");
+        let lines = |log: &std::path::Path| -> Vec<String> {
+            std::fs::read_to_string(log)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        };
+        let before = lines(&log).len();
+        view.update_in(cx, |view, window, cx| {
+            window.focus(&view.composer.focus_handle(cx), cx)
+        });
+        cx.simulate_input(text);
+        cx.simulate_keystrokes("enter");
+        let session = view.read_with(cx, |view, _| view.session.clone());
+        run_until(cx, |cx| {
+            lines(&log).len() > before && !session.read_with(cx, |session, _| session.is_working())
+        });
+        lines(&log).pop().unwrap_or_default()
+    }
+
+    const FOUR_LINES: &str = "one\ntwo\nthree\nfour\n";
+
+    #[gpui::test]
+    async fn selection_is_sent_once_until_it_changes(cx: &mut TestAppContext) {
+        let files = serde_json::json!({ "main.rs": FOUR_LINES });
+        let (view, editor, directory, cx) = editor_context_chat(files, "/proj/main.rs", cx).await;
+        select_rows(&editor, 0..2, cx);
+        let first = send_and_record(&view, directory.path(), "scenario:record explain", cx);
+        assert!(
+            first.contains("<ide_selection>The user selected the lines 1 to 2 from "),
+            "{first}"
+        );
+        assert!(
+            first.contains(r"main.rs:\none\ntwo\n\n\nThis may"),
+            "{first}"
+        );
+        let again = send_and_record(&view, directory.path(), "and again", cx);
+        assert!(!again.contains("<ide_"), "{again}");
+        select_rows(&editor, 2..3, cx);
+        let changed = send_and_record(&view, directory.path(), "and this", cx);
+        assert!(changed.contains("the lines 3 to 3 from "), "{changed}");
+        let block_at = changed.find("<ide_selection>");
+        let typed_at = changed.find("and this");
+        assert!(block_at < typed_at, "{changed}");
+    }
+
+    #[gpui::test]
+    async fn slash_commands_get_no_context(cx: &mut TestAppContext) {
+        let files = serde_json::json!({ "main.rs": FOUR_LINES });
+        let (view, editor, directory, cx) = editor_context_chat(files, "/proj/main.rs", cx).await;
+        select_rows(&editor, 0..1, cx);
+        let command = send_and_record(&view, directory.path(), "/review scenario:record", cx);
+        assert!(!command.contains("<ide_"), "{command}");
+        let message = send_and_record(&view, directory.path(), "explain", cx);
+        assert!(message.contains("the lines 1 to 1 from "), "{message}");
+    }
+
+    #[gpui::test]
+    async fn ignored_file_sends_path_only(cx: &mut TestAppContext) {
+        let files = serde_json::json!({
+            ".git": {},
+            ".gitignore": "secret.txt\n",
+            "secret.txt": FOUR_LINES,
+        });
+        let (view, editor, directory, cx) =
+            editor_context_chat(files, "/proj/secret.txt", cx).await;
+        select_rows(&editor, 0..2, cx);
+        let line = send_and_record(&view, directory.path(), "scenario:record explain", cx);
+        assert!(
+            line.contains("<ide_opened_file>The user opened the file "),
+            "{line}"
+        );
+        assert!(line.contains("secret.txt in the IDE."), "{line}");
+        assert!(!line.contains("<ide_selection>"), "{line}");
+        assert!(!line.contains("one"), "{line}");
+    }
+
+    #[gpui::test]
+    async fn dismissed_context_is_not_sent(cx: &mut TestAppContext) {
+        let files = serde_json::json!({ "main.rs": FOUR_LINES });
+        let (view, editor, directory, cx) = editor_context_chat(files, "/proj/main.rs", cx).await;
+        select_rows(&editor, 0..2, cx);
+        view.update(cx, |view, cx| view.dismiss_editor_context(cx));
+        let dismissed = send_and_record(&view, directory.path(), "scenario:record explain", cx);
+        assert!(!dismissed.contains("<ide_"), "{dismissed}");
+        select_rows(&editor, 1..3, cx);
+        let changed = send_and_record(&view, directory.path(), "and this", cx);
+        assert!(changed.contains("the lines 2 to 3 from "), "{changed}");
     }
 }

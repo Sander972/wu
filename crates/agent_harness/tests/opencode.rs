@@ -261,6 +261,7 @@ fn request(prompt: &str) -> RunRequest {
         chrome: false,
         drop_prompt: None,
         ephemeral: false,
+        context: Vec::new(),
     }
 }
 
@@ -551,6 +552,7 @@ async fn steer_queues_mid_turn_and_delivers_at_idle() {
             message_id: None,
             attachments: vec!["/tmp/extra.png".into()],
             skills: Vec::new(),
+            context: Vec::new(),
             settings: None,
         }))
         .await

@@ -146,6 +146,7 @@ fn steer(prompt: &str) -> crate::Steer {
         message_id: None,
         attachments: Vec::new(),
         skills: Vec::new(),
+        context: Vec::new(),
         settings: None,
     })
 }
@@ -3682,6 +3683,7 @@ fn steer_with(prompt: &str, model: &str, reasoning: Option<ReasoningLevel>) -> c
         message_id: None,
         attachments: Vec::new(),
         skills: Vec::new(),
+        context: Vec::new(),
         settings: Some(TurnSettings {
             model: Some(model.into()),
             reasoning,

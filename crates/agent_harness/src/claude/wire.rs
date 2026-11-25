@@ -320,23 +320,24 @@ pub(crate) struct ImageBlock {
     pub base64_data: String,
 }
 
-fn user_content(text: &str, images: &[ImageBlock]) -> Value {
-    if images.is_empty() {
+fn user_content(text: &str, images: &[ImageBlock], context: &[String]) -> Value {
+    if images.is_empty() && context.is_empty() {
         return Value::String(text.to_owned());
     }
-    let mut blocks: Vec<Value> = images
+    let mut blocks: Vec<Value> = context
         .iter()
-        .map(|image| {
-            json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": image.media_type,
-                    "data": image.base64_data,
-                },
-            })
-        })
+        .map(|context| json!({ "type": "text", "text": context }))
         .collect();
+    blocks.extend(images.iter().map(|image| {
+        json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.media_type,
+                "data": image.base64_data,
+            },
+        })
+    }));
     // The API rejects empty text blocks, which image-only messages would otherwise carry.
     if !text.trim().is_empty() {
         blocks.push(json!({ "type": "text", "text": text }));
@@ -344,11 +345,16 @@ fn user_content(text: &str, images: &[ImageBlock]) -> Value {
     Value::Array(blocks)
 }
 
-pub(crate) fn user_message_line(text: &str, images: &[ImageBlock], id: &str) -> String {
+pub(crate) fn user_message_line(
+    text: &str,
+    images: &[ImageBlock],
+    context: &[String],
+    id: &str,
+) -> String {
     json!({
         "type": "user",
         "uuid": id,
-        "message": { "role": "user", "content": user_content(text, images) },
+        "message": { "role": "user", "content": user_content(text, images, context) },
         "parent_tool_use_id": null,
     })
     .to_string()
@@ -358,6 +364,7 @@ pub(crate) fn user_message_line(text: &str, images: &[ImageBlock], id: &str) -> 
 pub(crate) fn steer_message_line(
     text: &str,
     images: &[ImageBlock],
+    context: &[String],
     id: &str,
     immediate: bool,
 ) -> String {
@@ -365,7 +372,7 @@ pub(crate) fn steer_message_line(
         "type": "user",
         "uuid": id,
         "priority": if immediate { "now" } else { "next" },
-        "message": { "role": "user", "content": user_content(text, images) },
+        "message": { "role": "user", "content": user_content(text, images, context) },
         "parent_tool_use_id": null,
     })
     .to_string()
@@ -559,18 +566,49 @@ mod tests {
             media_type: "image/png",
             base64_data: "AAAA".into(),
         };
-        let content = user_content("  ", std::slice::from_ref(&image));
+        let content = user_content("  ", std::slice::from_ref(&image), &[]);
         assert_eq!(content.as_array().map(Vec::len), Some(1));
         assert_eq!(content[0]["type"], "image");
-        assert_eq!(user_content("hi", &[]), serde_json::Value::String("hi".into()));
+        assert_eq!(
+            user_content("hi", &[], &[]),
+            serde_json::Value::String("hi".into())
+        );
+    }
+
+    #[test]
+    fn context_blocks_come_first_and_text_last() {
+        let image = ImageBlock {
+            media_type: "image/png",
+            base64_data: "AAAA".into(),
+        };
+        let content = user_content(
+            "what does this do?",
+            std::slice::from_ref(&image),
+            &["<ide_opened_file>x</ide_opened_file>".to_owned()],
+        );
+        let kinds: Vec<&str> = content
+            .as_array()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|block| block["type"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(kinds, ["text", "image", "text"]);
+        assert_eq!(content[0]["text"], "<ide_opened_file>x</ide_opened_file>");
+        assert_eq!(content[2]["text"], "what does this do?");
+        let without_image =
+            user_content("hi", &[], &["<ide_selection>y</ide_selection>".to_owned()]);
+        assert_eq!(without_image.as_array().map(Vec::len), Some(2));
     }
 
     #[test]
     fn steer_priority_follows_tool_state() {
         let now: serde_json::Value =
-            serde_json::from_str(&steer_message_line("hi", &[], "u1", true)).unwrap();
+            serde_json::from_str(&steer_message_line("hi", &[], &[], "u1", true)).unwrap();
         let next: serde_json::Value =
-            serde_json::from_str(&steer_message_line("hi", &[], "u2", false)).unwrap();
+            serde_json::from_str(&steer_message_line("hi", &[], &[], "u2", false)).unwrap();
         assert_eq!(now["priority"], "now");
         assert_eq!(next["priority"], "next");
         assert_eq!(next["uuid"], "u2");
@@ -595,7 +633,7 @@ mod tests {
 
     #[test]
     fn user_line_shape_matches_protocol() {
-        let line = user_message_line("hi", &[], "u1");
+        let line = user_message_line("hi", &[], &[], "u1");
         let v: Value = serde_json::from_str(&line).expect("json");
         assert_eq!(v["type"], "user");
         assert_eq!(v["uuid"], "u1");
@@ -610,8 +648,8 @@ mod tests {
             base64_data: "AAAA".into(),
         }];
         for line in [
-            user_message_line("look", &images, "u1"),
-            steer_message_line("look", &images, "u1", true),
+            user_message_line("look", &images, &[], "u1"),
+            steer_message_line("look", &images, &[], "u1", true),
         ] {
             let v: Value = serde_json::from_str(&line).expect("json");
             let content = v["message"]["content"].as_array().expect("blocks");

@@ -67,6 +67,7 @@ impl ChatView {
                 text: self.composer.read(cx).text(cx),
                 attachments: std::mem::take(&mut self.attachments),
                 skills: std::mem::take(&mut self.composer_skills),
+                ..Default::default()
             },
         };
         let Some(prompt) = self
@@ -126,10 +127,12 @@ impl ChatView {
         else {
             return;
         };
+        self.forget_sent_editor_context();
         prompt.merge(Prompt {
             text: self.composer.read(cx).text(cx),
             attachments: std::mem::take(&mut self.attachments),
             skills: std::mem::take(&mut self.composer_skills),
+            ..Default::default()
         });
         self.set_composer_prompt(prompt, window, cx);
         window.focus(&self.composer.focus_handle(cx), cx);

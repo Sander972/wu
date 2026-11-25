@@ -62,6 +62,8 @@ pub struct SteerMessage {
     pub skills: Vec<SkillRef>,
     /// Set when the settings changed since the run started; they apply from the next turn on.
     pub settings: Option<TurnSettings>,
+    /// Same as `RunRequest::context`.
+    pub context: Vec<String>,
 }
 
 pub enum Steer {

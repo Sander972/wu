@@ -1187,6 +1187,14 @@ pub struct AgentChatSettingsContent {
     ///
     /// Default: true
     pub autosave: Option<bool>,
+    /// Send the lines selected in the editor with your next message to Claude Code.
+    ///
+    /// Default: true
+    pub attach_selection: Option<bool>,
+    /// Tell Claude Code which file is open in the editor when you send a message.
+    ///
+    /// Default: true
+    pub attach_open_file: Option<bool>,
     /// How the Git panel writes commit messages.
     pub commit_message: Option<AgentChatCommitMessageContent>,
 }

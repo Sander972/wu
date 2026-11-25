@@ -51,6 +51,7 @@ fn request(prompt: &str) -> RunRequest {
         chrome: false,
         drop_prompt: None,
         ephemeral: false,
+        context: Vec::new(),
     }
 }
 
@@ -297,6 +298,7 @@ async fn steering_uses_turn_steer_with_expected_turn_id() {
             message_id: None,
             attachments: Vec::new(),
             skills: Vec::new(),
+            context: Vec::new(),
             settings: None,
         }))
         .await
@@ -343,6 +345,7 @@ async fn rejected_steer_falls_back_to_a_follow_up_turn() {
             message_id: None,
             attachments: Vec::new(),
             skills: Vec::new(),
+            context: Vec::new(),
             settings: None,
         }))
         .await
@@ -971,6 +974,7 @@ async fn live_subagent_spawn_and_followup_keep_one_transcript() {
                 message_id: None,
                 attachments: Vec::new(),
                 skills: Vec::new(),
+                context: Vec::new(),
                 settings: None,
             })).await.unwrap();
         }
@@ -1256,6 +1260,7 @@ async fn native_command_during_a_turn_waits_for_its_boundary() {
                             message_id: None,
                             attachments: Vec::new(),
                             skills: Vec::new(),
+                            context: Vec::new(),
                             settings: None,
                         }))
                         .await
@@ -1298,6 +1303,7 @@ async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
                                 message_id: None,
                                 attachments: Vec::new(),
                                 skills: Vec::new(),
+                                context: Vec::new(),
                                 settings: None,
                             }))
                             .await
@@ -1427,6 +1433,7 @@ async fn image_attachments_become_local_image_inputs_on_start_and_steer() {
             message_id: None,
             attachments: vec!["/tmp/steer.png".into()],
             skills: Vec::new(),
+            context: Vec::new(),
             settings: None,
         }))
         .await
@@ -1450,6 +1457,7 @@ async fn selected_skills_become_skill_inputs_on_start_and_steer() {
             message_id: Some("skill-steer".into()),
             attachments: Vec::new(),
             skills: vec![skill_ref("review", "/repo/other/SKILL.md")],
+            context: Vec::new(),
             settings: None,
         }))
         .await
@@ -1473,6 +1481,7 @@ async fn skills_survive_a_rejected_steer_falling_back_to_a_new_turn() {
             message_id: None,
             attachments: Vec::new(),
             skills: vec![skill_ref("followup", "/repo/followup/SKILL.md")],
+            context: Vec::new(),
             settings: None,
         }))
         .await
@@ -1504,6 +1513,7 @@ fn message(prompt: &str) -> Steer {
         message_id: None,
         attachments: Vec::new(),
         skills: Vec::new(),
+        context: Vec::new(),
         settings: None,
     })
 }
@@ -1797,6 +1807,7 @@ async fn changed_settings_ride_the_next_turn_without_a_restart() {
             message_id: None,
             attachments: Vec::new(),
             skills: Vec::new(),
+            context: Vec::new(),
             settings: Some(changed),
         }))
         .await

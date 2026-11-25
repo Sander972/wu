@@ -35,6 +35,8 @@ pub struct AgentChatSettings {
     pub prevent_idle_sleep: bool,
     pub claude_in_chrome: bool,
     pub autosave: bool,
+    pub attach_selection: bool,
+    pub attach_open_file: bool,
     pub commit_message: CommitMessageSettings,
 }
 
@@ -125,6 +127,8 @@ impl Settings for AgentChatSettings {
             prevent_idle_sleep: content.prevent_idle_sleep.unwrap_or(true),
             claude_in_chrome: content.claude_in_chrome.unwrap_or(true),
             autosave: content.autosave.unwrap_or(true),
+            attach_selection: content.attach_selection.unwrap_or(true),
+            attach_open_file: content.attach_open_file.unwrap_or(true),
             commit_message: {
                 let commit_message = content.commit_message.unwrap_or_default();
                 CommitMessageSettings {

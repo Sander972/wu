@@ -273,6 +273,22 @@ case "$first" in
   esac
   ;;
 
+*scenario:record*)
+  # Logs every user line to .sent-prompts and answers each one, so agent_chat tests can see what each message carried.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-record"}'
+  line=$first
+  while :; do
+    case "$line" in
+    *'"type":"user"'*)
+      printf '%s\n' "$line" >> .sent-prompts
+      emit "$line"
+      emit '{"type":"result","subtype":"success","result":"recorded","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-record"}'
+      ;;
+    esac
+    read -r line || exit 0
+  done
+  ;;
+
 *scenario:steer*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-steer"}'
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"first"}}}'

@@ -76,6 +76,7 @@ fn request(prompt: &str) -> RunRequest {
         chrome: false,
         drop_prompt: None,
         ephemeral: false,
+        context: Vec::new(),
     }
 }
 
@@ -243,6 +244,7 @@ async fn steering_mid_turn_ends_in_one_done() {
             message_id: None,
             attachments: Vec::new(),
             skills: Vec::new(),
+            context: Vec::new(),
             settings: None,
         }))
         .await
@@ -450,6 +452,7 @@ async fn messages_wait_for_the_turn_when_the_agent_cant_steer() {
             message_id: None,
             attachments: Vec::new(),
             skills: Vec::new(),
+            context: Vec::new(),
             settings: None,
         }))
         .await
@@ -515,6 +518,7 @@ fn message(prompt: &str, settings: Option<TurnSettings>) -> Steer {
         message_id: None,
         attachments: Vec::new(),
         skills: Vec::new(),
+        context: Vec::new(),
         settings,
     })
 }

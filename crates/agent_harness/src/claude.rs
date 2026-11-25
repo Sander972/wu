@@ -721,6 +721,7 @@ impl Harness for ClaudeHarness {
             chrome: false,
             drop_prompt: None,
             ephemeral: resume.is_none(),
+            context: Vec::new(),
         };
         let mut cmd = self.build_command(&exe, &launch, None);
         cmd.stderr(Stdio::null());
@@ -867,6 +868,7 @@ impl ClaudeHarness {
                 &with_skills(&request.prompt, &request.skills),
             ),
             &images,
+            &request.context,
             &first_prompt_id,
         );
         stdin_tx.send(StdinMsg::Line(first)).ok();
@@ -1350,6 +1352,7 @@ async fn run_session(session: Session) {
                     let line = wire::steer_message_line(
                         &apply_ultrathink(reasoning, &with_skills(&msg.prompt, &msg.skills)),
                         &images,
+                        &msg.context,
                         &id,
                         open_tools.is_empty(),
                     );
@@ -2030,6 +2033,7 @@ mod tests {
             chrome: false,
             drop_prompt: None,
             ephemeral: false,
+            context: Vec::new(),
         };
         assert!(flag_settings(&request).is_empty());
         request.auto_compact_tokens = Some(150_000);
@@ -2056,6 +2060,7 @@ mod tests {
             chrome: true,
             drop_prompt: None,
             ephemeral: false,
+            context: Vec::new(),
         };
         let harness = ClaudeHarness::new();
         let args = |request: &RunRequest| -> Vec<String> {
@@ -2092,6 +2097,7 @@ mod tests {
             chrome: false,
             drop_prompt: None,
             ephemeral: false,
+            context: Vec::new(),
         };
         let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
         let value = command
@@ -2119,6 +2125,7 @@ mod tests {
             chrome: false,
             drop_prompt: None,
             ephemeral: false,
+            context: Vec::new(),
         };
         let harness = ClaudeHarness::new();
         let persists = |request: &RunRequest| {

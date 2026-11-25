@@ -324,6 +324,8 @@ pub struct Prompt {
     pub text: String,
     pub attachments: Vec<PathBuf>,
     pub skills: Vec<SkillRef>,
+    /// Blocks the agent reads ahead of the text, such as the editor selection.
+    pub context: Vec<String>,
 }
 
 impl Prompt {
@@ -347,6 +349,7 @@ impl Prompt {
         }
         self.attachments.extend(other.attachments);
         self.skills.extend(other.skills);
+        self.context.extend(other.context);
     }
 }
 
@@ -462,6 +465,8 @@ struct SavedPrompt {
     attachments: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     skills: Vec<SkillRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    context: Vec<String>,
 }
 
 impl From<SavedPrompt> for Prompt {
@@ -470,6 +475,7 @@ impl From<SavedPrompt> for Prompt {
             text: saved.text,
             attachments: saved.attachments,
             skills: saved.skills,
+            context: saved.context,
         }
     }
 }
@@ -480,6 +486,7 @@ impl From<&Prompt> for SavedPrompt {
             text: prompt.text.clone(),
             attachments: prompt.attachments.clone(),
             skills: prompt.skills.clone(),
+            context: prompt.context.clone(),
         }
     }
 }
@@ -1723,7 +1730,10 @@ impl AgentSession {
         }
         if let Some(prompt) = edited.filter(|prompt| !prompt.is_empty()) {
             match self.queue.iter_mut().find(|queued| queued.id == id) {
-                Some(queued) => queued.prompt = prompt,
+                Some(queued) => {
+                    let context = std::mem::take(&mut queued.prompt.context);
+                    queued.prompt = Prompt { context, ..prompt };
+                }
                 None => self.enqueue(prompt, cx),
             }
             self.save_entries_soon(cx);
@@ -1761,6 +1771,7 @@ impl AgentSession {
             text: text.to_string(),
             attachments: attachments.clone(),
             skills: skills.clone(),
+            ..Default::default()
         };
         self.transcript.truncate(index);
         self.metadata.dropped_prompt = self.editable_prompt.take();
@@ -1803,6 +1814,7 @@ impl AgentSession {
             text: text.to_string(),
             attachments: attachments.clone(),
             skills: skills.clone(),
+            ..Default::default()
         };
         let notices = self.transcript.entries[index + 1..]
             .iter()
@@ -1879,6 +1891,7 @@ impl AgentSession {
                 settings: self
                     .unsent_settings
                     .then(|| turn_settings(&self.metadata.settings)),
+                context: prompt.context.clone(),
             };
             if run.steering.try_send(Steer::Message(steer)).is_ok() {
                 self.unsent_settings = false;
@@ -2422,6 +2435,7 @@ impl AgentSession {
             chrome: AgentChatSettings::get_global(cx).claude_in_chrome,
             drop_prompt,
             ephemeral: false,
+            context: prompt.context.clone(),
         };
         let (steering_tx, steering_rx) = tokio::sync::mpsc::channel(32);
         let interrupt = CancellationToken::new();
@@ -4535,6 +4549,7 @@ impl AgentStore {
                                     text: text.clone(),
                                     attachments: attachments.clone(),
                                     skills: skills.clone(),
+                                    ..Default::default()
                                 };
                                 let prompt_id = prompt_id.clone();
                                 entries.truncate(index);

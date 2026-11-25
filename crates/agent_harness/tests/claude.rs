@@ -57,6 +57,7 @@ fn request(prompt: &str) -> RunRequest {
         chrome: false,
         drop_prompt: None,
         ephemeral: false,
+        context: Vec::new(),
     }
 }
 
@@ -260,6 +261,7 @@ async fn a_silently_adopted_mode_changes_prompts_without_a_mode_request() {
             message_id: None,
             attachments: Vec::new(),
             skills: Vec::new(),
+            context: Vec::new(),
             settings: None,
         }))
         .await
@@ -547,6 +549,7 @@ async fn steering_lines_are_written_to_stdin_mid_run() {
             message_id: None,
             attachments: Vec::new(),
             skills: Vec::new(),
+            context: Vec::new(),
             settings: None,
         }))
         .await
@@ -609,6 +612,7 @@ async fn image_attachments_ride_the_prompt_and_steers_as_image_blocks() {
             message_id: None,
             attachments: vec![path(&jpeg)],
             skills: Vec::new(),
+            context: Vec::new(),
             settings: None,
         }))
         .await
@@ -907,6 +911,7 @@ async fn a_replay_confirms_superseded_steers_and_the_turn_ends() {
                 message_id: None,
                 attachments: Vec::new(),
                 skills: Vec::new(),
+                context: Vec::new(),
                 settings: None,
             }))
             .await
@@ -949,6 +954,7 @@ async fn an_unreplayed_steer_releases_the_turn_end() {
             message_id: None,
             attachments: Vec::new(),
             skills: Vec::new(),
+            context: Vec::new(),
             settings: None,
         }))
         .await
@@ -1098,6 +1104,7 @@ fn message(prompt: &str) -> Steer {
         message_id: None,
         attachments: Vec::new(),
         skills: Vec::new(),
+        context: Vec::new(),
         settings: None,
     })
 }
@@ -1344,6 +1351,7 @@ async fn a_model_change_reaches_the_running_agent_without_a_restart() {
             message_id: None,
             attachments: Vec::new(),
             skills: Vec::new(),
+            context: Vec::new(),
             settings: Some(settings),
         })
     };
