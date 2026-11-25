@@ -26,6 +26,19 @@ request_id() { printf '%s\n' "$1" | sed 's/.*"request_id":"\([^"]*\)".*/\1/'; }
 text_of() { printf '%s\n' "$1" | sed 's/.*"content":"\([^"]*\)".*/\1/'; }
 text_delta() { emit "{\"type\":\"stream_event\",\"parent_tool_use_id\":null,\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"$1\"}}}"; }
 
+# Logged with the turn state ($2) so tests can tell which rewinds were sent, and whether a turn was running.
+answer_rewind() {
+  printf '%s %s\n' "$2" "$1" >> .rewind-requests
+  case "$1" in
+  *'"user_message_id":"no-checkpoint"'*)
+    emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$(request_id "$1")\",\"response\":{\"canRewind\":false,\"error\":\"No checkpoint\"}}}"
+    ;;
+  *)
+    emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$(request_id "$1")\",\"response\":{\"canRewind\":true,\"filesChanged\":[\"/repo/src/a.rs\",\"/repo/b.rs\"],\"insertions\":3,\"deletions\":1}}}"
+    ;;
+  esac
+}
+
 # Shape mirrors 2.1.228's control_response: commands under response.response.
 answer_initialize() {
   rid=$(request_id "$1")
@@ -352,6 +365,7 @@ case "$first" in
     *'"subtype":"mcp_status"'*)
       emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$rid\",\"error\":\"MCP servers are unavailable\"}}"
       ;;
+    *'"subtype":"rewind_files"'*) answer_rewind "$1" "idle" ;;
     esac
   }
   case "$first" in
@@ -385,6 +399,9 @@ case "$first" in
   while read -r line; do
     case "$line" in
     *'"type":"control_response"'*) text_delta "late answer" ;;
+    *'"subtype":"rewind_files"'*)
+      if [ "$running" = true ]; then answer_rewind "$line" running; else answer_rewind "$line" idle; fi
+      ;;
     *'"subtype":"interrupt"'*)
       emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$(request_id "$line")\"}}"
       if [ "$running" = true ]; then

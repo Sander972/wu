@@ -16,13 +16,17 @@ mod side_pane;
 mod todo_panel;
 
 use crate::{
-    AgentChatSettings, MoveChatToPanel, MoveChatToTab, RenameChat, Send, Stop, SubmitAnswer,
+    AgentChatSettings, AgentKind, MoveChatToPanel, MoveChatToTab, RenameChat, Send, Stop,
+    SubmitAnswer,
     chat_style::{
         Chip, accent, flavour_seed, flavour_word, format_elapsed, gradient_spinner, hairline, ink,
         mix, page, text_faint, ui, wash, working_animation,
     },
     model_picker::{ModelPicker, Selection, agent_icon},
-    session::{AgentSession, AgentStore, Entry, PendingQuestion, Prompt, ToolEntry, ToolStatus},
+    session::{
+        AgentSession, AgentStore, Entry, PendingQuestion, Prompt, RewindPreview, ToolEntry,
+        ToolStatus,
+    },
     slash_commands::{CommandToken, app_command_for_text},
     usage_rings::{ContextCard, UsageCard, context_chip, usage_chip},
 };
@@ -34,9 +38,11 @@ use theme_settings::ThemeSettings;
 use collections::{HashMap, HashSet};
 use editor::{Editor, EditorEvent};
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, Bounds, ClipboardItem, ContentMask,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, Bounds, ClickEvent, ClipboardItem,
+    ContentMask,
     Context, Entity, EventEmitter, FillOptions, FillRule, FocusHandle, Focusable, FontWeight,
-    Hsla, IntoElement, ParentElement, KeyContext, PathBuilder, PathStyle, Pixels, Point, Render,
+    Hsla, IntoElement, ParentElement, KeyContext, PathBuilder, PathStyle, Pixels, Point,
+    PromptButton, PromptLevel, Render,
     ScrollHandle, SharedString, StyleRefinement, Styled, ObjectFit, Subscription, Svg,
     ease_out_quint, Task, TextAlign, TextRun, TextStyleRefinement, Transformation,
     UnderlineStyle, WeakEntity, Window, canvas, div, img, percentage, point, px, radians, size,
@@ -60,7 +66,7 @@ use std::{
 use theme::ActiveTheme as _;
 use util::ResultExt as _;
 use ui::{
-    Icon, IconName, IconSize, Label, PopoverMenu, PopoverMenuHandle,
+    ContextMenu, Icon, IconName, IconSize, Label, PopoverMenu, PopoverMenuHandle,
     Tooltip, prelude::*,
 };
 use std::time::Instant;
@@ -1779,6 +1785,7 @@ impl ChatView {
         copy: Option<(SharedString, CopySource)>,
         save: Option<SaveTarget>,
         editable: bool,
+        rewind: Option<usize>,
         align_end: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -1809,6 +1816,27 @@ impl ChatView {
                                     cx.stop_propagation();
                                     this.edit_last_message(window, cx)
                                 })),
+                        )
+                    })
+                    .when_some(rewind, |this, index| {
+                        this.child(
+                            div()
+                                .id(("rewind-message", index))
+                                .size(px(SPACE_MD * 2.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(ink(0.08, cx)))
+                                .tooltip(Tooltip::text(t!("Rewind")))
+                                .child(icon(IconName::RotateCcw, 14.).text_color(muted))
+                                .on_click(cx.listener(
+                                    move |this, event: &ClickEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        this.show_rewind_menu(index, event.position(), window, cx)
+                                    },
+                                )),
                         )
                     })
                     .when_some(copy, |this, (copy_key, copy_source)| {
@@ -1957,6 +1985,7 @@ impl ChatView {
         let attachments = attachments.clone();
         let editable =
             self.subagent.is_none() && self.session.read(cx).editable_message() == Some(index);
+        let rewind = self.subagent.is_none() && self.session.read(cx).kind() == AgentKind::Claude;
         let line_count = text.lines().count();
         let collapsible =
             line_count > USER_COLLAPSED_LINES || text.chars().count() > USER_COLLAPSE_CHARS;
@@ -2099,10 +2128,65 @@ impl ChatView {
                 copy,
                 save,
                 editable,
+                rewind.then_some(index),
                 true,
                 cx,
             ))
             .into_any_element()
+    }
+
+    fn show_rewind_menu(
+        &mut self,
+        index: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.entity().downgrade();
+        let menu = ContextMenu::build(window, cx, move |menu, _, _| {
+            menu.entry(t!("Rewind code to here"), None, move |window, cx| {
+                view.update(cx, |this, cx| this.rewind_code_to(index, window, cx))
+                    .log_err();
+            })
+        });
+        self.show_context_menu(menu, position, window, cx);
+    }
+
+    fn rewind_code_to(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.session.read(cx).metadata().cwd.clone();
+        let preview = self
+            .session
+            .update(cx, |session, cx| session.rewind_preview(index, cx));
+        cx.spawn_in(window, async move |this, cx| {
+            // A refused preview has already told the user why in the transcript.
+            let Ok(preview) = preview.await else {
+                return anyhow::Ok(());
+            };
+            if !preview.can_rewind {
+                return Ok(());
+            }
+            let answer = this.update_in(cx, |_, window, cx| {
+                window.prompt(
+                    PromptLevel::Warning,
+                    &t!("Rewind code to this message?"),
+                    Some(&rewind_detail(&preview, &cwd)),
+                    &[
+                        PromptButton::new(t!("Rewind")),
+                        PromptButton::cancel(t!("Cancel")),
+                    ],
+                    cx,
+                )
+            })?;
+            if answer.await.ok() != Some(0) {
+                return Ok(());
+            }
+            this.update(cx, |this, cx| {
+                this.session
+                    .update(cx, |session, cx| session.rewind_code(index, cx))
+                    .detach_and_log_err(cx)
+            })
+        })
+        .detach_and_log_err(cx);
     }
 
     fn render_retry(&self, index: usize, cx: &Context<Self>) -> AnyElement {
@@ -2375,6 +2459,7 @@ impl ChatView {
             copy,
             save,
             false,
+            None,
             false,
             cx,
         )
@@ -3175,6 +3260,19 @@ fn subagent_title(call: &ToolCall) -> SharedString {
         .map(|text| text.trim_start_matches(':').trim().to_string())
         .find(|text| !text.is_empty())
         .map_or_else(|| t!("Subagent"), Into::into)
+}
+
+fn rewind_detail(preview: &RewindPreview, cwd: &std::path::Path) -> String {
+    let files = preview
+        .files_changed
+        .iter()
+        .map(|file| match std::path::Path::new(file).strip_prefix(cwd) {
+            Ok(relative) => relative.to_string_lossy().into_owned(),
+            Err(_) => file.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{files}\n\n+{} -{}", preview.insertions, preview.deletions)
 }
 
 fn icon(name: IconName, size: f32) -> Svg {
@@ -4437,6 +4535,21 @@ mod tests {
 
     fn composer_text(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |view, cx| view.composer.read(cx).text(cx))
+    }
+
+    #[test]
+    fn rewind_detail_lists_files_relative_to_the_project() {
+        let preview = crate::session::RewindPreview {
+            can_rewind: true,
+            files_changed: vec!["/repo/src/a.rs".into(), "/elsewhere/b.rs".into()],
+            insertions: 3,
+            deletions: 1,
+            error: None,
+        };
+        assert_eq!(
+            rewind_detail(&preview, std::path::Path::new("/repo")),
+            "src/a.rs\n/elsewhere/b.rs\n\n+3 -1"
+        );
     }
 
     #[test]

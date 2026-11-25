@@ -349,6 +349,16 @@ impl ChatView {
                     })
             }
         });
+        self.show_context_menu(menu, position, window, cx);
+    }
+
+    pub(super) fn show_context_menu(
+        &mut self,
+        menu: Entity<ContextMenu>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let dismiss = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _, cx| {
             this.link_menu = None;
             cx.notify();
