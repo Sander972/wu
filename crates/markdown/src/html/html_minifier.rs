@@ -280,7 +280,7 @@ where
                 let omit_end = ctx.next_element().map_or(true, |node| {
                     if let NodeData::Element { name, .. } = &node.data {
                         matches!(
-                            name.local.as_ref().to_ascii_lowercase().as_str(),
+                            name.local.to_ascii_lowercase().as_str(),
                             "address"
                                 | "article"
                                 | "aside"
@@ -347,13 +347,11 @@ where
 
     fn write_qualified_name(&mut self, name: &QualName) -> io::Result<()> {
         if let Some(prefix) = &name.prefix {
-            self.w
-                .write_all(prefix.as_ref().to_ascii_lowercase().as_bytes())?;
+            self.w.write_all(prefix.to_ascii_lowercase().as_bytes())?;
             self.w.write_all(b":")?;
         }
 
-        self.w
-            .write_all(name.local.as_ref().to_ascii_lowercase().as_bytes())
+        self.w.write_all(name.local.to_ascii_lowercase().as_bytes())
     }
 
     fn write_start_tag(&mut self, name: &QualName, attrs: &[Attribute]) -> io::Result<()> {
