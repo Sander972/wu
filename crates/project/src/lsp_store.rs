@@ -9003,6 +9003,23 @@ impl LspStore {
         summary
     }
 
+    /// The diagnostics last published for a local file, whether or not it is open in a buffer.
+    pub fn stored_diagnostics(
+        &self,
+        project_path: &ProjectPath,
+    ) -> impl Iterator<Item = &DiagnosticEntry<Unclipped<PointUtf16>>> {
+        self.as_local()
+            .and_then(|local| {
+                local
+                    .diagnostics
+                    .get(&project_path.worktree_id)?
+                    .get(&project_path.path)
+            })
+            .into_iter()
+            .flatten()
+            .flat_map(|(_, entries)| entries)
+    }
+
     /// Returns the diagnostic summary for a specific project path.
     pub fn diagnostic_summary_for_path(
         &self,

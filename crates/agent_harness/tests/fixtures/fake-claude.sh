@@ -510,6 +510,22 @@ case "$first" in
   esac
   ;;
 
+*scenario:mcp*)
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-mcp"}'
+  case "$init_line" in
+  *'"sdkMcpServers":["ide"]'*) ;;
+  *)
+    emit '{"type":"result","subtype":"error_during_execution","errors":["initialize had no ide server"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-mcp"}'
+    exit 0
+    ;;
+  esac
+  # Shape mirrors 2.1.332's mcp_message for an in-process server.
+  emit '{"type":"control_request","request_id":"mcp-1","request":{"subtype":"mcp_message","server_name":"ide","message":{"method":"tools/list","jsonrpc":"2.0","id":1}}}'
+  read_reply mcp_reply || exit 1
+  printf '%s\n' "$mcp_reply" > .mcp-reply
+  emit '{"type":"result","subtype":"success","result":"listed","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-mcp"}'
+  ;;
+
 *scenario:commands*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-commands"}'
   emit '{"type":"result","subtype":"success","result":"done","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-commands"}'

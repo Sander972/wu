@@ -82,6 +82,7 @@ fn controls(answer_label: &'static str) -> (RunControls, mpsc::Sender<Steer>, Ca
         interrupt: token.clone(),
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
+        mcp: agent_harness::no_mcp_servers(),
     };
     (controls, steer_tx, token)
 }
@@ -480,6 +481,7 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
         interrupt: token.clone(),
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
+        mcp: agent_harness::no_mcp_servers(),
     };
     let events = run_to_end(&harness(), request("scenario:askuser"), controls).await;
 
@@ -538,6 +540,64 @@ async fn files_are_saved_before_claude_reads_them() {
             session_id: Some("sess-hook".into()),
         })
     );
+}
+
+async fn mcp_reply(mcp: agent_harness::McpMessageFn) -> serde_json::Value {
+    let cwd = tempfile::tempdir().expect("temporary directory");
+    let mut req = request("scenario:mcp");
+    req.cwd = cwd.path().display().to_string();
+    let (mut controls, _steer, _token) = controls("Allow");
+    controls.mcp = mcp;
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    let reply = std::fs::read_to_string(cwd.path().join(".mcp-reply")).expect("reply was written");
+    let reply: serde_json::Value = serde_json::from_str(&reply).expect("reply is JSON");
+    assert_eq!(reply["response"]["request_id"], "mcp-1");
+    reply["response"]["response"]["mcp_response"].clone()
+}
+
+#[tokio::test]
+async fn mcp_messages_are_answered_by_the_mcp_callback() {
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let mcp: agent_harness::McpMessageFn = Arc::new({
+        let received = received.clone();
+        move |message| {
+            received.lock().unwrap().push(message);
+            let (reply_tx, reply_rx) = oneshot::channel();
+            reply_tx
+                .send(serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}))
+                .expect("receiver is still held");
+            reply_rx
+        }
+    });
+
+    let reply = mcp_reply(mcp).await;
+
+    assert_eq!(
+        *received.lock().unwrap(),
+        vec![serde_json::json!({"method": "tools/list", "jsonrpc": "2.0", "id": 1})]
+    );
+    assert_eq!(
+        reply,
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})
+    );
+}
+
+#[tokio::test]
+async fn an_unanswered_mcp_message_gets_a_json_rpc_error() {
+    let reply = mcp_reply(agent_harness::no_mcp_servers()).await;
+
+    assert_eq!(reply["id"], 1);
+    assert!(reply["error"]["message"].is_string(), "{reply}");
 }
 
 #[tokio::test]
@@ -1010,6 +1070,7 @@ fn permission_controls(
         interrupt: CancellationToken::new(),
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
+        mcp: agent_harness::no_mcp_servers(),
     };
     (controls, steer_tx)
 }
@@ -1220,6 +1281,7 @@ async fn a_stop_withdraws_the_question_the_turn_was_waiting_on() {
         interrupt: CancellationToken::new(),
         permission: tokio::sync::watch::channel(PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
+        mcp: agent_harness::no_mcp_servers(),
     };
     let mut req = request("scenario:stop-asking");
     req.permission = PermissionMode::Ask;

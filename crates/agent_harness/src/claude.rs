@@ -25,7 +25,8 @@ use crate::{
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
 use crate::{
-    BeforeFileToolFn, Harness, HarnessError, RunControls, Steer, TurnSettings, shutdown_child,
+    BeforeFileToolFn, Harness, HarnessError, McpMessageFn, RunControls, Steer, TurnSettings,
+    shutdown_child,
 };
 use catalog::{apply_ultrathink, to_effort};
 use normalize::Normalizer;
@@ -1152,6 +1153,7 @@ async fn run_session(session: Session) {
         interrupt,
         mut permission,
         before_file_tool,
+        mcp,
     } = controls;
     let request_input = Arc::new(request_input);
     let launched_bypass = skip_prompts;
@@ -1245,7 +1247,7 @@ async fn run_session(session: Session) {
                             skip_prompts = current.skips_prompts();
                         }
                         request_tasks.retain(|task| !task.is_finished());
-                        request_tasks.extend(handle_control_request(req, skip_prompts, &request_input, &before_file_tool, &stdin_tx));
+                        request_tasks.extend(handle_control_request(req, skip_prompts, &request_input, &before_file_tool, &mcp, &stdin_tx));
                         continue;
                     }
                     if starts_parent_turn(&frame) {
@@ -1562,6 +1564,7 @@ fn handle_control_request(
     skip_prompts: bool,
     request_input: &Arc<RequestInputFn>,
     before_file_tool: &BeforeFileToolFn,
+    mcp: &McpMessageFn,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
 ) -> Option<tokio::task::AbortHandle> {
     match req.request.subtype.as_str() {
@@ -1570,6 +1573,9 @@ fn handle_control_request(
         // The extension (2.1.331) answers its own save hook with the hook output `{continue: true}`.
         "hook_callback" if req.request.text("callback_id") == Some(wire::PRESAVE_CALLBACK_ID) => {
             return answer_presave_hook(req, before_file_tool, stdin_tx);
+        }
+        "mcp_message" if req.request.text("server_name") == Some(wire::IDE_MCP_SERVER) => {
+            return answer_mcp_message(req, mcp, stdin_tx);
         }
         subtype => {
             log::warn!("claude sent an unsupported {subtype} request; answering with an error");
@@ -1663,6 +1669,47 @@ fn answer_presave_hook(
         }
         if stdin_tx.send(StdinMsg::Line(line)).is_err() {
             log::debug!("claude stdin writer gone before the save hook was answered");
+        }
+    });
+    Some(task.abort_handle())
+}
+
+/// The CLI waits on every MCP reply, so a lost one must not hold the tool call up.
+const MCP_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn answer_mcp_message(
+    req: ControlRequestFrame,
+    mcp: &McpMessageFn,
+    stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
+) -> Option<tokio::task::AbortHandle> {
+    let message = req
+        .request
+        .other
+        .get("message")
+        .cloned()
+        .unwrap_or_default();
+    let id = message
+        .get("id")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(0));
+    let reply = mcp(message);
+    let request_id = req.request_id;
+    let stdin_tx = stdin_tx.clone();
+    let task = tokio::spawn(async move {
+        let reply = match tokio::time::timeout(MCP_TIMEOUT, reply).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) | Err(_) => {
+                log::warn!("wu's ide MCP server didn't answer within {MCP_TIMEOUT:?}");
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32603, "message": "Wu didn't answer this MCP request." },
+                })
+            }
+        };
+        let line = control_response_line(&request_id, serde_json::json!({ "mcp_response": reply }));
+        if stdin_tx.send(StdinMsg::Line(line)).is_err() {
+            log::debug!("claude stdin writer gone before an MCP message was answered");
         }
     });
     Some(task.abort_handle())
@@ -1849,6 +1896,7 @@ mod tests {
             false,
             request_input,
             &crate::file_tools_go_ahead(),
+            &crate::no_mcp_servers(),
             stdin_tx,
         );
         let reply = tokio::time::timeout(std::time::Duration::from_secs(5), stdin_rx.recv());
@@ -1881,7 +1929,14 @@ mod tests {
         .unwrap();
         let request_input: Arc<RequestInputFn> =
             Arc::new(Box::new(|_| tokio::sync::oneshot::channel().1));
-        handle_control_request(request, false, &request_input, &before_file_tool, &stdin_tx);
+        handle_control_request(
+            request,
+            false,
+            &request_input,
+            &before_file_tool,
+            &crate::no_mcp_servers(),
+            &stdin_tx,
+        );
 
         let started = tokio::time::Instant::now();
         let Some(StdinMsg::Line(line)) = stdin_rx.recv().await else {

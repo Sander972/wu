@@ -1133,6 +1133,10 @@ enum RunInput {
         path: String,
         saved: tokio::sync::oneshot::Sender<()>,
     },
+    Mcp {
+        message: serde_json::Value,
+        reply: tokio::sync::oneshot::Sender<serde_json::Value>,
+    },
     Ended,
 }
 
@@ -2450,6 +2454,10 @@ impl AgentSession {
         )>();
         let (file_tool_tx, file_tool_rx) =
             futures::channel::mpsc::unbounded::<(String, tokio::sync::oneshot::Sender<()>)>();
+        let (mcp_tx, mcp_rx) = futures::channel::mpsc::unbounded::<(
+            serde_json::Value,
+            tokio::sync::oneshot::Sender<serde_json::Value>,
+        )>();
         let controls = RunControls {
             request_input: Box::new(move |questions| {
                 let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
@@ -2467,6 +2475,13 @@ impl AgentSession {
                     log::debug!("agent used a file after its chat closed");
                 }
                 saved_rx
+            }),
+            mcp: Arc::new(move |message| {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if mcp_tx.unbounded_send((message, reply_tx)).is_err() {
+                    log::debug!("agent sent an MCP message after its chat closed");
+                }
+                reply_rx
             }),
         };
 
@@ -2493,9 +2508,15 @@ impl AgentSession {
                 responder,
             });
             let file_tools = file_tool_rx.map(|(path, saved)| RunInput::FileTool { path, saved });
-            let mut inputs =
-                futures::stream::select(events, futures::stream::select(questions, file_tools))
-                    .ready_chunks(RUN_INPUT_BATCH);
+            let mcp_messages = mcp_rx.map(|(message, reply)| RunInput::Mcp { message, reply });
+            let mut inputs = futures::stream::select(
+                events,
+                futures::stream::select(
+                    questions,
+                    futures::stream::select(file_tools, mcp_messages),
+                ),
+            )
+            .ready_chunks(RUN_INPUT_BATCH);
             while let Some(batch) = inputs.next().await {
                 let Ok(stream) = this.update(cx, |this, cx| this.apply_run_inputs(batch, cx))
                 else {
@@ -2549,6 +2570,15 @@ impl AgentSession {
                     self.push_question(questions, relay_tx, cx);
                 }
                 RunInput::FileTool { path, saved } => self.save_before_file_tool(path, saved, cx),
+                RunInput::Mcp { message, reply } => {
+                    let tools = crate::ide_server::PanelTools {
+                        project: self.project.as_ref().and_then(WeakEntity::upgrade),
+                        cx,
+                    };
+                    reply
+                        .send(crate::ide_server::handle_mcp_message(&message, &tools))
+                        .ok();
+                }
                 RunInput::Ended => return ControlFlow::Break(()),
             }
         }

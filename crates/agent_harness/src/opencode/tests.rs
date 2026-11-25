@@ -460,6 +460,7 @@ impl TurnWire {
                 interrupt: interrupt.clone(),
                 permission: permission_rx,
                 before_file_tool: crate::file_tools_go_ahead(),
+                mcp: crate::no_mcp_servers(),
             },
             permission: request.permission.for_harness(HarnessId::Opencode),
             request,
@@ -3355,6 +3356,7 @@ async fn stop_during_boot_ends_the_run_and_kills_the_server() {
                 interrupt: interrupt.clone(),
                 permission: tokio::sync::watch::channel(crate::PermissionMode::Ask).1,
                 before_file_tool: crate::file_tools_go_ahead(),
+                mcp: crate::no_mcp_servers(),
             },
         ),
     )
@@ -3417,6 +3419,7 @@ async fn a_missing_project_folder_is_reported_as_such() {
                 interrupt: tokio_util::sync::CancellationToken::new(),
                 permission: tokio::sync::watch::channel(crate::PermissionMode::Ask).1,
                 before_file_tool: crate::file_tools_go_ahead(),
+                mcp: crate::no_mcp_servers(),
             },
         )
         .await

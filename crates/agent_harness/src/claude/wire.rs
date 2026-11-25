@@ -463,9 +463,13 @@ pub(crate) fn set_model_line(request_id: &str, model: &str) -> String {
 
 pub(crate) const PRESAVE_CALLBACK_ID: &str = "wu-presave";
 
-pub(crate) fn initialize_request_line(request_id: &str, presave_hook: bool) -> String {
+/// The in-process MCP server a run offers; its tools reach the model as `mcp__ide__<tool>`.
+pub(crate) const IDE_MCP_SERVER: &str = "ide";
+
+pub(crate) fn initialize_request_line(request_id: &str, for_run: bool) -> String {
     let mut request = json!({ "subtype": "initialize" });
-    if presave_hook {
+    if for_run {
+        request["sdkMcpServers"] = json!([IDE_MCP_SERVER]);
         request["hooks"] = json!({
             "PreToolUse": [{
                 "matcher": "Edit|Write|MultiEdit|Read",

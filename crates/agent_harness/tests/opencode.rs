@@ -299,6 +299,7 @@ fn controls_answering(
         interrupt: token.clone(),
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
+        mcp: agent_harness::no_mcp_servers(),
     };
     (controls, steer_tx, token, asked)
 }

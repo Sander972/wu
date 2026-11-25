@@ -76,6 +76,7 @@ fn controls(answer_label: &'static str) -> (RunControls, mpsc::Sender<Steer>, Ca
         interrupt: token.clone(),
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
+        mcp: agent_harness::no_mcp_servers(),
     };
     (controls, steer_tx, token)
 }
@@ -408,6 +409,7 @@ async fn approvals_round_trip_as_input_requests() {
         interrupt: token.clone(),
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
+        mcp: agent_harness::no_mcp_servers(),
     };
     let mut req = request("scenario:approve");
     req.permission = PermissionMode::Auto;
@@ -1628,6 +1630,7 @@ async fn a_stop_withdraws_the_question_the_turn_was_waiting_on() {
         interrupt: CancellationToken::new(),
         permission: tokio::sync::watch::channel(PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
+        mcp: agent_harness::no_mcp_servers(),
     };
     let mut req = request("scenario:stop-asking");
     req.permission = PermissionMode::Ask;

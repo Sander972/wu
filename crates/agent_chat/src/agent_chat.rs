@@ -4,6 +4,7 @@ mod chat_panel;
 mod chat_style;
 mod chat_view;
 mod commit_message;
+mod ide_server;
 mod model_picker;
 mod notifications;
 mod saved_chats;

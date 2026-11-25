@@ -121,6 +121,8 @@ pub struct RunControls {
     pub permission: watch::Receiver<PermissionMode>,
     /// Called with the absolute path of a file the agent is about to read or edit; the tool waits until the receiver resolves.
     pub before_file_tool: BeforeFileToolFn,
+    /// Answers a JSON-RPC message the agent sends to wu's in-process `ide` MCP server.
+    pub mcp: McpMessageFn,
 }
 
 pub type BeforeFileToolFn = std::sync::Arc<dyn Fn(String) -> oneshot::Receiver<()> + Send + Sync>;
@@ -128,6 +130,14 @@ pub type BeforeFileToolFn = std::sync::Arc<dyn Fn(String) -> oneshot::Receiver<(
 /// A `before_file_tool` for runs with nothing to do before a file tool.
 pub fn file_tools_go_ahead() -> BeforeFileToolFn {
     // The sender is dropped at once, so the receiver resolves at once.
+    std::sync::Arc::new(|_| oneshot::channel().1)
+}
+
+pub type McpMessageFn =
+    std::sync::Arc<dyn Fn(serde_json::Value) -> oneshot::Receiver<serde_json::Value> + Send + Sync>;
+
+/// An `mcp` for runs that serve no MCP tools: every message gets an error reply.
+pub fn no_mcp_servers() -> McpMessageFn {
     std::sync::Arc::new(|_| oneshot::channel().1)
 }
 
