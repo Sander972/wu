@@ -9,7 +9,7 @@ use collections::{HashMap, HashSet};
 use futures::{FutureExt as _, StreamExt as _, future::Shared};
 use gpui::{
     App, AppContext as _, Context, Entity, EntityId, EventEmitter, FutureExt as _, Global,
-    SharedString, Task, WeakEntity,
+    SharedString, Task, TaskExt as _, WeakEntity,
 };
 use i18n::{n, t};
 use language::LanguageRegistry;
@@ -1879,6 +1879,13 @@ impl AgentSession {
             self.permission_before_plan = Some(before);
         }
         self.metadata.settings.permission = permission;
+        if let Some(run) = &self.run {
+            // Updated without notifying, so the harness sees the mode for its own prompts but doesn't send it back.
+            run.permission.send_if_modified(|current| {
+                *current = permission;
+                false
+            });
+        }
         self.save_metadata(cx);
         cx.notify();
     }
@@ -1892,7 +1899,7 @@ impl AgentSession {
         previous == Some(PermissionMode::Auto)
     }
 
-    /// Wu switches to `mode` itself before answering; otherwise a `setMode` in the reply switches the CLI and the session follows.
+    /// Wu switches to `mode` itself before answering, waiting for a live CLI to confirm it; otherwise a `setMode` in the reply switches the CLI and the session follows.
     pub fn decide_plan(
         &mut self,
         id: &str,
@@ -1900,6 +1907,44 @@ impl AgentSession {
         decision: PermissionDecision,
         cx: &mut Context<Self>,
     ) {
+        if let Some(mode) = mode
+            && self.run.is_some()
+        {
+            // Like the official extension, an Auto the CLI refuses falls back to accepting edits.
+            let candidates = if mode == PermissionMode::Auto {
+                vec![PermissionMode::Auto, PermissionMode::AcceptEdits]
+            } else {
+                vec![mode]
+            };
+            let id = id.to_string();
+            cx.spawn(async move |this, cx| {
+                let mut confirmed = None;
+                for candidate in candidates {
+                    let request = serde_json::json!({
+                        "subtype": "set_permission_mode",
+                        "mode": agent_harness::claude::permission_mode_name(candidate),
+                    });
+                    let reply = this.update(cx, |session, cx| session.control(request, cx))?;
+                    match reply.await {
+                        Ok(_) => {
+                            confirmed = Some(candidate);
+                            break;
+                        }
+                        Err(error) => {
+                            log::warn!("Claude refused permission mode {candidate:?}: {error}")
+                        }
+                    }
+                }
+                this.update(cx, |session, cx| {
+                    if let Some(mode) = confirmed {
+                        session.adopt_permission(mode, cx);
+                    }
+                    session.decide_permission(&id, decision, cx);
+                })
+            })
+            .detach_and_log_err(cx);
+            return;
+        }
         if let Some(mode) = mode {
             self.update_settings(|settings| settings.permission = mode, cx);
         } else if let PermissionDecision::Allow {
@@ -5072,6 +5117,68 @@ pub(crate) mod tests {
             };
             session.decide_plan("q", None, manual, cx);
             assert_eq!(session.settings().permission, PermissionMode::Ask);
+        });
+    }
+
+    fn approve_live_plan(
+        prompt: &str,
+        mode: PermissionMode,
+        cx: &mut TestAppContext,
+    ) -> (Entity<AgentSession>, tempfile::TempDir) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.update_settings(|settings| settings.permission = PermissionMode::Plan, cx);
+            session.send_message(prompt, cx);
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| {
+                session
+                    .pending_questions()
+                    .first()
+                    .is_some_and(PendingQuestion::is_plan)
+            })
+        });
+        session.update(cx, |session, cx| {
+            let id = session.pending_questions()[0].id().to_string();
+            let allow = PermissionDecision::Allow {
+                updated_input: None,
+                updated_permissions: Vec::new(),
+            };
+            session.decide_plan(&id, Some(mode), allow, cx);
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+        (session, directory)
+    }
+
+    #[gpui::test]
+    async fn a_live_plan_is_approved_only_after_the_cli_switched_modes(cx: &mut TestAppContext) {
+        let (session, _directory) =
+            approve_live_plan("scenario:plan-approval", PermissionMode::AcceptEdits, cx);
+        assert_eq!(last_reply(&session, cx), "approved in acceptEdits");
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.settings().permission, PermissionMode::AcceptEdits);
+            assert!(!session.restart_on_next_send);
+            let run = session.run.as_ref().expect("the CLI keeps running");
+            assert_eq!(*run.permission.borrow(), PermissionMode::AcceptEdits);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_refused_auto_mode_falls_back_to_accepting_edits(cx: &mut TestAppContext) {
+        let (session, _directory) = approve_live_plan(
+            "scenario:plan-approval auto-refused",
+            PermissionMode::Auto,
+            cx,
+        );
+        assert_eq!(last_reply(&session, cx), "approved in acceptEdits");
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.settings().permission, PermissionMode::AcceptEdits)
         });
     }
 

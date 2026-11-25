@@ -209,6 +209,50 @@ async fn a_live_switch_to_plan_writes_the_plan_mode() {
 }
 
 #[tokio::test]
+async fn a_silently_adopted_mode_changes_prompts_without_a_mode_request() {
+    let (mut controls, steer, _token) = controls("Deny");
+    let (permission_tx, permission_rx) = tokio::sync::watch::channel(PermissionMode::Ask);
+    controls.permission = permission_rx;
+    let mut req = request("scenario:silent-mode");
+    req.permission = PermissionMode::Ask;
+    let mut stream = harness().run(req, controls).await.expect("run starts");
+    let mut events = vec![
+        stream
+            .next()
+            .await
+            .expect("the run reports its start")
+            .expect("stream event"),
+    ];
+    permission_tx.send_if_modified(|mode| {
+        *mode = PermissionMode::FullAccess;
+        false
+    });
+    steer
+        .send(Steer::Message(SteerMessage {
+            prompt: "go on".into(),
+            message_id: None,
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            settings: None,
+        }))
+        .await
+        .expect("steer queued");
+    events.extend(
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+        )
+        .await
+        .expect("run finished in time"),
+    );
+    assert_eq!(
+        done_statuses(&events),
+        [DoneStatus::Completed],
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn happy_path_normalizes_events_and_tags_subagents() {
     let (controls, _steer, _token) = controls("A");
     let events = run_to_end(&harness(), request("scenario:happy"), controls).await;

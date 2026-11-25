@@ -199,6 +199,59 @@ case "$first" in
   esac
   ;;
 
+*scenario:plan-approval*)
+  # The Allow must come after the CLI confirmed the mode change; "auto-refused" refuses auto like a plan without it.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-plan","permissionMode":"plan"}'
+  emit '{"type":"control_request","request_id":"cr-plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# Plan"},"tool_use_id":"tu-plan"}}'
+  confirmed=plan
+  while read -r line; do
+    case "$line" in
+    *'"subtype":"set_permission_mode"'*)
+      rid=$(request_id "$line")
+      mode=$(printf '%s\n' "$line" | sed 's/.*"mode":"\([^"]*\)".*/\1/')
+      case "$first:$mode" in
+      *auto-refused*:auto)
+        emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$rid\",\"error\":\"auto mode is unavailable\"}}"
+        ;;
+      *)
+        confirmed=$mode
+        emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{}}}"
+        ;;
+      esac
+      ;;
+    *'"request_id":"cr-plan"'*'"behavior":"allow"'*)
+      text_delta "approved in $confirmed"
+      emit '{"type":"result","subtype":"success","result":"approved","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-plan"}'
+      ;;
+    *'"request_id":"cr-plan"'*)
+      emit '{"type":"result","subtype":"error_during_execution","errors":["plan was not approved"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-plan"}'
+      ;;
+    esac
+  done
+  ;;
+
+*scenario:silent-mode*)
+  # A mode the session adopted silently must change prompts without a set_permission_mode line.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-silent"}'
+  read -r line || exit 1
+  case "$line" in
+  *'"subtype":"set_permission_mode"'*)
+    emit '{"type":"result","subtype":"error_during_execution","errors":["the mode was sent back"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-silent"}'
+    exit 0
+    ;;
+  esac
+  emit '{"type":"control_request","request_id":"cr-0","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}'
+  read -r resp0 || exit 1
+  case "$resp0" in
+  *'"request_id":"cr-0"'*'"behavior":"allow"'*)
+    emit '{"type":"result","subtype":"success","result":"allowed","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-silent"}'
+    ;;
+  *)
+    emit '{"type":"result","subtype":"error_during_execution","errors":["bash tool was not allowed"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-silent"}'
+    ;;
+  esac
+  ;;
+
 *scenario:steer*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-steer"}'
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"first"}}}'

@@ -1114,6 +1114,7 @@ async fn run_session(session: Session) {
     let request_input = Arc::new(request_input);
     let launched_bypass = skip_prompts;
     let mut skip_prompts = skip_prompts;
+    let mut seen_permission = *permission.borrow();
     let mut permission_open = true;
 
     let mut pending_steers = std::collections::VecDeque::new();
@@ -1195,6 +1196,12 @@ async fn run_session(session: Session) {
                         }
                     };
                     if let Frame::ControlRequest(req) = frame {
+                        // A mode the CLI switched to itself arrives without a change notification, so it isn't sent back.
+                        let current = *permission.borrow();
+                        if current != seen_permission {
+                            seen_permission = current;
+                            skip_prompts = current.skips_prompts();
+                        }
                         request_tasks.retain(|task| !task.is_finished());
                         request_tasks.extend(handle_control_request(req, skip_prompts, &request_input, &stdin_tx));
                         continue;
@@ -1358,6 +1365,7 @@ async fn run_session(session: Session) {
             changed = permission.changed(), if permission_open && !interrupted => match changed {
                 Ok(()) => {
                     let mode = *permission.borrow_and_update();
+                    seen_permission = mode;
                     skip_prompts = mode.skips_prompts();
                     let id = format!("{SET_MODE_REQUEST_PREFIX}{}", uuid::Uuid::new_v4());
                     let line = wire::set_permission_mode_line(&id, live_permission_mode_name(mode, launched_bypass));
@@ -1463,7 +1471,7 @@ pub fn permission_mode_from_name(name: &str) -> Option<PermissionMode> {
         .find(|mode| permission_mode_name(*mode) == name)
 }
 
-fn permission_mode_name(permission: PermissionMode) -> &'static str {
+pub fn permission_mode_name(permission: PermissionMode) -> &'static str {
     match permission.for_harness(HarnessId::ClaudeCode) {
         PermissionMode::Ask => "default",
         PermissionMode::Plan => "plan",
