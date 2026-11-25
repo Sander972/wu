@@ -21,7 +21,8 @@ rustup target add x86_64-unknown-linux-musl   # bundle-linux also does this; nee
 ## Build
 
 ```sh
-script/bundle-deb
+script/bundle-deb                     # channel from crates/wu/RELEASE_CHANNEL
+script/bundle-deb --channel stable    # 'wu' package
 ```
 
 - Output: `target/release/<package>_<version>_<distro>_<arch>.deb` (e.g. `wu-dev_1.5.0~dev.20261125103000.g53764b7-1_ubuntu26.04_amd64.deb`). `<distro>` is `ID` + `VERSION_ID` from the build system's `/etc/os-release`: the oldest release the package installs on. It is only in the file name, not in the package version.
@@ -31,13 +32,14 @@ script/bundle-deb
 
 ## Channel, package name and version
 
-The channel comes from `crates/wu/RELEASE_CHANNEL`, as for `bundle-linux`.
+`--channel dev|stable` picks the channel (case-insensitive); without it the channel comes from `crates/wu/RELEASE_CHANNEL`. `bundle-deb` passes it to `bundle-linux --channel`, which exports `ZED_RELEASE_CHANNEL` (compiled into the binaries in place of the `RELEASE_CHANNEL` file, see `crates/release_channel/build.rs`) and `RELEASE_CHANNEL` (app icon, `crates/wu/build.rs`), as `bundle-windows.ps1 -Channel` does. No need to edit `crates/wu/RELEASE_CHANNEL`.
 
 | Channel | Package | Version | Install dir |
 |---|---|---|---|
 | `stable` | `wu` | `<crate version>-<rev>` | `/opt/wu` |
 | other (e.g. `dev`) | `wu-<channel>` | `<crate version>~<channel>.<commit date>.g<commit>-<rev>` | `/opt/wu-<channel>` |
 
+- With `--skip-build` the channel must match the existing tarball (`wu.app` for stable, `wu-dev.app` for dev), otherwise `bundle-deb` stops.
 - The commit date in dev versions makes each new commit an upgrade for dpkg; rebuilding the same commit needs `--revision 2` (or `apt install --reinstall`).
 - `wu` and `wu-dev` both ship `/usr/bin/wu`, so they `Conflict`/`Replace` each other.
 
@@ -76,6 +78,7 @@ The binary links against the build machine's glibc: build on the oldest Ubuntu r
 ```sh
 script/bundle-deb-container                       # Ubuntu 24.04 (default)
 script/bundle-deb-container --ubuntu 22.04        # another release
+script/bundle-deb-container --channel stable      # 'wu' package
 script/bundle-deb-container -- --revision 2       # options after -- go to bundle-deb
 ```
 
