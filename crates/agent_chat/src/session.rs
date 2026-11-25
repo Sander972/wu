@@ -1731,7 +1731,11 @@ impl AgentSession {
         if let Some(prompt) = edited.filter(|prompt| !prompt.is_empty()) {
             match self.queue.iter_mut().find(|queued| queued.id == id) {
                 Some(queued) => {
-                    let context = std::mem::take(&mut queued.prompt.context);
+                    let mut context = std::mem::take(&mut queued.prompt.context);
+                    // A command's text becomes its arguments, so context would only get in the way.
+                    if agent_harness::leading_command(&prompt.text).is_some() {
+                        context.clear();
+                    }
                     queued.prompt = Prompt { context, ..prompt };
                 }
                 None => self.enqueue(prompt, cx),
@@ -7519,6 +7523,46 @@ done
             user_texts(&session, cx),
             ["scenario:interrupt", "change of plan"]
         );
+    }
+
+    #[gpui::test]
+    async fn editing_a_queued_message_keeps_its_context_unless_it_becomes_a_command(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        use_quick_stopping_claude(&store, cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.send_message("scenario:interrupt", cx)
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| session.run.is_some())
+        });
+        let context = vec!["<ide_opened_file>x</ide_opened_file>".to_string()];
+        session.update(cx, |session, cx| {
+            session.send_message(
+                Prompt {
+                    text: "explain".into(),
+                    context: context.clone(),
+                    ..Default::default()
+                },
+                cx,
+            )
+        });
+        let id = session.read_with(cx, |session, _| session.queue()[0].id);
+        let queued_context = |cx: &mut TestAppContext| {
+            session.read_with(cx, |session, _| session.queue()[0].prompt.context.clone())
+        };
+        for (edited, expected) in [("explain more", context.clone()), ("/review", Vec::new())] {
+            session.update(cx, |session, cx| {
+                session.begin_queued_edit(id, cx);
+                session.finish_queued_edit(id, Some(Prompt::text(edited)), cx);
+            });
+            assert_eq!(queued_context(cx), expected, "{edited}");
+        }
     }
 
     #[gpui::test]

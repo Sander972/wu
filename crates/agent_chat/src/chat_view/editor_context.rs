@@ -3,15 +3,18 @@ use crate::{
     AgentChatSettings, AgentKind,
     chat_style::{icon, ink},
 };
-use editor::{Editor, EditorEvent, ToPoint as _};
+use editor::{Anchor, Editor, EditorEvent, ToPoint as _};
 use gpui::{
-    AnyElement, App, Context, Entity, IntoElement, ParentElement, SharedString, Styled,
-    Subscription, div, px,
+    AnyElement, App, Context, Entity, EntityId, IntoElement, ParentElement, SharedString, Styled,
+    Subscription, WeakEntity, div, px,
 };
 use i18n::t;
 use language::File as _;
 use settings::Settings as _;
-use std::path::PathBuf;
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+};
 use ui::{IconName, Tooltip, prelude::*};
 use workspace::Workspace;
 
@@ -30,22 +33,66 @@ pub(crate) struct SelectedLines {
     pub text: String,
 }
 
+/// What the footer chip shows. The selected text is read only when sending, so this stays cheap to rebuild on every selection change.
+#[derive(Clone, Debug, PartialEq)]
+struct ShownContext {
+    editor: WeakEntity<Editor>,
+    absolute_path: PathBuf,
+    /// The selection and its 1-based inclusive lines.
+    selection: Option<(Range<Anchor>, u32, u32)>,
+    path_only: bool,
+}
+
+impl ShownContext {
+    /// Dismissing and sending key on which selection this is: edits change its text and line numbers but not its anchors.
+    fn identity(&self) -> (EntityId, &Path, Option<&Range<Anchor>>) {
+        (
+            self.editor.entity_id(),
+            &self.absolute_path,
+            self.selection.as_ref().map(|(range, _, _)| range),
+        )
+    }
+
+    fn full(&self, cx: &App) -> Option<EditorContext> {
+        let selection = match &self.selection {
+            Some((range, start, end)) => {
+                let editor = self.editor.upgrade()?;
+                let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
+                Some(SelectedLines {
+                    start: *start,
+                    end: *end,
+                    text: snapshot.text_for_range(range.clone()).collect(),
+                })
+            }
+            None => None,
+        };
+        Some(EditorContext {
+            absolute_path: self.absolute_path.clone(),
+            selection,
+            path_only: self.path_only,
+        })
+    }
+}
+
 #[derive(Default)]
 pub(super) struct EditorContextState {
-    current: Option<EditorContext>,
-    sent: Option<EditorContext>,
-    dismissed: Option<EditorContext>,
+    current: Option<ShownContext>,
+    sent: Option<ShownContext>,
+    dismissed: Option<ShownContext>,
     hidden: bool,
     _active_editor: Option<Subscription>,
 }
 
 impl EditorContextState {
     /// The context the footer chip shows: neither sent already nor dismissed.
-    fn shown(&self) -> Option<&EditorContext> {
+    fn shown(&self) -> Option<&ShownContext> {
+        let same = |context: &ShownContext, other: Option<&ShownContext>| {
+            other.is_some_and(|other| other.identity() == context.identity())
+        };
         self.current
             .as_ref()
-            .filter(|context| Some(*context) != self.sent.as_ref())
-            .filter(|context| Some(*context) != self.dismissed.as_ref())
+            .filter(|context| !same(context, self.sent.as_ref()))
+            .filter(|context| !same(context, self.dismissed.as_ref()))
     }
 }
 
@@ -71,61 +118,60 @@ fn context_editor(workspace: &Workspace, cx: &App) -> Option<Entity<Editor>> {
         .map(|(_, editor)| editor)
 }
 
-pub(crate) fn current_editor_context(workspace: &Workspace, cx: &App) -> Option<EditorContext> {
+fn shown_context(workspace: &Workspace, cx: &App) -> Option<ShownContext> {
     let settings = AgentChatSettings::get_global(cx);
-    let editor = context_editor(workspace, cx)?;
-    let editor = editor.read(cx);
+    let editor_entity = context_editor(workspace, cx)?;
+    let editor = editor_entity.read(cx);
     let buffer = editor.active_buffer(cx)?;
     let file = project::File::from_dyn(buffer.read(cx).file())?;
     let absolute_path = file.as_local()?.abs_path(cx);
-    // Excluded files have no worktree entry.
+    // Excluded files have no worktree entry; private ones are the `private_files` setting's matches, such as `.env`.
     let path_only = file
         .worktree
         .read(cx)
         .entry_for_path(&file.path)
-        .is_none_or(|entry| entry.is_ignored);
+        .is_none_or(|entry| entry.is_ignored || entry.is_private);
     let selection = (settings.attach_selection && !path_only)
         .then(|| selected_lines(editor, cx))
         .flatten();
     if selection.is_none() && !settings.attach_open_file {
         return None;
     }
-    Some(EditorContext {
+    Some(ShownContext {
+        editor: editor_entity.downgrade(),
         absolute_path,
         selection,
         path_only,
     })
 }
 
-fn selected_lines(editor: &Editor, cx: &App) -> Option<SelectedLines> {
+// Part of the editor-context interface the next editor-context features build on; sending goes through the chip's `ShownContext` instead.
+#[allow(dead_code)]
+pub(crate) fn current_editor_context(workspace: &Workspace, cx: &App) -> Option<EditorContext> {
+    shown_context(workspace, cx)?.full(cx)
+}
+
+fn selected_lines(editor: &Editor, cx: &App) -> Option<(Range<Anchor>, u32, u32)> {
     let snapshot = editor.buffer().read(cx).snapshot(cx);
-    let range = editor.selections.newest_anchor().range();
-    let range = range.start.to_point(&snapshot)..range.end.to_point(&snapshot);
+    let anchors = editor.selections.newest_anchor().range();
+    let range = anchors.start.to_point(&snapshot)..anchors.end.to_point(&snapshot);
     if range.is_empty() {
         return None;
     }
-    let (buffer, range) = snapshot.range_to_buffer_range(range)?;
-    let text: String = buffer.text_for_range(range.clone()).collect();
+    // A selection spanning several files has no single location.
+    let (_, range) = snapshot.range_to_buffer_range(range)?;
     // A selection of whole lines ends at the start of the next line, which isn't selected.
     let end = if range.end.column == 0 && range.end.row > range.start.row {
         range.end.row
     } else {
         range.end.row + 1
     };
-    Some(SelectedLines {
-        start: range.start.row + 1,
-        end,
-        text,
-    })
-}
-
-fn selection_shown(context: &EditorContext) -> Option<&SelectedLines> {
-    context.selection.as_ref().filter(|_| !context.path_only)
+    Some((anchors, range.start.row + 1, end))
 }
 
 pub(crate) fn context_block(context: &EditorContext) -> String {
     let path = context.absolute_path.display();
-    match selection_shown(context) {
+    match context.selection.as_ref().filter(|_| !context.path_only) {
         Some(lines) => format!(
             "<ide_selection>The user selected the lines {} to {} from {path}:\n{}\n\nThis may or may not be related to the current task.</ide_selection>",
             lines.start, lines.end, lines.text
@@ -144,7 +190,10 @@ impl ChatView {
             .and_then(|workspace| context_editor(workspace.read(cx), cx));
         self.editor_context._active_editor = editor.map(|editor| {
             cx.subscribe(&editor, |this, _, event: &EditorEvent, cx| {
-                if matches!(event, EditorEvent::SelectionsChanged { .. }) {
+                if matches!(
+                    event,
+                    EditorEvent::SelectionsChanged { .. } | EditorEvent::BufferEdited
+                ) {
                     this.refresh_editor_context(cx);
                 }
             })
@@ -157,14 +206,14 @@ impl ChatView {
             && self.session.read(cx).kind() == AgentKind::Claude)
             .then(|| self.workspace.upgrade())
             .flatten()
-            .and_then(|workspace| current_editor_context(workspace.read(cx), cx));
+            .and_then(|workspace| shown_context(workspace.read(cx), cx));
         if self.editor_context.current != current {
             self.editor_context.current = current;
             cx.notify();
         }
     }
 
-    /// The context blocks for a message about to be sent; each context goes out once.
+    /// The context blocks for a message about to be sent: only what the chip shows, and each context once.
     pub(super) fn take_editor_context(
         &mut self,
         text: &str,
@@ -173,23 +222,36 @@ impl ChatView {
         if self.editing_queued.is_some() || agent_harness::leading_command(text).is_some() {
             return Vec::new();
         }
+        let on_chip = self.editor_context.shown().cloned();
         self.refresh_editor_context(cx);
         let state = &mut self.editor_context;
         if state.hidden {
             return Vec::new();
         }
-        let Some(context) = state.shown().cloned() else {
+        // A context that changed since the chip last showed it waits for the next message, once the chip shows it.
+        let Some(shown) = state
+            .shown()
+            .filter(|shown| Some(*shown) == on_chip.as_ref())
+            .cloned()
+        else {
             return Vec::new();
         };
-        let block = context_block(&context);
-        state.sent = Some(context);
+        let Some(context) = shown.full(cx) else {
+            return Vec::new();
+        };
+        state.sent = Some(shown);
         cx.notify();
-        vec![block]
+        vec![context_block(&context)]
     }
 
     /// The agent forgets an edited message, so its context goes out again.
     pub(super) fn forget_sent_editor_context(&mut self) {
         self.editor_context.sent = None;
+    }
+
+    pub(super) fn toggle_editor_context(&mut self, cx: &mut Context<Self>) {
+        self.editor_context.hidden = !self.editor_context.hidden;
+        cx.notify();
     }
 
     pub(super) fn dismiss_editor_context(&mut self, cx: &mut Context<Self>) {
@@ -202,12 +264,9 @@ impl ChatView {
         let hidden = self.editor_context.hidden;
         let color = cx.theme().colors().text_muted.opacity(0.6);
         let hover = ink(0.07, cx);
-        let label: SharedString = match selection_shown(context) {
-            Some(lines) if lines.start == lines.end => t!("1 line selected"),
-            Some(lines) => t!(
-                "{count} lines selected",
-                count = lines.end - lines.start + 1
-            ),
+        let label: SharedString = match &context.selection {
+            Some((_, start, end)) if start == end => t!("1 line selected"),
+            Some((_, start, end)) => t!("{count} lines selected", count = end - start + 1),
             None => context
                 .absolute_path
                 .file_name()
@@ -251,10 +310,7 @@ impl ChatView {
                     } else {
                         t!("Don't send with the next message")
                     }))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.editor_context.hidden = !this.editor_context.hidden;
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_editor_context(cx))),
                 )
                 .child(
                     div()

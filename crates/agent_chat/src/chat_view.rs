@@ -6188,4 +6188,46 @@ mod tests {
         let changed = send_and_record(&view, directory.path(), "and this", cx);
         assert!(changed.contains("the lines 2 to 3 from "), "{changed}");
     }
+
+    #[gpui::test]
+    async fn dismissed_selection_stays_dismissed_after_its_text_changes(cx: &mut TestAppContext) {
+        let files = serde_json::json!({ "main.rs": FOUR_LINES });
+        let (view, editor, directory, cx) = editor_context_chat(files, "/proj/main.rs", cx).await;
+        select_rows(&editor, 0..2, cx);
+        view.update(cx, |view, cx| view.dismiss_editor_context(cx));
+        editor.update(cx, |editor, cx| {
+            editor.edit(
+                [(
+                    language::Point::new(0, 0)..language::Point::new(0, 3),
+                    "ONE",
+                )],
+                cx,
+            )
+        });
+        let line = send_and_record(&view, directory.path(), "scenario:record explain", cx);
+        assert!(!line.contains("<ide_"), "{line}");
+    }
+
+    #[gpui::test]
+    async fn private_file_sends_path_only(cx: &mut TestAppContext) {
+        let files = serde_json::json!({ ".env": "SECRET=1\nOTHER=2\n" });
+        let (view, editor, directory, cx) = editor_context_chat(files, "/proj/.env", cx).await;
+        select_rows(&editor, 0..1, cx);
+        let line = send_and_record(&view, directory.path(), "scenario:record explain", cx);
+        assert!(line.contains(".env in the IDE."), "{line}");
+        assert!(!line.contains("SECRET"), "{line}");
+    }
+
+    #[gpui::test]
+    async fn hidden_context_is_not_sent_until_shown_again(cx: &mut TestAppContext) {
+        let files = serde_json::json!({ "main.rs": FOUR_LINES });
+        let (view, editor, directory, cx) = editor_context_chat(files, "/proj/main.rs", cx).await;
+        select_rows(&editor, 0..2, cx);
+        view.update(cx, |view, cx| view.toggle_editor_context(cx));
+        let hidden = send_and_record(&view, directory.path(), "scenario:record explain", cx);
+        assert!(!hidden.contains("<ide_"), "{hidden}");
+        view.update(cx, |view, cx| view.toggle_editor_context(cx));
+        let shown = send_and_record(&view, directory.path(), "and now", cx);
+        assert!(shown.contains("the lines 1 to 2 from "), "{shown}");
+    }
 }
