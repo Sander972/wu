@@ -1617,7 +1617,9 @@ fn answer_presave_hook(
     let stdin_tx = stdin_tx.clone();
     let task = tokio::spawn(async move {
         if tokio::time::timeout(PRESAVE_TIMEOUT, saved).await.is_err() {
-            log::warn!("{path} wasn't saved within 2 seconds, so Claude uses it as it is on disk");
+            log::warn!(
+                "{path} wasn't saved within {PRESAVE_TIMEOUT:?}, so Claude uses it as it is on disk"
+            );
         }
         if stdin_tx.send(StdinMsg::Line(line)).is_err() {
             log::debug!("claude stdin writer gone before the save hook was answered");

@@ -503,7 +503,7 @@
   "Right Items Order": "右侧项目顺序",
   "Right padding for centered layout.": "居中布局的右边距。",
   "Rounded Selection": "圆角选区",
-  "Save Before Claude Reads Files": "Claude 读取文件前先保存",
+  "Save Before Claude Reads or Edits Files": "Claude 读取或编辑文件前先保存",
   "Save Breakpoints": "保存断点",
   "Save after inactivity period (in milliseconds).": "停止操作一段时间后保存（单位为毫秒）。",
   "Save unsaved changes in an open file before Claude Code reads or edits it.": "在 Claude Code 读取或编辑已打开的文件前，先保存其中未保存的更改。",

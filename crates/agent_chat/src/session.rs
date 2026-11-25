@@ -1259,6 +1259,11 @@ impl AgentSession {
         saved: tokio::sync::oneshot::Sender<()>,
         cx: &mut Context<Self>,
     ) {
+        // The agent stopped waiting, so a save now could overwrite what its tool writes.
+        if saved.is_closed() {
+            log::warn!("didn't save {path}: the agent went ahead without waiting for it");
+            return;
+        }
         let save = AgentChatSettings::get_global(cx)
             .autosave
             .then(|| self.project.as_ref()?.upgrade())
@@ -1278,8 +1283,26 @@ impl AgentSession {
             return;
         };
         cx.spawn(async move |_, _| {
-            if let Err(error) = save.await {
-                log::warn!("couldn't save {path} before the agent used it: {error:#}");
+            let mut saved = saved;
+            let finished = {
+                let stopped_waiting = std::pin::pin!(saved.closed());
+                match futures::future::select(save, stopped_waiting).await {
+                    futures::future::Either::Left((result, _)) => Some(result),
+                    futures::future::Either::Right(_) => None,
+                }
+            };
+            match finished {
+                Some(Err(error)) => {
+                    log::warn!("couldn't save {path} before the agent used it: {error:#}")
+                }
+                Some(Ok(())) => {}
+                // Dropping the save cancels it, so it can't land after the agent's own write.
+                None => {
+                    log::warn!(
+                        "stopped saving {path}: the agent went ahead without waiting for it"
+                    );
+                    return;
+                }
             }
             saved.send(()).ok();
         })
@@ -5037,6 +5060,19 @@ pub(crate) mod tests {
                 .collect()
         });
         assert_eq!(notices, Vec::<String>::new());
+
+        buffer.update(cx, |buffer, cx| buffer.set_text("typed too late", cx));
+        let (saved_tx, saved_rx) = tokio::sync::oneshot::channel();
+        drop(saved_rx);
+        session.update(cx, |session, cx| {
+            session.save_before_file_tool(file.into(), saved_tx, cx)
+        });
+        cx.run_until_parked();
+        let on_disk = fs::Fs::load(fs.as_ref(), Path::new(file))
+            .await
+            .expect("read a.rs");
+        assert_eq!(on_disk, "typed, not saved");
+        assert!(buffer.read_with(cx, |buffer, _| buffer.is_dirty()));
 
         update_chat_settings(cx, |settings| settings.autosave = Some(false));
         buffer.update(cx, |buffer, cx| buffer.set_text("typed again", cx));

@@ -8296,7 +8296,7 @@ fn agent_chat_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: n!("Save Before Claude Reads Files"),
+                title: n!("Save Before Claude Reads or Edits Files"),
                 description: n!(
                     "Save unsaved changes in an open file before Claude Code reads or edits it."
                 ),
