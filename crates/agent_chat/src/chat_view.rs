@@ -136,6 +136,12 @@ const FADE_IN: Duration = Duration::from_millis(260);
 const GLIDE: Duration = Duration::from_millis(280);
 const GLIDE_FRAME: Duration = Duration::from_millis(16);
 
+struct PermissionEditors {
+    reason: Entity<Editor>,
+    command: Option<Entity<Editor>>,
+    destination: String,
+}
+
 #[derive(Clone)]
 struct SubagentRef {
     id: String,
@@ -179,6 +185,7 @@ pub struct ChatView {
     selected_options: HashMap<String, Vec<String>>,
     question_pages: HashMap<String, usize>,
     answer_editors: HashMap<String, (Entity<Editor>, Subscription)>,
+    permission_editors: HashMap<String, PermissionEditors>,
     question_focus: FocusHandle,
     command_menu: Option<completion::CompletionMenu>,
     mention_results: Vec<completion::MentionItem>,
@@ -369,6 +376,7 @@ impl ChatView {
             selected_options: HashMap::default(),
             question_pages: HashMap::default(),
             answer_editors: HashMap::default(),
+            permission_editors: HashMap::default(),
             question_focus: cx.focus_handle(),
             command_menu: None,
             mention_results: Vec::new(),
@@ -506,7 +514,14 @@ impl ChatView {
             || self
                 .answer_editors
                 .values()
-                .any(|(editor, _)| editor.focus_handle(cx).is_focused(window));
+                .any(|(editor, _)| editor.focus_handle(cx).is_focused(window))
+            || self.permission_editors.values().any(|editors| {
+                editors.reason.focus_handle(cx).is_focused(window)
+                    || editors
+                        .command
+                        .as_ref()
+                        .is_some_and(|editor| editor.focus_handle(cx).is_focused(window))
+            });
         let has_question = !session.pending_questions().is_empty();
         let free_text: Vec<(String, bool, bool)> = session
             .pending_questions()
@@ -522,6 +537,31 @@ impl ChatView {
                 )
             })
             .collect();
+        let default_destination = self
+            .store
+            .read(cx)
+            .list_prefs()
+            .permission_destination
+            .clone();
+        let permissions: Vec<(String, Option<String>, String)> = self
+            .session
+            .read(cx)
+            .pending_questions()
+            .iter()
+            .flat_map(|pending| &pending.questions)
+            .filter_map(|question| {
+                let prompt = question.permission.as_ref()?;
+                Some((
+                    question.id.clone(),
+                    composer::bash_command(prompt).map(str::to_owned),
+                    default_destination
+                        .clone()
+                        .unwrap_or_else(|| composer::suggested_destination(&prompt.suggestions)),
+                ))
+            })
+            .collect();
+        self.permission_editors
+            .retain(|question_id, _| permissions.iter().any(|(id, _, _)| id == question_id));
         self.answer_editors.retain(|question_id, _| {
             free_text.iter().any(|(id, _, _)| id == question_id)
         });
@@ -529,6 +569,41 @@ impl ChatView {
             window.focus(&self.question_focus, cx);
         } else if !has_question && focus_was_in_question {
             window.focus(&self.composer.focus_handle(cx), cx);
+        }
+        for (question_id, command, destination) in permissions {
+            if self.permission_editors.contains_key(&question_id) {
+                continue;
+            }
+            let reason = cx.new(|cx| {
+                let mut editor = Editor::auto_height(1, 4, window, cx);
+                editor.set_placeholder_text(&t!("Tell Claude what to do instead"), window, cx);
+                editor.set_text_style_refinement(TextStyleRefinement {
+                    font_size: Some(ui(13.5).into()),
+                    line_height: Some(ui(20.).into()),
+                    ..Default::default()
+                });
+                editor
+            });
+            let command = command.map(|command| {
+                cx.new(|cx| {
+                    let mut editor = Editor::auto_height(1, 6, window, cx);
+                    editor.set_text(command, window, cx);
+                    editor.set_text_style_refinement(TextStyleRefinement {
+                        font_size: Some(ui(13.5).into()),
+                        line_height: Some(ui(20.).into()),
+                        ..Default::default()
+                    });
+                    editor
+                })
+            });
+            self.permission_editors.insert(
+                question_id,
+                PermissionEditors {
+                    reason,
+                    command,
+                    destination,
+                },
+            );
         }
         for (question_id, standalone, multi_select) in free_text {
             if self.answer_editors.contains_key(&question_id) {

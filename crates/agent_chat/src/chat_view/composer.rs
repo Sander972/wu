@@ -4,7 +4,115 @@ use crate::{
     chat_style::{composer_surface, icon, icon_size_px, tracked_upper, working_animation},
     session::AgentUpdateStatus,
 };
+use agent_harness::{PermissionDecision, PermissionPrompt};
 use i18n::t;
+
+const PERMISSION_DESTINATIONS: [&str; 4] = [
+    "localSettings",
+    "userSettings",
+    "projectSettings",
+    "session",
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum PermissionChoice {
+    Allow,
+    AlwaysAllow,
+    Deny,
+}
+
+fn destination_label(destination: &str) -> String {
+    match destination {
+        "localSettings" => t!("this project (just you)"),
+        "userSettings" => t!("all projects"),
+        "projectSettings" => t!("this project (shared)"),
+        _ => t!("this session"),
+    }
+    .to_string()
+}
+
+pub(super) fn bash_command(prompt: &PermissionPrompt) -> Option<&str> {
+    if prompt.tool_name != "Bash" {
+        return None;
+    }
+    prompt.input.get("command")?.as_str()
+}
+
+pub(super) fn suggested_destination(suggestions: &[serde_json::Value]) -> String {
+    suggestions
+        .iter()
+        .find_map(|suggestion| suggestion.get("destination")?.as_str())
+        .unwrap_or("session")
+        .to_string()
+}
+
+/// Mirrors the official extension: a mode change is dropped when rules are suggested, and only non-mode suggestions follow the chosen destination.
+pub(crate) fn always_allow_updates(
+    suggestions: &[serde_json::Value],
+    destination: &str,
+) -> Vec<serde_json::Value> {
+    let suggests_rules = suggestions.iter().any(|suggestion| {
+        suggestion["type"] == "addRules"
+            && suggestion["rules"]
+                .as_array()
+                .is_some_and(|rules| !rules.is_empty())
+    });
+    suggestions
+        .iter()
+        .filter(|suggestion| !suggests_rules || suggestion["type"] != "setMode")
+        .map(|suggestion| {
+            let mut suggestion = suggestion.clone();
+            if suggestion["type"] != "setMode"
+                && let Some(object) = suggestion.as_object_mut()
+            {
+                object.insert("destination".into(), destination.into());
+            }
+            suggestion
+        })
+        .collect()
+}
+
+fn permission_decision(
+    prompt: &PermissionPrompt,
+    choice: PermissionChoice,
+    destination: &str,
+    command: Option<&str>,
+    reason: &str,
+) -> PermissionDecision {
+    if choice == PermissionChoice::Deny {
+        let reason = reason.trim();
+        return if reason.is_empty() {
+            PermissionDecision::Deny {
+                message: agent_harness::claude::DENY_STOP.into(),
+                interrupt: true,
+            }
+        } else {
+            PermissionDecision::Deny {
+                message: format!("{}{reason}", agent_harness::claude::DENY_REASON_PREFIX),
+                interrupt: false,
+            }
+        };
+    }
+    let updated_input = command
+        .map(str::trim)
+        .filter(|command| !command.is_empty() && Some(*command) != bash_command(prompt))
+        .and_then(|command| {
+            let mut input = prompt.input.clone();
+            input
+                .as_object_mut()?
+                .insert("command".into(), command.into());
+            Some(input)
+        });
+    let updated_permissions = if choice == PermissionChoice::AlwaysAllow {
+        always_allow_updates(&prompt.suggestions, destination)
+    } else {
+        Vec::new()
+    };
+    PermissionDecision::Allow {
+        updated_input,
+        updated_permissions,
+    }
+}
 
 const NEW_CHAT_TEXTAREA_MIN: f32 = 76.;
 const TEXTAREA_MAX: f32 = 260.;
@@ -531,11 +639,94 @@ impl ChatView {
         });
     }
 
-    pub(super) fn submit_answer(&mut self, _: &SubmitAnswer, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn decide_permission_card(
+        &mut self,
+        pending_id: &str,
+        question_id: &str,
+        choice: PermissionChoice,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(prompt) = self
+            .session
+            .read(cx)
+            .pending_questions()
+            .iter()
+            .flat_map(|pending| &pending.questions)
+            .find(|question| question.id == question_id)
+            .and_then(|question| question.permission.clone())
+        else {
+            return;
+        };
+        let editors = self.permission_editors.get(question_id);
+        let destination = editors.map_or_else(
+            || "session".to_string(),
+            |editors| editors.destination.clone(),
+        );
+        let command = editors
+            .and_then(|editors| editors.command.as_ref())
+            .map(|editor| editor.read(cx).text(cx));
+        let reason = editors.map_or_else(String::new, |editors| editors.reason.read(cx).text(cx));
+        let decision =
+            permission_decision(&prompt, choice, &destination, command.as_deref(), &reason);
+        if choice == PermissionChoice::AlwaysAllow {
+            self.store.update(cx, |store, cx| {
+                store
+                    .update_list_prefs(|prefs| prefs.permission_destination = Some(destination), cx)
+            });
+        }
+        self.session.update(cx, |session, cx| {
+            session.decide_permission(pending_id, decision, cx)
+        });
+    }
+
+    fn cycle_permission_destination(&mut self, question_id: &str, cx: &mut Context<Self>) {
+        let Some(editors) = self.permission_editors.get_mut(question_id) else {
+            return;
+        };
+        let next = PERMISSION_DESTINATIONS
+            .iter()
+            .position(|destination| *destination == editors.destination)
+            .map_or(0, |position| (position + 1) % PERMISSION_DESTINATIONS.len());
+        editors.destination = PERMISSION_DESTINATIONS[next].to_string();
+        cx.notify();
+    }
+
+    pub(super) fn submit_answer(
+        &mut self,
+        _: &SubmitAnswer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(pending) = self.session.read(cx).pending_questions().first() else {
             return;
         };
         if pending.is_permission() {
+            let pending_id = pending.id().to_string();
+            let Some(question_id) = pending
+                .questions
+                .first()
+                .map(|question| question.id.clone())
+            else {
+                return;
+            };
+            let Some(editors) = self.permission_editors.get(&question_id) else {
+                return;
+            };
+            let choice = if editors.reason.focus_handle(cx).is_focused(window) {
+                if editors.reason.read(cx).text(cx).trim().is_empty() {
+                    return;
+                }
+                PermissionChoice::Deny
+            } else if editors
+                .command
+                .as_ref()
+                .is_some_and(|editor| editor.focus_handle(cx).is_focused(window))
+            {
+                PermissionChoice::Allow
+            } else {
+                return;
+            };
+            self.decide_permission_card(&pending_id, &question_id, choice, cx);
             return;
         }
         let pending_id = pending.id().to_string();
@@ -758,23 +949,65 @@ impl ChatView {
         let answer_editor = typed_editor
             .clone()
             .filter(|_| question.options.is_empty());
+        let permission_editors = self
+            .permission_editors
+            .get(&question.id)
+            .filter(|_| question.permission.is_some());
         let options: Vec<AnyElement> = if is_permission {
-            [(t!("Allow"), true), (t!("Deny"), false)]
+            let always_destination = permission_editors
+                .filter(|_| {
+                    question
+                        .permission
+                        .as_ref()
+                        .is_some_and(|prompt| prompt.allows_always)
+                })
+                .map(|editors| editors.destination.clone());
+            let mut choices = vec![(t!("Allow").into_any_element(), PermissionChoice::Allow)];
+            if let Some(destination) = always_destination {
+                let question_id = question.id.clone();
+                choices.push((
+                    h_flex()
+                        .gap(px(8.))
+                        .child(t!(
+                            "Always allow for {destination}",
+                            destination = destination_label(&destination)
+                        ))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "permission-destination-{question_id}"
+                                )))
+                                .px(px(6.))
+                                .rounded(px(6.))
+                                .text_color(colors.text_muted)
+                                .hover(|style| style.text_color(colors.text))
+                                .tooltip(Tooltip::text(t!("Change where the rule is saved")))
+                                .child(super::icon(IconName::AgentArrowDown, 12.))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.cycle_permission_destination(&question_id, cx)
+                                })),
+                        )
+                        .into_any_element(),
+                    PermissionChoice::AlwaysAllow,
+                ));
+            }
+            choices.push((t!("Deny").into_any_element(), PermissionChoice::Deny));
+            choices
                 .into_iter()
                 .enumerate()
-                .map(|(position, (label, allow))| {
+                .map(|(position, (label, choice))| {
                     let pending_id = pending_id.clone();
+                    let question_id = question.id.clone();
                     self.render_option_row(
                         format!("permission-{pending_id}-{position}").into(),
                         position + 1,
-                        label.into_any_element(),
+                        label,
                         false,
                         cx,
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.session.update(cx, |session, cx| {
-                            session.answer_permission(&pending_id, allow, cx)
-                        })
+                        this.decide_permission_card(&pending_id, &question_id, choice, cx)
                     }))
                     .into_any_element()
                 })
@@ -897,6 +1130,22 @@ impl ChatView {
                             }),
                     )
                     .child(self.render_question_text(&question.id, &question.question, cx))
+                    .when_some(
+                        permission_editors.and_then(|editors| editors.command.clone()),
+                        |this, editor| {
+                            this.child(
+                                div()
+                                    .mt(px(8.))
+                                    .px(px(10.))
+                                    .py(px(6.))
+                                    .rounded(px(8.))
+                                    .border_1()
+                                    .border_color(hairline(0.06, cx))
+                                    .bg(ink(0.025, cx))
+                                    .child(editor),
+                            )
+                        },
+                    )
                     .when(question.multi_select, |this| {
                         this.child(
                             div()
@@ -914,6 +1163,21 @@ impl ChatView {
                             .max_h(options_max_height)
                             .overflow_y_scroll()
                             .children(options),
+                    )
+                    .when_some(
+                        permission_editors.map(|editors| editors.reason.clone()),
+                        |this, editor| {
+                            this.child(
+                                div()
+                                    .mt(px(12.))
+                                    .border_t_1()
+                                    .border_color(hairline(0.06, cx))
+                                    .pt(px(12.))
+                                    .pb(px(4.))
+                                    .px(px(4.))
+                                    .child(editor),
+                            )
+                        },
                     )
                     .when_some(answer_editor, |this, editor| {
                         this.child(
@@ -1009,3 +1273,105 @@ impl ChatView {
     }
 }
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn prompt(input: serde_json::Value, suggestions: Vec<serde_json::Value>) -> PermissionPrompt {
+        PermissionPrompt {
+            tool_name: "Bash".into(),
+            input,
+            suggestions,
+            allows_always: true,
+            ..PermissionPrompt::default()
+        }
+    }
+
+    #[test]
+    fn always_allow_overrides_destination_and_drops_set_mode() {
+        let suggestions = vec![
+            json!({
+                "type": "addRules",
+                "rules": [{"toolName": "Bash", "ruleContent": "git status"}],
+                "behavior": "allow",
+                "destination": "session",
+            }),
+            json!({"type": "setMode", "mode": "acceptEdits", "destination": "session"}),
+        ];
+        let updates = always_allow_updates(&suggestions, "localSettings");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["type"], "addRules");
+        assert_eq!(updates[0]["destination"], "localSettings");
+    }
+
+    #[test]
+    fn set_mode_only_keeps_its_own_destination() {
+        let suggestions =
+            vec![json!({"type": "setMode", "mode": "acceptEdits", "destination": "session"})];
+        let updates = always_allow_updates(&suggestions, "localSettings");
+        assert_eq!(updates, suggestions);
+    }
+
+    #[test]
+    fn deny_with_text_uses_reason_template() {
+        let prompt = prompt(json!({"command": "npm i"}), Vec::new());
+        let decision = permission_decision(
+            &prompt,
+            PermissionChoice::Deny,
+            "session",
+            None,
+            "  use pnpm ",
+        );
+        assert_eq!(
+            decision,
+            PermissionDecision::Deny {
+                message: format!("{}use pnpm", agent_harness::claude::DENY_REASON_PREFIX),
+                interrupt: false,
+            }
+        );
+    }
+
+    #[test]
+    fn deny_without_text_stops() {
+        let prompt = prompt(json!({"command": "npm i"}), Vec::new());
+        let decision = permission_decision(&prompt, PermissionChoice::Deny, "session", None, " ");
+        assert_eq!(
+            decision,
+            PermissionDecision::Deny {
+                message: agent_harness::claude::DENY_STOP.into(),
+                interrupt: true,
+            }
+        );
+    }
+
+    #[test]
+    fn edited_command_is_sent_as_updated_input() {
+        let prompt = prompt(json!({"command": "ls", "description": "d"}), Vec::new());
+        let decision = permission_decision(
+            &prompt,
+            PermissionChoice::Allow,
+            "session",
+            Some("ls -la"),
+            "",
+        );
+        assert_eq!(
+            decision,
+            PermissionDecision::Allow {
+                updated_input: Some(json!({"command": "ls -la", "description": "d"})),
+                updated_permissions: Vec::new(),
+            }
+        );
+        let unchanged =
+            permission_decision(&prompt, PermissionChoice::Allow, "session", Some("ls"), "");
+        assert_eq!(
+            unchanged,
+            PermissionDecision::Allow {
+                updated_input: None,
+                updated_permissions: Vec::new(),
+            }
+        );
+    }
+}

@@ -2771,6 +2771,7 @@ pub struct ChatListPrefs {
     pub collapsed_sections: Vec<String>,
     pub favorite_models: Vec<String>,
     pub dictation_device: Option<String>,
+    pub permission_destination: Option<String>,
     /// 1.1.11 kept saved messages here; they now live in their own file.
     #[serde(rename = "saved_messages", skip_serializing)]
     pub(crate) legacy_saved_messages: Vec<SavedMessage>,
