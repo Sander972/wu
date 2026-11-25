@@ -9,8 +9,8 @@ use crate::{
     session::Prompt,
 };
 use gpui::{
-    AnyElement, Context, Focusable as _, Hsla, IntoElement, ObjectFit, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, div, img, px,
+    AnyElement, Context, Focusable as _, Hsla, IntoElement, ParentElement, Render, SharedString,
+    Styled, Subscription, Window, div, px,
 };
 use i18n::t;
 use ui::{IconName, Tooltip, prelude::*};
@@ -254,14 +254,7 @@ impl ChatView {
                             .border_color(frame)
                             .bg(thumbnail_plate)
                             .overflow_hidden()
-                            .child(
-                                img(path.clone())
-                                    .image_cache(&self.images)
-                                    .w(px(38.))
-                                    .h(px(26.))
-                                    .rounded(px(4.))
-                                    .object_fit(ObjectFit::Cover),
-                            )
+                            .child(self.attachment_preview(path, 40., 28., 4., cx))
                     }))
                     .child(
                         div()

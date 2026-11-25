@@ -11,13 +11,14 @@ use gpui::{
 };
 use i18n::t;
 use language::{Buffer, DiagnosticSeverity, File as _, LanguageServerId, Point};
-use project::{CodeAction, LspAction, ProjectTransaction};
+use project::{CodeAction, LspAction, Project, ProjectTransaction};
 use settings::Settings as _;
 use std::{
     ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
 };
+use terminal::Terminal;
 use ui::{IconName, Tooltip, prelude::*};
 use workspace::{MultiWorkspace, Workspace};
 
@@ -347,6 +348,72 @@ impl CodeActionProvider for FixWithClaude {
     }
 }
 
+/// Claude Code's wrapper for a mentioned terminal's output, copied from the VS Code extension.
+const TERMINAL_BLOCK_TEMPLATE: &str = "<terminal name=\"{name}\">\n{text}\n</terminal>";
+const TERMINAL_MENTION_PREFIX: &str = "@terminal:";
+/// Claude Code sends the last 100 lines of a mentioned terminal.
+const TERMINAL_CONTEXT_LINES: usize = 100;
+
+/// Claude Code writes terminal mentions unquoted with `_` for spaces, so a mention ends at the first whitespace.
+pub(crate) fn terminal_mention_name(title: &str) -> String {
+    title.replace(char::is_whitespace, "_")
+}
+
+/// The open terminals by mention name, keeping the first of any that share one.
+pub(super) fn open_terminals(
+    project: &Entity<Project>,
+    cx: &App,
+) -> Vec<(String, Entity<Terminal>)> {
+    let mut terminals: Vec<(String, Entity<Terminal>)> = Vec::new();
+    for terminal in project
+        .read(cx)
+        .local_terminal_handles()
+        .iter()
+        .filter_map(WeakEntity::upgrade)
+    {
+        let name = terminal_mention_name(&terminal.read(cx).title(false));
+        if !terminals.iter().any(|(open, _)| *open == name) {
+            terminals.push((name, terminal));
+        }
+    }
+    terminals
+}
+
+fn recent_output(terminal: &Terminal) -> Option<String> {
+    let content = terminal.get_content();
+    let lines: Vec<&str> = content.trim_end().lines().collect();
+    let output = lines[lines.len().saturating_sub(TERMINAL_CONTEXT_LINES)..].join("\n");
+    (!output.trim().is_empty()).then_some(output)
+}
+
+/// A block for each terminal `text` mentions, whose output `read` returns by mention name. Punctuation may follow a mention, as in `@terminal:build?`.
+fn terminal_context(text: &str, mut read: impl FnMut(&str) -> Option<String>) -> Vec<String> {
+    let mut sent: Vec<&str> = Vec::new();
+    let mut blocks = Vec::new();
+    for (index, _) in text.match_indices(TERMINAL_MENTION_PREFIX) {
+        let token = text[index + TERMINAL_MENTION_PREFIX.len()..]
+            .split(char::is_whitespace)
+            .next()
+            .unwrap_or_default();
+        let trimmed = token.trim_end_matches(|character: char| character.is_ascii_punctuation());
+        if sent.contains(&token) || sent.contains(&trimmed) {
+            continue;
+        }
+        let found = [token, trimmed]
+            .into_iter()
+            .filter(|name| !name.is_empty())
+            .find_map(|name| Some((name, read(name)?)));
+        if let Some((name, output)) = found {
+            sent.push(name);
+            let (head, tail) = TERMINAL_BLOCK_TEMPLATE
+                .split_once("{text}")
+                .unwrap_or_default();
+            blocks.push(format!("{}{output}{tail}", head.replace("{name}", name)));
+        }
+    }
+    blocks
+}
+
 pub(crate) fn context_block(context: &EditorContext) -> String {
     let path = context.absolute_path.display();
     match context.selection.as_ref().filter(|_| !context.path_only) {
@@ -433,6 +500,21 @@ impl ChatView {
             .filter(|(mention, _)| text.contains(mention.as_str()))
             .map(|(_, block)| block)
             .collect()
+    }
+
+    /// The output of each open terminal the message mentions, read now. Terminal output can hold secrets, so only a mention in the message itself sends it.
+    pub(super) fn mentioned_terminal_context(&self, text: &str, cx: &App) -> Vec<String> {
+        if self.session.read(cx).kind() != AgentKind::Claude
+            || self.editing_queued.is_some()
+            || agent_harness::leading_command(text).is_some()
+        {
+            return Vec::new();
+        }
+        let terminals = open_terminals(&self.project, cx);
+        terminal_context(text, |name| {
+            let (_, terminal) = terminals.iter().find(|(open, _)| open == name)?;
+            recent_output(terminal.read(cx))
+        })
     }
 
     /// Fills the composer with a request to fix `problems` in `path`, never sending it.
@@ -586,6 +668,27 @@ mod tests {
         ] {
             assert_eq!(fix_prompt(path, std::slice::from_ref(&error)).0, expected);
         }
+    }
+
+    #[test]
+    fn terminal_mention_becomes_a_context_block() {
+        let read = |name: &str| (name == "npm_run_dev").then(|| "ready on :3000".to_string());
+        assert_eq!(terminal_mention_name("npm run dev"), "npm_run_dev");
+        assert_eq!(
+            terminal_context("what port is in @terminal:npm_run_dev?", read),
+            ["<terminal name=\"npm_run_dev\">\nready on :3000\n</terminal>"]
+        );
+        assert_eq!(
+            terminal_context("@terminal:npm_run_dev and @terminal:npm_run_dev", read).len(),
+            1
+        );
+        assert!(terminal_context("@terminal:other", read).is_empty());
+        assert!(
+            terminal_context("what port is in npm_run_dev?", |_| {
+                panic!("a terminal is read only when the message mentions it")
+            })
+            .is_empty()
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::{ChatView, ui};
-use super::editor_context::{applied_line_suffix, mention_text_with_lines};
+use super::editor_context::{applied_line_suffix, mention_text_with_lines, open_terminals};
 use crate::{
     AcceptCommand, AgentKind, DismissCommands, NewAntigravityChat, NewClaudeChat, NewCodexChat,
     NewOpencodeChat, SelectNextCommand, SelectPreviousCommand, Send, ToggleFocus,
@@ -50,6 +50,8 @@ enum Row {
     Command(CommandItem),
     Skill(agent_harness::Skill),
     Mention(MentionItem),
+    /// An open terminal, by its mention name.
+    Terminal(String),
 }
 
 impl Row {
@@ -58,6 +60,7 @@ impl Row {
             Row::Command(item) if item.is_skill => IconName::AgentWidget,
             Row::Command(_) => IconName::AgentCommand,
             Row::Skill(_) => IconName::AgentWidget,
+            Row::Terminal(_) => IconName::Terminal,
             Row::Mention(item) => {
                 return file_icon(&item.path, item.is_dir, cx)
                     .size(IconSize::Custom(ui(size)))
@@ -72,6 +75,7 @@ impl Row {
             Row::Command(item) => format!("/{}", item.name),
             Row::Skill(skill) => skill_display_name(&skill.name),
             Row::Mention(item) => item.label.clone(),
+            Row::Terminal(name) => name.clone(),
         }
     }
 
@@ -80,6 +84,7 @@ impl Row {
             Row::Command(item) => item.detail.clone(),
             Row::Skill(skill) => skill.description.clone(),
             Row::Mention(item) => item.detail.clone(),
+            Row::Terminal(_) => String::new(),
         }
     }
 }
@@ -260,7 +265,22 @@ impl ChatView {
                 skills.sort_by_key(|(rank, _)| *rank);
                 skills.into_iter().map(|(_, skill)| Row::Skill(skill)).collect()
             }
-            TokenKind::Mention => self.mention_results.iter().cloned().map(Row::Mention).collect(),
+            TokenKind::Mention => {
+                // Only Claude receives a mentioned terminal's output.
+                let terminals = if self.session.read(cx).kind() == AgentKind::Claude {
+                    open_terminals(&self.project, cx)
+                } else {
+                    Vec::new()
+                };
+                let query = menu.token.query.to_lowercase();
+                terminals
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .filter(|name| format!("terminal:{name}").to_lowercase().contains(&query))
+                    .map(Row::Terminal)
+                    .chain(self.mention_results.iter().cloned().map(Row::Mention))
+                    .collect()
+            }
         }
     }
 
@@ -300,6 +320,7 @@ impl ChatView {
                 Row::Command(item) => item.name,
                 Row::Skill(skill) => skill.name,
                 Row::Mention(item) => item.label,
+                Row::Terminal(name) => name,
             })
             .collect()
     }
@@ -623,6 +644,7 @@ impl ChatView {
                 format!("${}", skill.name)
             }
             Row::Mention(item) => mention_text(&item.path, item.is_dir, &cwd, lines),
+            Row::Terminal(name) => format!("@terminal:{name}"),
         };
         if let Row::Mention(item) = &mut row {
             let relative = relative_mention_path(&item.path, item.is_dir, &cwd);

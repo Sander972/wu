@@ -225,6 +225,7 @@
   "{first} and {second}": "{first}和{second}",
   "{name} exited unexpectedly ({status})": "{name} 意外退出（{status}）",
   "{name} exited unexpectedly ({status}): {output}": "{name} 意外退出（{status}）：{output}",
+  "{name} wasn't sent: Claude only accepts PDFs up to 32 MB.": "{name} 未发送：Claude 只接受不超过 32 MB 的 PDF。",
   "{name} wasn't sent: Claude only accepts images up to 5 MB.": "{name} 未发送：Claude 只接受不超过 5 MB 的图片。",
   "{name} wasn't sent: only PNG, JPEG, GIF and WebP images are supported.": "{name} 未发送：只支持 PNG、JPEG、GIF 和 WebP 图片。",
   "{name} wasn't sent: {error}": "{name} 未发送：{error}",

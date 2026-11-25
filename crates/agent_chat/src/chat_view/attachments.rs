@@ -1,5 +1,8 @@
 use super::{ChatView, ui};
-use crate::chat_style::{hairline, icon};
+use crate::{
+    AgentKind,
+    chat_style::{hairline, icon},
+};
 use anyhow::{Context as _, Result, bail};
 use gpui::{
     ClipboardEntry, Context, ExternalPaths, Image, ImageFormat, IntoElement, ObjectFit,
@@ -32,6 +35,11 @@ pub(crate) fn is_image_path(path: &Path) -> bool {
         })
 }
 
+pub(crate) fn is_pdf(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+}
+
 pub(crate) fn is_attachable_image(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -54,8 +62,11 @@ fn write_upload(uploads: &Path, extension: &str, bytes: &[u8]) -> Result<PathBuf
     Ok(path)
 }
 
-/// Agents only read PNG, JPEG, GIF and WebP, so other formats are converted to PNG.
+/// Agents only read PNG, JPEG, GIF and WebP, so other formats are converted to PNG. PDFs are sent as they are.
 fn stage_image_file(path: &Path, uploads: &Path) -> Result<PathBuf> {
+    if is_pdf(path) {
+        return Ok(path.to_path_buf());
+    }
     let size = std::fs::metadata(path)
         .with_context(|| t!("cannot read {path}", path = path.display()).to_string())?
         .len();
@@ -159,6 +170,69 @@ enum Pending {
 }
 
 impl ChatView {
+    /// Only Claude reads PDFs; for other agents they stay file references.
+    pub(crate) fn accepts_attachment(&self, path: &Path, cx: &App) -> bool {
+        is_attachable_image(path)
+            || (is_pdf(path) && self.session.read(cx).kind() == AgentKind::Claude)
+    }
+
+    /// A PDF has no thumbnail, so it shows an icon, and its name where there is room.
+    pub(super) fn attachment_preview(
+        &self,
+        path: &Path,
+        width: f32,
+        height: f32,
+        radius: f32,
+        cx: &App,
+    ) -> AnyElement {
+        if !is_pdf(path) {
+            return img(path.to_path_buf())
+                .image_cache(&self.images)
+                .w(px(width - 2.))
+                .h(px(height - 2.))
+                .rounded(px(radius))
+                .object_fit(ObjectFit::Cover)
+                .into_any_element();
+        }
+        let colors = cx.theme().colors();
+        v_flex()
+            .size_full()
+            .p(px(4.))
+            .gap(px(2.))
+            .items_center()
+            .justify_center()
+            .child(icon(IconName::FileDoc, px(16.), colors.text_muted))
+            .when(height >= 48., |this| {
+                this.child(
+                    div()
+                        .w_full()
+                        .text_center()
+                        .truncate()
+                        .text_size(ui(10.))
+                        .text_color(colors.text_muted)
+                        .child(
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    pub(super) fn open_attachment(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if is_pdf(&path) {
+            cx.open_with_system(&path);
+        } else {
+            self.open_image(path, window, cx);
+        }
+    }
+
     fn stage(&mut self, pending: Pending, cx: &mut Context<Self>) {
         let task = cx.background_spawn(async move {
             let uploads = uploads_dir();
@@ -235,7 +309,7 @@ impl ChatView {
                 _ => None,
             })
             .flatten()
-            .filter(|path| is_attachable_image(path))
+            .filter(|path| self.accepts_attachment(path, cx))
             .collect();
         if images.is_empty() && files.is_empty() {
             return false;
@@ -264,11 +338,11 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (images, others): (Vec<PathBuf>, Vec<PathBuf>) = paths
+        let (attachable, others): (Vec<PathBuf>, Vec<PathBuf>) = paths
             .into_iter()
-            .partition(|path| is_attachable_image(path));
-        if !images.is_empty() {
-            self.stage(Pending::Files(images), cx);
+            .partition(|path| self.accepts_attachment(path, cx));
+        if !attachable.is_empty() {
+            self.stage(Pending::Files(attachable), cx);
         }
         self.insert_mentions(others, "", window, cx);
         cx.notify();
@@ -333,18 +407,17 @@ impl ChatView {
                                         .border_1()
                                         .border_color(frame)
                                         .cursor_pointer()
-                                        .child(
-                                            img(path.clone())
-                                                .image_cache(&self.images)
-                                                .w(px(THUMBNAIL_SIZE - 2.))
-                                                .h(px(THUMBNAIL_SIZE - 2.))
-                                                .rounded(px(7.))
-                                                .object_fit(ObjectFit::Cover),
-                                        )
+                                        .child(self.attachment_preview(
+                                            path,
+                                            THUMBNAIL_SIZE,
+                                            THUMBNAIL_SIZE,
+                                            7.,
+                                            cx,
+                                        ))
                                         .on_click({
                                             let path = path.clone();
                                             cx.listener(move |this, _, window, cx| {
-                                                this.open_image(path.clone(), window, cx)
+                                                this.open_attachment(path.clone(), window, cx)
                                             })
                                         }),
                                 )
@@ -420,6 +493,8 @@ mod tests {
         std::fs::write(&notes, "hello").expect("write text");
         let diagram = directory.path().join("diagram.svg");
         std::fs::write(&diagram, "<svg/>").expect("write svg");
+        let report = directory.path().join("report.pdf");
+        std::fs::write(&report, "%PDF-1.7").expect("write pdf");
         let store = new_store(directory.path(), cx);
         store.update(cx, |store, _| store.skip_plan_usage());
         let project = project::Project::test(project::FakeFs::new(cx.executor()), [], cx).await;
@@ -440,7 +515,7 @@ mod tests {
         });
         let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
         let dropped = ExternalPaths(
-            [image.clone(), notes.clone(), diagram]
+            [image.clone(), notes.clone(), diagram, report.clone()]
                 .into_iter()
                 .collect(),
         );
@@ -464,7 +539,11 @@ mod tests {
         assert!(drop(&dropped, cx), "the chat takes the drop");
         cx.run_until_parked();
         chat.read_with(cx, |chat, cx| {
-            assert_eq!(chat.attachments, vec![image.clone()]);
+            assert_eq!(
+                chat.attachments,
+                vec![image.clone(), report.clone()],
+                "Claude chats attach PDFs as they are"
+            );
             let text = chat.composer.read(cx).text(cx);
             assert!(text.contains("notes.txt"));
             assert!(

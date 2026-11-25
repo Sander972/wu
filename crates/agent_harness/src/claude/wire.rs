@@ -315,28 +315,38 @@ pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
     Ok(frame)
 }
 
-pub(crate) struct ImageBlock {
-    pub media_type: &'static str,
-    pub base64_data: String,
+pub(crate) enum AttachmentBlock {
+    Image {
+        media_type: &'static str,
+        base64_data: String,
+    },
+    Pdf {
+        title: String,
+        base64_data: String,
+    },
 }
 
-fn user_content(text: &str, images: &[ImageBlock], context: &[String]) -> Value {
-    if images.is_empty() && context.is_empty() {
+fn user_content(text: &str, attachments: &[AttachmentBlock], context: &[String]) -> Value {
+    if attachments.is_empty() && context.is_empty() {
         return Value::String(text.to_owned());
     }
     let mut blocks: Vec<Value> = context
         .iter()
         .map(|context| json!({ "type": "text", "text": context }))
         .collect();
-    blocks.extend(images.iter().map(|image| {
-        json!({
+    blocks.extend(attachments.iter().map(|attachment| match attachment {
+        AttachmentBlock::Image {
+            media_type,
+            base64_data,
+        } => json!({
             "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": image.media_type,
-                "data": image.base64_data,
-            },
-        })
+            "source": { "type": "base64", "media_type": media_type, "data": base64_data },
+        }),
+        AttachmentBlock::Pdf { title, base64_data } => json!({
+            "type": "document",
+            "source": { "type": "base64", "media_type": "application/pdf", "data": base64_data },
+            "title": title,
+        }),
     }));
     // The API rejects empty text blocks, which image-only messages would otherwise carry.
     if !text.trim().is_empty() {
@@ -347,14 +357,14 @@ fn user_content(text: &str, images: &[ImageBlock], context: &[String]) -> Value 
 
 pub(crate) fn user_message_line(
     text: &str,
-    images: &[ImageBlock],
+    attachments: &[AttachmentBlock],
     context: &[String],
     id: &str,
 ) -> String {
     json!({
         "type": "user",
         "uuid": id,
-        "message": { "role": "user", "content": user_content(text, images, context) },
+        "message": { "role": "user", "content": user_content(text, attachments, context) },
         "parent_tool_use_id": null,
     })
     .to_string()
@@ -363,7 +373,7 @@ pub(crate) fn user_message_line(
 /// Only pass `immediate` when no tool is open: priority `now` aborts in-flight tool calls.
 pub(crate) fn steer_message_line(
     text: &str,
-    images: &[ImageBlock],
+    attachments: &[AttachmentBlock],
     context: &[String],
     id: &str,
     immediate: bool,
@@ -372,7 +382,7 @@ pub(crate) fn steer_message_line(
         "type": "user",
         "uuid": id,
         "priority": if immediate { "now" } else { "next" },
-        "message": { "role": "user", "content": user_content(text, images, context) },
+        "message": { "role": "user", "content": user_content(text, attachments, context) },
         "parent_tool_use_id": null,
     })
     .to_string()
@@ -562,7 +572,7 @@ mod tests {
 
     #[test]
     fn image_only_messages_carry_no_empty_text_block() {
-        let image = ImageBlock {
+        let image = AttachmentBlock::Image {
             media_type: "image/png",
             base64_data: "AAAA".into(),
         };
@@ -577,7 +587,7 @@ mod tests {
 
     #[test]
     fn context_blocks_come_first_and_text_last() {
-        let image = ImageBlock {
+        let image = AttachmentBlock::Image {
             media_type: "image/png",
             base64_data: "AAAA".into(),
         };
@@ -643,7 +653,7 @@ mod tests {
 
     #[test]
     fn images_precede_the_text_block() {
-        let images = [ImageBlock {
+        let images = [AttachmentBlock::Image {
             media_type: "image/png",
             base64_data: "AAAA".into(),
         }];

@@ -860,7 +860,7 @@ impl ClaudeHarness {
             stdin_tx.send(StdinMsg::Line(line)).ok();
         }
 
-        let (images, image_problems) = load_image_blocks(&request.attachments).await;
+        let (images, image_problems) = load_attachment_blocks(&request.attachments).await;
         let first_prompt_id = uuid::Uuid::new_v4().to_string();
         let first = wire::user_message_line(
             &apply_ultrathink(
@@ -913,6 +913,7 @@ enum StdinMsg {
 
 // The API rejects larger inline images.
 const MAX_INLINE_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_PDF_BYTES: u64 = 32 * 1024 * 1024;
 
 pub(crate) fn image_media_type(path: &std::path::Path, bytes: &[u8]) -> Option<&'static str> {
     let by_extension = match path
@@ -939,7 +940,7 @@ pub(crate) fn image_media_type(path: &std::path::Path, bytes: &[u8]) -> Option<&
     by_content.or(by_extension)
 }
 
-async fn load_image_blocks(paths: &[String]) -> (Vec<wire::ImageBlock>, Vec<String>) {
+async fn load_attachment_blocks(paths: &[String]) -> (Vec<wire::AttachmentBlock>, Vec<String>) {
     use base64::Engine as _;
     let mut blocks = Vec::new();
     let mut problems = Vec::new();
@@ -948,6 +949,30 @@ async fn load_image_blocks(paths: &[String]) -> (Vec<wire::ImageBlock>, Vec<Stri
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.clone());
+        let is_pdf = std::path::Path::new(path)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
+        if is_pdf {
+            match tokio::fs::metadata(path).await {
+                Ok(metadata) if metadata.len() > MAX_PDF_BYTES => {
+                    problems.push(
+                        t!(
+                            "{name} wasn't sent: Claude only accepts PDFs up to 32 MB.",
+                            name = name
+                        )
+                        .to_string(),
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    problems.push(
+                        t!("{name} wasn't sent: {error}", name = name, error = error).to_string(),
+                    );
+                    continue;
+                }
+            }
+        }
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -957,6 +982,13 @@ async fn load_image_blocks(paths: &[String]) -> (Vec<wire::ImageBlock>, Vec<Stri
                 continue;
             }
         };
+        if is_pdf {
+            blocks.push(wire::AttachmentBlock::Pdf {
+                title: name,
+                base64_data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            });
+            continue;
+        }
         if bytes.len().div_ceil(3) * 4 > MAX_INLINE_IMAGE_BYTES {
             problems.push(
                 t!(
@@ -977,7 +1009,7 @@ async fn load_image_blocks(paths: &[String]) -> (Vec<wire::ImageBlock>, Vec<Stri
             );
             continue;
         };
-        blocks.push(wire::ImageBlock {
+        blocks.push(wire::AttachmentBlock::Image {
             media_type,
             base64_data: base64::engine::general_purpose::STANDARD.encode(&bytes),
         });
@@ -1343,7 +1375,7 @@ async fn run_session(session: Session) {
                     }
                     turn_running = true;
                     let id = uuid::Uuid::new_v4().to_string();
-                    let (images, image_problems) = load_image_blocks(&msg.attachments).await;
+                    let (images, image_problems) = load_attachment_blocks(&msg.attachments).await;
                     for message in image_problems {
                         if event_tx.send(Ok(AgentEvent::Error { message })).await.is_err() {
                             break 'main;
@@ -2375,5 +2407,42 @@ mod tests {
             Some("image/webp")
         );
         assert_eq!(image_media_type(path("a.svg"), b"<svg"), None);
+    }
+
+    #[tokio::test]
+    async fn pdf_attachment_is_a_document_block() {
+        let directory = tempfile::tempdir().unwrap();
+        let pdf = directory.path().join("spec.pdf");
+        std::fs::write(&pdf, b"%PDF-1.7").unwrap();
+        let (blocks, problems) =
+            load_attachment_blocks(&[pdf.to_string_lossy().into_owned()]).await;
+        assert!(problems.is_empty(), "{problems:?}");
+        let line: Value =
+            serde_json::from_str(&wire::user_message_line("read it", &blocks, &[], "u1")).unwrap();
+        assert_eq!(
+            line["message"]["content"][0],
+            json!({
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjc="},
+                "title": "spec.pdf",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_pdf_reports_a_problem_and_is_skipped() {
+        let directory = tempfile::tempdir().unwrap();
+        let pdf = directory.path().join("huge.pdf");
+        std::fs::File::create(&pdf)
+            .unwrap()
+            .set_len(MAX_PDF_BYTES + 1)
+            .unwrap();
+        let (blocks, problems) =
+            load_attachment_blocks(&[pdf.to_string_lossy().into_owned()]).await;
+        assert!(blocks.is_empty());
+        assert_eq!(
+            problems,
+            ["huge.pdf wasn't sent: Claude only accepts PDFs up to 32 MB."]
+        );
     }
 }

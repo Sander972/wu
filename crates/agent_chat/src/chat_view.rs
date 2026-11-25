@@ -1038,6 +1038,7 @@ impl ChatView {
             .filter(|skill| text.contains(&format!("${}", skill.name)))
             .collect();
         let mut context = fix_context;
+        context.extend(self.mentioned_terminal_context(&text, cx));
         context.extend(self.take_editor_context(&text, cx));
         let prompt = Prompt {
             text,
@@ -2081,16 +2082,15 @@ impl ChatView {
                                 .border_color(hairline(0.11, cx))
                                 .bg(ink(0.035, cx))
                                 .cursor_pointer()
-                                .child(
-                                    img(path.clone())
-                                        .image_cache(&self.images)
-                                        .w(px(ATTACHMENT_THUMB_WIDTH - 2.))
-                                        .h(px(ATTACHMENT_THUMB_HEIGHT - 2.))
-                                        .rounded(px(7.))
-                                        .object_fit(ObjectFit::Cover),
-                                )
+                                .child(self.attachment_preview(
+                                    &path,
+                                    ATTACHMENT_THUMB_WIDTH,
+                                    ATTACHMENT_THUMB_HEIGHT,
+                                    7.,
+                                    cx,
+                                ))
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_image(path.clone(), window, cx)
+                                    this.open_attachment(path.clone(), window, cx)
                                 }))
                         })),
                 )
@@ -4585,11 +4585,9 @@ impl Item for ChatView {
             return false;
         }
         let paths = self.dropped_paths(dropped, cx);
-        let has_image = paths
-            .iter()
-            .any(|path| attachments::is_attachable_image(path));
-        // Drops on a pane edge split the pane, unless they carry an image to attach.
-        if paths.is_empty() || (active_pane.drag_split_direction().is_some() && !has_image) {
+        let has_attachment = paths.iter().any(|path| self.accepts_attachment(path, cx));
+        // Drops on a pane edge split the pane, unless they carry an image or PDF to attach.
+        if paths.is_empty() || (active_pane.drag_split_direction().is_some() && !has_attachment) {
             return false;
         }
         // The pane calls this while it is already updating the chat.
@@ -4606,7 +4604,7 @@ impl Item for ChatView {
             && self
                 .dropped_paths(dragged, cx)
                 .iter()
-                .any(|path| attachments::is_attachable_image(path))
+                .any(|path| self.accepts_attachment(path, cx))
     }
 
     fn as_searchable(
