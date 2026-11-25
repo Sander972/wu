@@ -6,7 +6,7 @@ use crate::{
 };
 use agent_harness::{PermissionDecision, PermissionMode, PermissionPrompt};
 use i18n::t;
-use workspace::{Toast, notifications::NotificationId};
+use workspace::{OpenOptions, OpenVisible, Toast, notifications::NotificationId};
 
 const PERMISSION_DESTINATIONS: [&str; 4] = [
     "localSettings",
@@ -794,12 +794,8 @@ impl ChatView {
                 if editors.reason.focus_handle(cx).is_focused(window)
                     && !editors.reason.read(cx).text(cx).trim().is_empty()
                 {
-                    if editors.plan_quote.is_some() {
-                        self.comment_on_plan(&question_id, window, cx);
-                    } else {
-                        let choice = self.keep_planning(&question_id, cx);
-                        self.decide_plan_card(&pending_id, choice, cx);
-                    }
+                    let choice = self.keep_planning(&question_id, cx);
+                    self.decide_plan_card(&pending_id, choice, cx);
                 }
                 return;
             }
@@ -1393,6 +1389,14 @@ impl ChatView {
         cx.notify();
     }
 
+    fn dismiss_plan_quote(&mut self, question_id: &str, cx: &mut Context<Self>) {
+        if let Some(editors) = self.permission_editors.get_mut(question_id)
+            && editors.plan_quote.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
     fn remove_plan_comment(&mut self, question_id: &str, index: usize, cx: &mut Context<Self>) {
         if let Some(editors) = self.permission_editors.get_mut(question_id)
             && index < editors.plan_comments.len()
@@ -1407,17 +1411,27 @@ impl ChatView {
             session.control(serde_json::json!({ "subtype": "get_plan" }), cx)
         });
         let workspace = self.workspace.clone();
-        cx.spawn_in(window, async move |this, cx| {
+        cx.spawn_in(window, async move |_, cx| {
             let message = match plan.await {
                 Ok(plan) => match plan["path"].as_str().filter(|_| plan["exists"] == true) {
                     Some(path) => {
-                        let target = links::FileTarget {
-                            path: path.into(),
-                            line: None,
-                        };
-                        return this.update_in(cx, |this, window, cx| {
-                            this.open_file_in_tab(target, window, cx)
-                        });
+                        let opening = workspace.update_in(cx, |workspace, window, cx| {
+                            workspace.open_abs_path(
+                                path.into(),
+                                OpenOptions {
+                                    visible: Some(OpenVisible::None),
+                                    ..Default::default()
+                                },
+                                window,
+                                cx,
+                            )
+                        })?;
+                        match opening.await {
+                            Ok(_) => return Ok(()),
+                            Err(error) => {
+                                t!("Couldn't open the plan: {error}", error = error).to_string()
+                            }
+                        }
                     }
                     None => t!("No plan yet").to_string(),
                 },
@@ -1532,10 +1546,19 @@ impl ChatView {
                         .text_color(colors.text_muted)
                         .child(format!("\"{quote}\"")),
                 )
+                .child(text_button("agent-plan-comment", t!("Comment")).on_click({
+                    let question_id = question_id.clone();
+                    cx.listener(move |this, _, window, cx| {
+                        this.comment_on_plan(&question_id, window, cx)
+                    })
+                }))
                 .child(
-                    text_button("agent-plan-comment", t!("Comment")).on_click(cx.listener(
-                        move |this, _, window, cx| this.comment_on_plan(&question_id, window, cx),
-                    )),
+                    IconButton::new("agent-plan-quote-dismiss", IconName::Close)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text(t!("Dismiss")))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.dismiss_plan_quote(&question_id, cx)
+                        })),
                 )
             })
     }
@@ -2028,6 +2051,77 @@ mod tests {
                     .plan_comments
                     .is_empty()
             );
+
+            view.permission_editors
+                .get_mut(&question_id)
+                .expect("the plan card has editors")
+                .plan_quote = Some("# Plan".into());
+            view.dismiss_plan_quote(&question_id, cx);
+            assert!(view.permission_editors[&question_id].plan_quote.is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn enter_in_the_plan_feedback_keeps_planning_even_with_a_pending_quote(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::session::tests::{new_store, run_until};
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(project::FakeFs::new(cx.executor()), [], cx).await;
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                session.clone(),
+                store.clone(),
+                project,
+                WeakEntity::new_invalid(),
+                window,
+                cx,
+            )
+        });
+        session.update(cx, |session, cx| {
+            session.update_settings(|settings| settings.permission = PermissionMode::Plan, cx);
+            session.send_message("scenario:plan-approval", cx);
+        });
+        run_until(cx, |cx| {
+            view.read_with(cx, |view, _| !view.permission_editors.is_empty())
+        });
+        let question_id = view.update_in(cx, |view, window, cx| {
+            let (question_id, editors) = view
+                .permission_editors
+                .iter_mut()
+                .next()
+                .expect("the plan card has editors");
+            editors.plan_quote = Some("# Plan".into());
+            editors.reason.update(cx, |editor, cx| {
+                editor.set_text("make it shorter", window, cx)
+            });
+            window.focus(&editors.reason.focus_handle(cx), cx);
+            question_id.clone()
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            view.submit_answer(&SubmitAnswer, window, cx);
+            assert!(
+                view.permission_editors[&question_id]
+                    .plan_comments
+                    .is_empty()
+            );
+            assert!(view.session.read(cx).pending_questions().is_empty());
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.settings().permission, PermissionMode::Plan)
         });
     }
 }

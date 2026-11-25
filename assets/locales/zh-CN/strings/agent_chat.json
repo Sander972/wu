@@ -54,6 +54,7 @@
   "Couldn't download the speech model: {error}": "无法下载语音模型：{error}",
   "Couldn't draw this diagram: {error}": "无法绘制此图表：{error}",
   "Couldn't open the chat: {error}": "无法打开对话：{error}",
+  "Couldn't open the plan: {error}": "无法打开计划：{error}",
   "Couldn't save the image: {error}": "无法保存图片：{error}",
   "Couldn't update {agent}": "无法更新 {agent}",
   "Default": "默认",
