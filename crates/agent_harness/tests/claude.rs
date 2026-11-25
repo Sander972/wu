@@ -71,6 +71,7 @@ fn controls(answer_label: &'static str) -> (RunControls, mpsc::Sender<Steer>, Ca
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: vec![answer_label.into()],
+                    decision: None,
                 })
                 .collect();
             tx.send(answers).expect("receiver is still held");
@@ -374,6 +375,7 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: vec!["B".into()],
+                    decision: None,
                 })
                 .collect();
             tx.send(answers).expect("receiver is still held");
@@ -865,6 +867,7 @@ fn permission_controls(
                     } else {
                         "B".into()
                     }],
+                    decision: None,
                 })
                 .collect();
             tx.send(answers).ok();

@@ -1430,6 +1430,7 @@ fn permission_question(agent: &AcpAgent, params: &Value) -> UserInputQuestion {
         multiline: false,
         accepts_typed_answer: false,
         multi_select: false,
+        permission: None,
     }
 }
 

@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::PermissionDecision;
+
 #[derive(Debug)]
 pub(crate) enum Frame {
     System(SystemFrame),
@@ -398,8 +400,30 @@ pub(crate) fn allow_response(updated_input: Value) -> Value {
     json!({ "behavior": "allow", "updatedInput": updated_input })
 }
 
-pub(crate) fn deny_response(message: &str) -> Value {
-    json!({ "behavior": "deny", "message": message })
+pub(crate) fn permission_response(
+    decision: &PermissionDecision,
+    original_input: &Value,
+    tool_use_id: Option<&str>,
+) -> Value {
+    let mut response = match decision {
+        PermissionDecision::Allow {
+            updated_input,
+            updated_permissions,
+        } => json!({
+            "behavior": "allow",
+            "updatedInput": updated_input.as_ref().unwrap_or(original_input),
+            "updatedPermissions": updated_permissions,
+        }),
+        PermissionDecision::Deny { message, interrupt } => json!({
+            "behavior": "deny",
+            "message": message,
+            "interrupt": interrupt,
+        }),
+    };
+    if let Some(tool_use_id) = tool_use_id {
+        response["toolUseID"] = Value::from(tool_use_id);
+    }
+    response
 }
 
 pub(crate) fn set_permission_mode_line(request_id: &str, mode: &str) -> String {
@@ -450,6 +474,30 @@ pub(crate) fn interrupt_request_line(request_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allow_reply_always_carries_input_and_tool_use_id() {
+        let allow = PermissionDecision::Allow {
+            updated_input: None,
+            updated_permissions: vec![],
+        };
+        assert_eq!(
+            permission_response(&allow, &json!({"command": "ls"}), Some("t1")),
+            json!({"behavior": "allow", "updatedInput": {"command": "ls"}, "updatedPermissions": [], "toolUseID": "t1"})
+        );
+    }
+
+    #[test]
+    fn deny_reply_carries_interrupt() {
+        let deny = PermissionDecision::Deny {
+            message: "m".into(),
+            interrupt: true,
+        };
+        assert_eq!(
+            permission_response(&deny, &json!({"command": "ls"}), Some("t1")),
+            json!({"behavior": "deny", "message": "m", "interrupt": true, "toolUseID": "t1"})
+        );
+    }
 
     #[test]
     fn control_errors_are_read_only_for_wu_requests() {

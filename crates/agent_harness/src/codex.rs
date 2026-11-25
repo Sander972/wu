@@ -2020,6 +2020,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                     .iter()
                     .find_map(|k| q.get(*k).and_then(Value::as_bool))
                     .unwrap_or(false),
+                permission: None,
             };
             (wire_id, question)
         })
@@ -2081,6 +2082,7 @@ fn elicitation_question(params: &Value) -> Option<(UserInputQuestion, Vec<(Strin
         multiline: false,
         accepts_typed_answer: false,
         multi_select: false,
+        permission: None,
     };
     Some((question, replies))
 }
@@ -2146,6 +2148,7 @@ fn permissions_question(params: &Value) -> UserInputQuestion {
         multiline: false,
         accepts_typed_answer: false,
         multi_select: false,
+        permission: None,
     }
 }
 
@@ -2206,6 +2209,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
         multiline: false,
         accepts_typed_answer: false,
         multi_select: false,
+        permission: None,
     }
 }
 

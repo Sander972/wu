@@ -257,6 +257,7 @@ fn permission_question(properties: &Value) -> UserInputQuestion {
         prefill: None,
         multiline: false,
         accepts_typed_answer: false,
+        permission: None,
     }
 }
 

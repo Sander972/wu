@@ -18,8 +18,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::{
-    AgentEvent, DoneStatus, ExternalSession, HarnessId, Model, PermissionMode, ReasoningLevel,
-    RunRequest, SkillRef, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
+    AgentEvent, DoneStatus, ExternalSession, HarnessId, Model, PermissionDecision, PermissionMode,
+    PermissionPrompt, ReasoningLevel, RunRequest, SkillRef, SlashCommand, SteeringMode,
+    UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
@@ -28,16 +29,19 @@ use catalog::{apply_ultrathink, to_effort};
 use normalize::Normalizer;
 use wire::{
     ControlRequestBody, ControlRequestFrame, Frame, allow_response, control_error_line,
-    control_response_line, deny_response,
+    control_response_line, permission_response,
 };
 
 pub const PERMISSION_ALLOW: &str = "Allow";
 pub const PERMISSION_DENY: &str = "Deny";
 pub const PERMISSION_HEADER: &str = "Permission";
 pub const QUESTION_HEADER: &str = n!("Question");
+pub const DENY_STOP: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+pub const DENY_REASON_PREFIX: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). The user provided the following reason for the rejection: ";
 
-fn permission_question(tool_name: &str, input: &Value) -> UserInputQuestion {
-    let call = normalize::decode_tool_use(tool_name, input);
+fn permission_question(request: &ControlRequestBody) -> UserInputQuestion {
+    let tool_name = request.tool_name.as_str();
+    let call = normalize::decode_tool_use(tool_name, &request.input);
     let question = match &call {
         crate::ToolCall::Exec { command } => t!("Run `{command}`?", command = command),
         crate::ToolCall::WriteFile { path, .. } => t!("Write {path}?", path = path),
@@ -53,6 +57,20 @@ fn permission_question(tool_name: &str, input: &Value) -> UserInputQuestion {
         _ => t!("Use {tool}?", tool = tool_name),
     }
     .to_string();
+    let is_set = |key: &str| {
+        !matches!(
+            request.other.get(key),
+            None | Some(Value::Null) | Some(Value::Bool(false))
+        )
+    };
+    let suggestions = request
+        .other
+        .get("permission_suggestions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let allows_always =
+        !suggestions.is_empty() && !is_set("suppress_always_allow_rule") && !is_set("plugin");
     UserInputQuestion {
         id: uuid::Uuid::new_v4().to_string(),
         header: PERMISSION_HEADER.into(),
@@ -62,6 +80,16 @@ fn permission_question(tool_name: &str, input: &Value) -> UserInputQuestion {
         prefill: None,
         multiline: false,
         accepts_typed_answer: false,
+        permission: Some(PermissionPrompt {
+            tool_name: tool_name.into(),
+            input: request.input.clone(),
+            tool_use_id: request.text("tool_use_id").map(Into::into),
+            suggestions,
+            allows_always,
+            blocked_path: request.text("blocked_path").map(Into::into),
+            title: request.text("title").map(Into::into),
+            description: request.text("description").map(Into::into),
+        }),
     }
 }
 
@@ -1451,6 +1479,20 @@ fn permission_args(permission: PermissionMode) -> &'static [&'static str] {
     }
 }
 
+fn allow_as_asked() -> PermissionDecision {
+    PermissionDecision::Allow {
+        updated_input: None,
+        updated_permissions: Vec::new(),
+    }
+}
+
+fn deny_and_stop() -> PermissionDecision {
+    PermissionDecision::Deny {
+        message: DENY_STOP.into(),
+        interrupt: true,
+    }
+}
+
 /// The CLI blocks until every `can_use_tool` request gets a response.
 fn handle_control_request(
     req: ControlRequestFrame,
@@ -1471,30 +1513,37 @@ fn handle_control_request(
     }
     if req.request.tool_name != "AskUserQuestion" {
         if skip_prompts {
-            let line = control_response_line(&req.request_id, allow_response(req.request.input));
+            let tool_use_id = req.request.text("tool_use_id");
+            let response = permission_response(&allow_as_asked(), &req.request.input, tool_use_id);
+            let line = control_response_line(&req.request_id, response);
             stdin_tx.send(StdinMsg::Line(line)).ok();
             return None;
         }
         let request_input = Arc::clone(request_input);
         let stdin_tx = stdin_tx.clone();
         let task = tokio::spawn(async move {
-            let question = permission_question(&req.request.tool_name, &req.request.input);
+            let question = permission_question(&req.request);
             // A dropped sender must deny, never allow.
             let answers = (request_input)(vec![question.clone()])
                 .await
                 .unwrap_or_default();
-            let accept = answers.iter().any(|answer| {
-                answer.question_id == question.id
-                    && answer
+            let decision = answers
+                .into_iter()
+                .find(|answer| answer.question_id == question.id)
+                .map(|answer| match answer.decision {
+                    Some(decision) => decision,
+                    None if answer
                         .labels
                         .iter()
-                        .any(|label| label.eq_ignore_ascii_case(PERMISSION_ALLOW))
-            });
-            let response = if accept {
-                allow_response(req.request.input)
-            } else {
-                deny_response("The user declined this action.")
-            };
+                        .any(|label| label.eq_ignore_ascii_case(PERMISSION_ALLOW)) =>
+                    {
+                        allow_as_asked()
+                    }
+                    None => deny_and_stop(),
+                })
+                .unwrap_or_else(deny_and_stop);
+            let tool_use_id = req.request.text("tool_use_id");
+            let response = permission_response(&decision, &req.request.input, tool_use_id);
             let line = control_response_line(&req.request_id, response);
             stdin_tx.send(StdinMsg::Line(line)).ok();
         });
@@ -1545,6 +1594,7 @@ fn elicitation_question(request: &ControlRequestBody) -> Option<UserInputQuestio
         prefill: None,
         multiline: false,
         accepts_typed_answer: false,
+        permission: None,
     })
 }
 
@@ -1629,6 +1679,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                             .into(),
                     })
                     .collect(),
+                permission: None,
             }
         })
         .collect()
@@ -1726,6 +1777,7 @@ mod tests {
                     .map(|question| UserInputAnswer {
                         question_id: question.id.clone(),
                         labels: vec![PERMISSION_ALLOW.into()],
+                        decision: None,
                     })
                     .collect();
                 asked.lock().unwrap().extend(questions);
@@ -1787,6 +1839,69 @@ mod tests {
         assert_eq!(asked.len(), 1, "only the plain confirmation is shown");
         assert_eq!(asked[0].header, "claude-in-chrome");
         assert_eq!(asked[0].question, "Allow Claude to use example.com?");
+    }
+
+    #[tokio::test]
+    async fn permission_prompt_carries_suggestions() {
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<UserInputQuestion>::new()));
+        let request_input: Arc<RequestInputFn> = Arc::new(Box::new({
+            let asked = asked.clone();
+            move |questions: Vec<UserInputQuestion>| {
+                let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
+                asked.lock().unwrap().extend(questions);
+                answer_tx.send(Vec::new()).ok();
+                answer_rx
+            }
+        }));
+        answer_to(
+            json!({"request_id": "r1", "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "ls"},
+                "tool_use_id": "t1",
+                "permission_suggestions": [{
+                    "type": "addRules",
+                    "rules": [{"toolName": "Bash", "ruleContent": "ls"}],
+                    "behavior": "allow",
+                    "destination": "localSettings",
+                }],
+            }}),
+            &request_input,
+            &stdin_tx,
+            &mut stdin_rx,
+        )
+        .await;
+        let asked = asked.lock().unwrap();
+        let permission = asked[0].permission.as_ref().expect("a typed prompt");
+        assert_eq!(permission.suggestions.len(), 1);
+        assert!(permission.allows_always);
+        assert_eq!(permission.tool_use_id.as_deref(), Some("t1"));
+    }
+
+    #[tokio::test]
+    async fn dropped_permission_prompt_denies() {
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel();
+        let request_input: Arc<RequestInputFn> = Arc::new(Box::new(|_| {
+            let (_answer_tx, answer_rx) = tokio::sync::oneshot::channel();
+            answer_rx
+        }));
+        let reply = answer_to(
+            json!({"request_id": "r1", "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "rm -rf build"},
+                "tool_use_id": "t1",
+            }}),
+            &request_input,
+            &stdin_tx,
+            &mut stdin_rx,
+        )
+        .await;
+        let response = &reply["response"]["response"];
+        assert_eq!(response["behavior"], "deny");
+        assert_eq!(response["message"], DENY_STOP);
+        assert_eq!(response["toolUseID"], "t1");
     }
 
     #[test]
@@ -2049,6 +2164,7 @@ mod tests {
         let answers = vec![UserInputAnswer {
             question_id: qs[0].id.clone(),
             labels: vec!["B".into()],
+            decision: None,
         }];
         let updated = updated_input_with_answers(&input, &qs, &answers);
         assert_eq!(updated["answers"]["Pick one"], json!("B"));

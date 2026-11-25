@@ -1,8 +1,8 @@
 use agent_harness::{
     AcpHarness, AgentEvent, CancellationToken, ClaudeHarness, CodexHarness, ControlCall,
-    DoneStatus, ExternalSession, Harness, HarnessId, Model, OpencodeHarness, PermissionMode,
-    ReasoningLevel, RunControls, RunRequest, SkillRef, SlashCommand, Steer, SteerMessage, ToolCall,
-    TurnSettings, UserInputAnswer, UserInputQuestion, usage::PlanUsage,
+    DoneStatus, ExternalSession, Harness, HarnessId, Model, OpencodeHarness, PermissionDecision,
+    PermissionMode, ReasoningLevel, RunControls, RunRequest, SkillRef, SlashCommand, Steer,
+    SteerMessage, ToolCall, TurnSettings, UserInputAnswer, UserInputQuestion, usage::PlanUsage,
 };
 use anyhow::{Context as _, Result};
 use collections::{HashMap, HashSet};
@@ -1856,6 +1856,27 @@ impl AgentSession {
     }
 
     pub fn answer_permission(&mut self, id: &str, allow: bool, cx: &mut Context<Self>) {
+        let decision = if allow {
+            PermissionDecision::Allow {
+                updated_input: None,
+                updated_permissions: Vec::new(),
+            }
+        } else {
+            PermissionDecision::Deny {
+                message: agent_harness::claude::DENY_STOP.into(),
+                interrupt: true,
+            }
+        };
+        self.decide_permission(id, decision, cx);
+    }
+
+    /// The label rides along so harnesses that only read labels still get Allow or Deny.
+    pub fn decide_permission(
+        &mut self,
+        id: &str,
+        decision: PermissionDecision,
+        cx: &mut Context<Self>,
+    ) {
         let Some(pending) = self
             .pending_questions
             .iter()
@@ -1863,10 +1884,9 @@ impl AgentSession {
         else {
             return;
         };
-        let label = if allow {
-            agent_harness::claude::PERMISSION_ALLOW
-        } else {
-            agent_harness::claude::PERMISSION_DENY
+        let label = match decision {
+            PermissionDecision::Allow { .. } => agent_harness::claude::PERMISSION_ALLOW,
+            PermissionDecision::Deny { .. } => agent_harness::claude::PERMISSION_DENY,
         };
         let answers = pending
             .questions
@@ -1874,6 +1894,7 @@ impl AgentSession {
             .map(|question| UserInputAnswer {
                 question_id: question.id.clone(),
                 labels: vec![label.to_string()],
+                decision: Some(decision.clone()),
             })
             .collect();
         self.answer(id, answers, cx);
@@ -4776,6 +4797,7 @@ pub(crate) mod tests {
                 .map(|question| UserInputAnswer {
                     question_id: question.id.clone(),
                     labels: vec!["B".into()],
+                    decision: None,
                 })
                 .collect::<Vec<_>>();
             (pending.id().to_string(), answers)
@@ -4803,6 +4825,7 @@ pub(crate) mod tests {
             vec![UserInputAnswer {
                 question_id: "q".into(),
                 labels: vec!["A".into()],
+                decision: None,
             }]
         };
 
@@ -4842,6 +4865,7 @@ pub(crate) mod tests {
                 prefill: None,
                 multiline: false,
                 accepts_typed_answer: false,
+                permission: None,
             }],
             responder,
         };
@@ -4866,6 +4890,49 @@ pub(crate) mod tests {
         });
     }
 
+    #[gpui::test]
+    async fn decide_permission_resolves_the_pending_question(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let (agent_tx, agent_rx) = tokio::sync::oneshot::channel();
+        let decision = PermissionDecision::Deny {
+            message: "not now".into(),
+            interrupt: false,
+        };
+        session.update(cx, |session, cx| {
+            session.pending_questions.push(PendingQuestion {
+                questions: vec![UserInputQuestion {
+                    id: "q".into(),
+                    header: agent_harness::claude::PERMISSION_HEADER.into(),
+                    question: "Run `ls`?".into(),
+                    options: vec![
+                        agent_harness::claude::PERMISSION_ALLOW.into(),
+                        agent_harness::claude::PERMISSION_DENY.into(),
+                    ],
+                    multi_select: false,
+                    prefill: None,
+                    multiline: false,
+                    accepts_typed_answer: false,
+                    permission: None,
+                }],
+                responder: Some(agent_tx),
+            });
+            session.decide_permission("q", decision.clone(), cx);
+            assert!(session.pending_questions().is_empty());
+        });
+        assert_eq!(
+            agent_rx.await.expect("the agent gets an answer"),
+            vec![UserInputAnswer {
+                question_id: "q".into(),
+                labels: vec![agent_harness::claude::PERMISSION_DENY.into()],
+                decision: Some(decision),
+            }]
+        );
+    }
+
     #[test]
     fn only_allow_or_deny_permission_requests_count_as_tool_permissions() {
         let question = |options: &[&str]| PendingQuestion {
@@ -4878,6 +4945,7 @@ pub(crate) mod tests {
                 prefill: None,
                 multiline: false,
                 accepts_typed_answer: false,
+                permission: None,
             }],
             responder: None,
         };
@@ -6945,6 +7013,7 @@ done
             prefill: None,
             multiline: false,
             accepts_typed_answer: false,
+            permission: None,
         };
         let ended = session.update(cx, |session, cx| {
             session.working = true;

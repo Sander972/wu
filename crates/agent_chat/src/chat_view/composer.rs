@@ -587,6 +587,7 @@ impl ChatView {
             .map(|question| UserInputAnswer {
                 question_id: question.id.clone(),
                 labels: self.answer_labels(question, cx),
+                decision: None,
             })
             .collect();
         for answer in &answers {

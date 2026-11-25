@@ -374,6 +374,41 @@ pub struct UserInputQuestion {
     pub multiline: bool,
     #[serde(default)]
     pub accepts_typed_answer: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<PermissionPrompt>,
+}
+
+/// What the agent asks permission for, as the CLI's `can_use_tool` request describes it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PermissionPrompt {
+    pub tool_name: String,
+    pub input: serde_json::Value,
+    pub tool_use_id: Option<String>,
+    pub suggestions: Vec<serde_json::Value>,
+    pub allows_always: bool,
+    pub blocked_path: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "behavior", rename_all = "camelCase")]
+pub enum PermissionDecision {
+    #[serde(rename_all = "camelCase")]
+    Allow {
+        #[serde(default)]
+        updated_input: Option<serde_json::Value>,
+        #[serde(default)]
+        updated_permissions: Vec<serde_json::Value>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Deny {
+        #[serde(default)]
+        message: String,
+        #[serde(default)]
+        interrupt: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -381,6 +416,8 @@ pub struct UserInputQuestion {
 pub struct UserInputAnswer {
     pub question_id: String,
     pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<PermissionDecision>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

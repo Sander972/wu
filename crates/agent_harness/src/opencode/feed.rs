@@ -494,6 +494,7 @@ pub(super) fn map_questions(properties: &Value) -> Vec<UserInputQuestion> {
                     .get("multiple")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                permission: None,
             })
         })
         .collect()

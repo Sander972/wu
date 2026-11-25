@@ -447,6 +447,7 @@ impl TurnWire {
                                 UserInputAnswer {
                                     question_id: question.id,
                                     labels: vec![label.into()],
+                                    decision: None,
                                 }
                             })
                             .collect(),

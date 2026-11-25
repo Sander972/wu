@@ -287,6 +287,7 @@ fn controls_answering(
                             .or_else(|| question.options.first().cloned())
                             .into_iter()
                             .collect(),
+                        decision: None,
                     }
                 })
                 .collect();

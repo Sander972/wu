@@ -90,6 +90,7 @@ fn controls(answer: &'static str) -> (RunControls, mpsc::Sender<Steer>, Cancella
                 .map(|question| UserInputAnswer {
                     question_id: question.id.clone(),
                     labels: vec![answer.into()],
+                    decision: None,
                 })
                 .collect();
             tx.send(answers).ok();

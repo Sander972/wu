@@ -65,6 +65,7 @@ fn controls(answer_label: &'static str) -> (RunControls, mpsc::Sender<Steer>, Ca
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: vec![answer_label.into()],
+                    decision: None,
                 })
                 .collect();
             tx.send(answers).expect("receiver is returned alongside");
@@ -393,6 +394,7 @@ async fn approvals_round_trip_as_input_requests() {
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: vec!["Allow".into()],
+                    decision: None,
                 })
                 .collect();
             tx.send(answers).expect("receiver is returned alongside");
