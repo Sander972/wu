@@ -192,8 +192,8 @@ pub(crate) struct ProposedEditReview {
     new_buffer: Entity<Buffer>,
     diff_view: Entity<FileDiffView>,
     splittable: Entity<SplittableEditor>,
-    /// Hunks are keyed by where they start in the original text, which stays fixed while the proposal is edited.
-    decided_hunks: HashSet<usize>,
+    /// Hunks are keyed by the whole range of original text they replace (it stays fixed while the proposal is edited), so a hunk that a hand-edit later merges with a neighbor counts as undecided again.
+    decided_hunks: HashSet<Range<usize>>,
     fs: Arc<dyn Fs>,
     workspace: WeakEntity<Workspace>,
     title: SharedString,
@@ -271,7 +271,8 @@ impl ProposedEditReview {
         let Some(hunk) = hunk else {
             return;
         };
-        self.decided_hunks.insert(hunk.diff_base_byte_range.start.0);
+        self.decided_hunks
+            .insert(hunk.diff_base_byte_range.start.0..hunk.diff_base_byte_range.end.0);
         if !accept {
             editor.update(cx, |editor, cx| {
                 editor.apply_restore(vec![hunk], window, cx)
@@ -289,7 +290,7 @@ impl ProposedEditReview {
             .diff_hunks()
             .all(|hunk| {
                 self.decided_hunks
-                    .contains(&hunk.diff_base_byte_range.start.0)
+                    .contains(&(hunk.diff_base_byte_range.start.0..hunk.diff_base_byte_range.end.0))
             });
         if all_decided {
             self.accept(&AcceptProposedChanges, window, cx);
@@ -395,11 +396,11 @@ impl DiffHunkRenderer for ProposedHunkRenderer {
         let button = |id: &'static str, label: SharedString, accept: bool| {
             let review = self.review.clone();
             let editor = editor.clone();
-            let hunk_range = hunk_range.clone();
+            let hunk_start = hunk_range.start;
             Button::new((id, row as u64), label).on_click(move |_, window, cx| {
                 review
                     .update(cx, |review, cx| {
-                        review.decide_hunk(accept, &editor, hunk_range.clone(), window, cx)
+                        review.decide_hunk(accept, &editor, hunk_start..hunk_start, window, cx)
                     })
                     .log_err();
             })
@@ -853,6 +854,63 @@ mod tests {
         let review = only_review(&setup.workspace, cx);
         put_cursor_in_hunk(&review, 0, cx);
         assert!(cx.debug_bounds("proposed-hunk-buttons").is_none());
+    }
+
+    #[gpui::test]
+    async fn rejecting_every_hunk_denies_as_reverted(cx: &mut gpui::TestAppContext) {
+        let original = "one\nb\nc\nd\nfive\n";
+        let (mut setup, cx) =
+            open_edit_review(original, original, "ONE\nb\nc\nd\nFIVE\n", cx).await;
+        let review = only_review(&setup.workspace, cx);
+        put_cursor_in_hunk(&review, 1, cx);
+        cx.dispatch_action(RejectChangeAtCursor);
+        put_cursor_in_hunk(&review, 0, cx);
+        cx.dispatch_action(RejectChangeAtCursor);
+        cx.run_until_parked();
+        assert_eq!(
+            decision(&mut setup),
+            Some(PermissionDecision::Deny {
+                message: REVERTED_ALL.into(),
+                interrupt: true
+            })
+        );
+    }
+
+    #[gpui::test]
+    async fn a_hand_edit_that_merges_an_accepted_hunk_makes_it_undecided(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let original = "a\nb\nc\nd\ne\nf\n";
+        let (mut setup, cx) = open_edit_review(original, original, "A\nb\nC\nd\ne\nF\n", cx).await;
+        let review = only_review(&setup.workspace, cx);
+        put_cursor_in_hunk(&review, 0, cx);
+        cx.dispatch_action(AcceptChangeAtCursor);
+        let new_buffer = review.read_with(cx, |review, _| review.new_buffer.clone());
+        new_buffer.update(cx, |buffer, cx| buffer.edit([(2..3, "B")], None, cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        let hunk_count = review.read_with(cx, |review, cx| {
+            review
+                .splittable
+                .read(cx)
+                .rhs_editor()
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .snapshot(cx)
+                .diff_hunks()
+                .count()
+        });
+        assert_eq!(hunk_count, 2, "the hand-edit merged the first two hunks");
+        put_cursor_in_hunk(&review, 1, cx);
+        cx.dispatch_action(AcceptChangeAtCursor);
+        cx.run_until_parked();
+        assert!(
+            setup.answers.try_recv().is_err(),
+            "the agent's undecided change must not be sent"
+        );
+        assert_eq!(reviews(&setup.workspace, cx), 1);
     }
 
     #[gpui::test]
