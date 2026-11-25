@@ -223,6 +223,8 @@ impl ClaudeHarness {
             cmd.args(["--effort", effort]);
         }
         cmd.args(permission_args(request.permission));
+        // Lets `rewind_files` restore files to how they were before a given prompt.
+        cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
         // Headless sessions only connect the Chrome extension when asked to.
         cmd.arg(if request.chrome {
             "--chrome"
@@ -2068,6 +2070,33 @@ mod tests {
         let without_chrome = args(&request);
         assert!(without_chrome.contains(&"--no-chrome".to_string()));
         assert!(!without_chrome.contains(&"--chrome".to_string()));
+    }
+
+    #[test]
+    fn build_command_enables_file_checkpointing() {
+        let request = RunRequest {
+            prompt: "hi".into(),
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            permission: PermissionMode::Ask,
+            resume: None,
+            fork: None,
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            auto_compact_tokens: None,
+            chrome: false,
+            drop_prompt: None,
+            ephemeral: false,
+        };
+        let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
+        let value = command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING")
+            .and_then(|(_, value)| value);
+        assert_eq!(value, Some(std::ffi::OsStr::new("true")));
     }
 
     #[test]

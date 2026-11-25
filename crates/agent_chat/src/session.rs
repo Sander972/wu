@@ -378,6 +378,7 @@ pub enum Entry {
         attachments: Vec<PathBuf>,
         skills: Vec<SkillRef>,
         undelivered: bool,
+        prompt_id: Option<String>,
     },
     Assistant { markdown: Entity<Markdown>, at: i64 },
     Thinking(Entity<Markdown>),
@@ -399,6 +400,8 @@ enum SerializedEntry {
         skills: Vec<SkillRef>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         undelivered: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
     },
     Assistant {
         text: String,
@@ -523,6 +526,7 @@ impl EntryFingerprint {
                 attachments,
                 skills,
                 undelivered,
+                ..
             } => Self::User {
                 text: text_identity(text),
                 at: *at,
@@ -731,7 +735,31 @@ impl Transcript {
             attachments,
             skills,
             undelivered: false,
+            prompt_id: None,
         });
+    }
+
+    /// Prompts of one turn are recorded in send order, so the id goes to the oldest of the turn's `turn_prompts` newest user entries that has none.
+    fn record_prompt_id(&mut self, id: String, turn_prompts: usize) {
+        let mut turn_users: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, entry)| matches!(entry, Entry::User { .. }))
+            .map(|(index, _)| index)
+            .take(turn_prompts)
+            .collect();
+        turn_users.reverse();
+        for index in turn_users {
+            if let Some(Entry::User { prompt_id, .. }) = self.entries.get_mut(index)
+                && prompt_id.is_none()
+            {
+                *prompt_id = Some(id);
+                self.encode_again(index);
+                return;
+            }
+        }
     }
 
     fn push_notice(&mut self, text: String, is_error: bool) {
@@ -831,12 +859,14 @@ fn serialized_entry(entry: &Entry, cx: &App) -> SerializedEntry {
             attachments,
             skills,
             undelivered,
+            prompt_id,
         } => SerializedEntry::User {
             text: text.to_string(),
             at: *at,
             attachments: attachments.clone(),
             skills: skills.clone(),
             undelivered: *undelivered,
+            prompt_id: prompt_id.clone(),
         },
         Entry::Assistant { markdown, at } => SerializedEntry::Assistant {
             text: markdown.read(cx).source().to_string(),
@@ -902,12 +932,14 @@ fn deserialize_entry(
             attachments,
             skills,
             undelivered,
+            prompt_id,
         } => Entry::User {
             text: text.into(),
             at,
             attachments,
             skills,
             undelivered,
+            prompt_id,
         },
         SerializedEntry::Assistant { text, at } => Entry::Assistant {
             markdown: saved_markdown(text, languages, cx),
@@ -2550,6 +2582,8 @@ impl AgentSession {
                 }
             }
             AgentEvent::PromptRecorded { id } => {
+                self.transcript
+                    .record_prompt_id(id.clone(), self.turn_prompts);
                 self.turn_prompt_id.get_or_insert(id);
             }
             AgentEvent::TitleChanged { title } => self.adopt_agent_title(&title, cx),
@@ -7626,6 +7660,7 @@ done
             attachments: Vec::new(),
             skills: Vec::new(),
             undelivered: false,
+            prompt_id: None,
         };
         session.update(cx, |session, cx| {
             let languages = session.languages.clone();
@@ -7687,6 +7722,78 @@ done
             loaded,
             SavedTranscript::Current { entries, subagents, queue }
                 if entries.len() == 6 && subagents.len() == 1 && queue.len() == 1
+        ));
+    }
+
+    fn prompt_ids(session: &Entity<AgentSession>, cx: &mut TestAppContext) -> Vec<Option<String>> {
+        session.read_with(cx, |session, _| {
+            session
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::User { prompt_id, .. } => Some(prompt_id.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn recorded_prompt_ids_attach_to_user_entries_in_order(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        feed_user(&session, "one", cx);
+        feed_user(&session, "two", cx);
+        session.update(cx, |session, _| session.turn_prompts = 2);
+        feed_events(
+            &session,
+            vec![
+                AgentEvent::PromptRecorded { id: "p1".into() },
+                AgentEvent::PromptRecorded { id: "p2".into() },
+                AgentEvent::PromptRecorded { id: "p3".into() },
+            ],
+            cx,
+        );
+        assert_eq!(
+            prompt_ids(&session, cx),
+            vec![Some("p1".to_string()), Some("p2".to_string())]
+        );
+
+        feed_user(&session, "three", cx);
+        session.update(cx, |session, _| session.turn_prompts = 1);
+        feed_events(
+            &session,
+            vec![AgentEvent::PromptRecorded { id: "p4".into() }],
+            cx,
+        );
+        assert_eq!(
+            prompt_ids(&session, cx),
+            vec![
+                Some("p1".to_string()),
+                Some("p2".to_string()),
+                Some("p4".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn old_transcripts_load_without_prompt_ids() {
+        let saved: SavedTranscript = serde_json::from_str(
+            r#"{"entries":[{"type":"user","text":"hi","at":1},{"type":"user","text":"yo","at":2,"prompt_id":"p"}]}"#,
+        )
+        .expect("loads");
+        let SavedTranscript::Current { entries, .. } = saved else {
+            panic!("expected the current format");
+        };
+        assert!(matches!(
+            entries.as_slice(),
+            [
+                SerializedEntry::User { prompt_id: None, .. },
+                SerializedEntry::User { prompt_id: Some(id), .. }
+            ] if id == "p"
         ));
     }
 
