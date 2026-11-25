@@ -140,6 +140,7 @@ struct PermissionEditors {
     reason: Entity<Editor>,
     command: Option<Entity<Editor>>,
     destination: String,
+    _command_subscription: Option<Subscription>,
 }
 
 #[derive(Clone)]
@@ -596,12 +597,20 @@ impl ChatView {
                     editor
                 })
             });
+            let command_subscription = command.as_ref().map(|editor| {
+                cx.subscribe(editor, |_, _, event: &EditorEvent, cx| {
+                    if matches!(event, EditorEvent::BufferEdited) {
+                        cx.notify();
+                    }
+                })
+            });
             self.permission_editors.insert(
                 question_id,
                 PermissionEditors {
                     reason,
                     command,
                     destination,
+                    _command_subscription: command_subscription,
                 },
             );
         }

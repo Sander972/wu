@@ -72,8 +72,9 @@ pub(crate) fn always_allow_updates(
         .collect()
 }
 
+/// `prompt` is None for harnesses that only read the Allow or Deny label (Codex, ACP, Opencode).
 fn permission_decision(
-    prompt: &PermissionPrompt,
+    prompt: Option<&PermissionPrompt>,
     choice: PermissionChoice,
     destination: &str,
     command: Option<&str>,
@@ -95,16 +96,18 @@ fn permission_decision(
     }
     let updated_input = command
         .map(str::trim)
-        .filter(|command| !command.is_empty() && Some(*command) != bash_command(prompt))
+        .filter(|command| {
+            !command.is_empty() && Some(*command) != prompt.and_then(bash_command).map(str::trim)
+        })
         .and_then(|command| {
-            let mut input = prompt.input.clone();
+            let mut input = prompt?.input.clone();
             input
                 .as_object_mut()?
                 .insert("command".into(), command.into());
             Some(input)
         });
     let updated_permissions = if choice == PermissionChoice::AlwaysAllow {
-        always_allow_updates(&prompt.suggestions, destination)
+        always_allow_updates(prompt.map_or(&[], |prompt| &prompt.suggestions), destination)
     } else {
         Vec::new()
     };
@@ -646,17 +649,17 @@ impl ChatView {
         choice: PermissionChoice,
         cx: &mut Context<Self>,
     ) {
-        let Some(prompt) = self
+        let Some(question) = self
             .session
             .read(cx)
             .pending_questions()
             .iter()
             .flat_map(|pending| &pending.questions)
             .find(|question| question.id == question_id)
-            .and_then(|question| question.permission.clone())
         else {
             return;
         };
+        let prompt = question.permission.clone();
         let editors = self.permission_editors.get(question_id);
         let destination = editors.map_or_else(
             || "session".to_string(),
@@ -666,8 +669,21 @@ impl ChatView {
             .and_then(|editors| editors.command.as_ref())
             .map(|editor| editor.read(cx).text(cx));
         let reason = editors.map_or_else(String::new, |editors| editors.reason.read(cx).text(cx));
-        let decision =
-            permission_decision(&prompt, choice, &destination, command.as_deref(), &reason);
+        // An emptied command editor must not silently run the original command.
+        if choice != PermissionChoice::Deny
+            && command
+                .as_deref()
+                .is_some_and(|command| command.trim().is_empty())
+        {
+            return;
+        }
+        let decision = permission_decision(
+            prompt.as_ref(),
+            choice,
+            &destination,
+            command.as_deref(),
+            &reason,
+        );
         if choice == PermissionChoice::AlwaysAllow {
             self.store.update(cx, |store, cx| {
                 store
@@ -993,12 +1009,16 @@ impl ChatView {
                 ));
             }
             choices.push((t!("Deny").into_any_element(), PermissionChoice::Deny));
+            let command_empty = permission_editors
+                .and_then(|editors| editors.command.as_ref())
+                .is_some_and(|editor| editor.read(cx).text(cx).trim().is_empty());
             choices
                 .into_iter()
                 .enumerate()
                 .map(|(position, (label, choice))| {
                     let pending_id = pending_id.clone();
                     let question_id = question.id.clone();
+                    let blocked = command_empty && choice != PermissionChoice::Deny;
                     self.render_option_row(
                         format!("permission-{pending_id}-{position}").into(),
                         position + 1,
@@ -1006,9 +1026,12 @@ impl ChatView {
                         false,
                         cx,
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.decide_permission_card(&pending_id, &question_id, choice, cx)
-                    }))
+                    .when(blocked, |row| row.opacity(0.4))
+                    .when(!blocked, |row| {
+                        row.on_click(cx.listener(move |this, _, _, cx| {
+                            this.decide_permission_card(&pending_id, &question_id, choice, cx)
+                        }))
+                    })
                     .into_any_element()
                 })
                 .collect()
@@ -1273,8 +1296,6 @@ impl ChatView {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1319,7 +1340,7 @@ mod tests {
     fn deny_with_text_uses_reason_template() {
         let prompt = prompt(json!({"command": "npm i"}), Vec::new());
         let decision = permission_decision(
-            &prompt,
+            Some(&prompt),
             PermissionChoice::Deny,
             "session",
             None,
@@ -1337,7 +1358,8 @@ mod tests {
     #[test]
     fn deny_without_text_stops() {
         let prompt = prompt(json!({"command": "npm i"}), Vec::new());
-        let decision = permission_decision(&prompt, PermissionChoice::Deny, "session", None, " ");
+        let decision =
+            permission_decision(Some(&prompt), PermissionChoice::Deny, "session", None, " ");
         assert_eq!(
             decision,
             PermissionDecision::Deny {
@@ -1348,10 +1370,47 @@ mod tests {
     }
 
     #[test]
+    fn cards_without_a_prompt_still_allow_and_deny() {
+        assert_eq!(
+            permission_decision(None, PermissionChoice::Allow, "session", None, ""),
+            PermissionDecision::Allow {
+                updated_input: None,
+                updated_permissions: Vec::new(),
+            }
+        );
+        assert_eq!(
+            permission_decision(None, PermissionChoice::Deny, "session", None, ""),
+            PermissionDecision::Deny {
+                message: agent_harness::claude::DENY_STOP.into(),
+                interrupt: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_trailing_newline_in_the_original_command_is_not_an_edit() {
+        let prompt = prompt(json!({"command": "ls\n"}), Vec::new());
+        let decision = permission_decision(
+            Some(&prompt),
+            PermissionChoice::Allow,
+            "session",
+            Some("ls"),
+            "",
+        );
+        assert_eq!(
+            decision,
+            PermissionDecision::Allow {
+                updated_input: None,
+                updated_permissions: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
     fn edited_command_is_sent_as_updated_input() {
         let prompt = prompt(json!({"command": "ls", "description": "d"}), Vec::new());
         let decision = permission_decision(
-            &prompt,
+            Some(&prompt),
             PermissionChoice::Allow,
             "session",
             Some("ls -la"),
@@ -1364,8 +1423,13 @@ mod tests {
                 updated_permissions: Vec::new(),
             }
         );
-        let unchanged =
-            permission_decision(&prompt, PermissionChoice::Allow, "session", Some("ls"), "");
+        let unchanged = permission_decision(
+            Some(&prompt),
+            PermissionChoice::Allow,
+            "session",
+            Some("ls\n"),
+            "",
+        );
         assert_eq!(
             unchanged,
             PermissionDecision::Allow {
