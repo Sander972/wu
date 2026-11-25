@@ -354,29 +354,51 @@ const TERMINAL_MENTION_PREFIX: &str = "@terminal:";
 /// Claude Code sends the last 100 lines of a mentioned terminal.
 const TERMINAL_CONTEXT_LINES: usize = 100;
 
-/// Claude Code writes terminal mentions unquoted with `_` for spaces, so a mention ends at the first whitespace.
+/// Claude Code writes terminal mentions unquoted with `_` for spaces, so a mention ends at the first whitespace. `"` is dropped because the name goes inside the block's `name="…"`.
 pub(crate) fn terminal_mention_name(title: &str) -> String {
-    title.replace(char::is_whitespace, "_")
+    title.replace(char::is_whitespace, "_").replace('"', "")
 }
 
-/// The open terminals by mention name, keeping the first of any that share one.
+/// Mention names for terminals with these titles, in order. Plain shells in one folder share a title, so later ones get `_2`, `_3`… and each mention names exactly one terminal.
+fn unique_mention_names(titles: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for title in titles {
+        let base = terminal_mention_name(&title);
+        let mut name = base.clone();
+        let mut count = 1;
+        while names.contains(&name) {
+            count += 1;
+            name = format!("{base}_{count}");
+        }
+        names.push(name);
+    }
+    names
+}
+
+/// The open terminals by mention name, in the project's order so the completion menu and sending agree on which terminal a name means.
 pub(super) fn open_terminals(
     project: &Entity<Project>,
     cx: &App,
 ) -> Vec<(String, Entity<Terminal>)> {
-    let mut terminals: Vec<(String, Entity<Terminal>)> = Vec::new();
-    for terminal in project
+    let terminals: Vec<Entity<Terminal>> = project
         .read(cx)
         .local_terminal_handles()
         .iter()
         .filter_map(WeakEntity::upgrade)
-    {
-        let name = terminal_mention_name(&terminal.read(cx).title(false));
-        if !terminals.iter().any(|(open, _)| *open == name) {
-            terminals.push((name, terminal));
-        }
-    }
-    terminals
+        .collect();
+    unique_mention_names(
+        terminals
+            .iter()
+            .map(|terminal| terminal.read(cx).title(false)),
+    )
+    .into_iter()
+    .zip(terminals)
+    .collect()
+}
+
+/// Terminal output goes only to Claude, and never with a slash command or a queued-message edit.
+fn sends_terminal_context(kind: AgentKind, editing_queued: bool, text: &str) -> bool {
+    kind == AgentKind::Claude && !editing_queued && agent_harness::leading_command(text).is_none()
 }
 
 fn recent_output(terminal: &Terminal) -> Option<String> {
@@ -504,10 +526,11 @@ impl ChatView {
 
     /// The output of each open terminal the message mentions, read now. Terminal output can hold secrets, so only a mention in the message itself sends it.
     pub(super) fn mentioned_terminal_context(&self, text: &str, cx: &App) -> Vec<String> {
-        if self.session.read(cx).kind() != AgentKind::Claude
-            || self.editing_queued.is_some()
-            || agent_harness::leading_command(text).is_some()
-        {
+        if !sends_terminal_context(
+            self.session.read(cx).kind(),
+            self.editing_queued.is_some(),
+            text,
+        ) {
             return Vec::new();
         }
         let terminals = open_terminals(&self.project, cx);
@@ -689,6 +712,45 @@ mod tests {
             })
             .is_empty()
         );
+    }
+
+    #[test]
+    fn same_titled_terminals_each_get_their_own_mention() {
+        let titles = ["wu — pwsh", "wu — pwsh", "build"].map(String::from);
+        let outputs = ["first shell", "second shell", "cargo 1.90.0"];
+        let names = unique_mention_names(titles);
+        assert_eq!(names, ["wu_—_pwsh", "wu_—_pwsh_2", "build"]);
+        let read = |name: &str| {
+            let index = names.iter().position(|open| open == name)?;
+            Some(outputs[index].to_string())
+        };
+        assert_eq!(
+            terminal_context("@terminal:wu_—_pwsh_2 and @terminal:wu_—_pwsh", read),
+            [
+                "<terminal name=\"wu_—_pwsh_2\">\nsecond shell\n</terminal>",
+                "<terminal name=\"wu_—_pwsh\">\nfirst shell\n</terminal>",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mention_reads_only_the_terminal_it_names() {
+        let read = |name: &str| ["build2", "build_x"].contains(&name).then(String::new);
+        assert!(terminal_context("@terminal:build", read).is_empty());
+        assert_eq!(terminal_mention_name("say \"hi\""), "say_hi");
+    }
+
+    #[test]
+    fn terminals_are_read_only_for_plain_claude_messages() {
+        let text = "what failed in @terminal:build?";
+        assert!(sends_terminal_context(AgentKind::Claude, false, text));
+        assert!(!sends_terminal_context(AgentKind::Codex, false, text));
+        assert!(!sends_terminal_context(AgentKind::Claude, true, text));
+        assert!(!sends_terminal_context(
+            AgentKind::Claude,
+            false,
+            "/review @terminal:build"
+        ));
     }
 
     #[test]
