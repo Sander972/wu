@@ -233,6 +233,13 @@ pub mod agent {
     pub struct AddToChat {
         pub paths: Vec<PathBuf>,
     }
+
+    /// Prefills the agent chat with a prompt to resolve the merge conflicts in the given files.
+    #[derive(Clone, PartialEq, Debug, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent, no_json)]
+    pub struct ResolveMergeConflicts {
+        pub paths: Vec<PathBuf>,
+    }
 }
 
 pub mod dev {

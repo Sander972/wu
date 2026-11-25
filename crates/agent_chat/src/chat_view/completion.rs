@@ -612,6 +612,7 @@ impl ChatView {
     pub(crate) fn insert_mentions(
         &mut self,
         paths: Vec<PathBuf>,
+        prefix: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -633,7 +634,7 @@ impl ChatView {
             .collect::<Vec<_>>()
             .join(" ");
         let end = self.composer.update(cx, |editor, cx| {
-            editor.insert(&format!("{text} "), window, cx);
+            editor.insert(&format!("{prefix}{text} "), window, cx);
             let snapshot = editor.display_snapshot(cx);
             editor
                 .selections

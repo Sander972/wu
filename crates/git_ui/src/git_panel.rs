@@ -79,7 +79,7 @@ use smallvec::SmallVec;
 use std::cell::Cell;
 use std::future::Future;
 use std::ops::{Range, RangeInclusive};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::{sync::Arc, time::Duration};
 use strum::IntoEnumIterator;
@@ -2662,6 +2662,20 @@ impl GitPanel {
 
     fn get_selected_entry(&self) -> Option<&GitListEntry> {
         self.selected_entry.and_then(|i| self.entries.get(i))
+    }
+
+    fn conflicted_abs_paths(&self, cx: &App) -> Vec<PathBuf> {
+        if !agent_chat::AgentChatSettings::get_global(cx).enabled {
+            return Vec::new();
+        }
+        let Some(repository) = self.active_repository.as_ref() else {
+            return Vec::new();
+        };
+        let repository = repository.read(cx);
+        self.change_entries_by_path()
+            .filter(|entry| repository.had_conflict_on_last_merge_head_change(&entry.repo_path))
+            .map(|entry| repository.repo_path_to_abs_path(&entry.repo_path))
+            .collect()
     }
 
     fn change_entries_by_path(&self) -> impl Iterator<Item = &GitStatusEntry> {
@@ -9022,6 +9036,9 @@ impl GitPanel {
         let abortable_merge = (section == Section::Conflict)
             .then(|| self.active_repository.as_ref()?.read(cx).abortable_merge())
             .flatten();
+        let resolve_with_agent = (section == Section::Conflict)
+            .then(|| self.conflicted_abs_paths(cx))
+            .filter(|paths| !paths.is_empty());
 
         h_flex()
             .id(id)
@@ -9057,6 +9074,22 @@ impl GitPanel {
             .child(
                 h_flex()
                     .gap_1()
+                    .when_some(resolve_with_agent, |this, paths| {
+                        this.child(
+                            Button::new("resolve-merge-conflicts", t!("Resolve Merge Conflicts"))
+                                .label_size(LabelSize::Small)
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    window.dispatch_action(
+                                        wu_actions::agent::ResolveMergeConflicts {
+                                            paths: paths.clone(),
+                                        }
+                                        .boxed_clone(),
+                                        cx,
+                                    );
+                                }),
+                        )
+                    })
                     .when_some(abortable_merge, |this, abortable_merge| {
                         let label = match abortable_merge {
                             AbortableMerge::Merge => t!("Abort Merge"),
@@ -9219,6 +9252,16 @@ impl GitPanel {
                     .map(|entry| repository.repo_path_to_abs_path(&entry.repo_path))
                     .collect::<Vec<_>>()
             });
+        let resolve_with_agent = self
+            .active_repository
+            .as_ref()
+            .is_some_and(|repository| {
+                repository
+                    .read(cx)
+                    .had_conflict_on_last_merge_head_change(&entry.repo_path)
+            })
+            .then(|| self.conflicted_abs_paths(cx))
+            .filter(|paths| !paths.is_empty());
         let context_menu = ContextMenu::build(window, cx, |context_menu, _, _| {
             let is_created = entry.status.is_created();
             context_menu
@@ -9235,6 +9278,12 @@ impl GitPanel {
                     context_menu.action(
                         t!("Add to Chat"),
                         wu_actions::agent::AddToChat { paths }.boxed_clone(),
+                    )
+                })
+                .when_some(resolve_with_agent, |context_menu, paths| {
+                    context_menu.action(
+                        t!("Resolve Merge Conflicts"),
+                        wu_actions::agent::ResolveMergeConflicts { paths }.boxed_clone(),
                     )
                 })
                 .separator()

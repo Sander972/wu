@@ -270,7 +270,7 @@ impl ChatView {
         if !images.is_empty() {
             self.stage(Pending::Files(images), cx);
         }
-        self.insert_mentions(others, window, cx);
+        self.insert_mentions(others, "", window, cx);
         cx.notify();
     }
 

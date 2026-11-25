@@ -137,7 +137,18 @@ pub fn init(shell_env_loaded: Option<futures::channel::oneshot::Receiver<()>>, c
         );
         workspace.register_action(
             |workspace, action: &wu_actions::agent::AddToChat, window, cx| {
-                add_to_chat(workspace, action.paths.clone(), window, cx)
+                add_to_chat(workspace, action.paths.clone(), "", window, cx)
+            },
+        );
+        workspace.register_action(
+            |workspace, action: &wu_actions::agent::ResolveMergeConflicts, window, cx| {
+                add_to_chat(
+                    workspace,
+                    action.paths.clone(),
+                    "Resolve the merge conflicts in ",
+                    window,
+                    cx,
+                )
             },
         );
     })
@@ -226,6 +237,7 @@ fn mention_in_last_chat(
 fn add_to_chat(
     workspace: &mut Workspace,
     paths: Vec<PathBuf>,
+    prefix: &str,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -235,7 +247,9 @@ fn add_to_chat(
     let Some(chat) = reveal_last_chat(workspace, window, cx) else {
         return;
     };
-    chat.update(cx, |chat, cx| chat.insert_mentions(paths, window, cx));
+    chat.update(cx, |chat, cx| {
+        chat.insert_mentions(paths, prefix, window, cx)
+    });
 }
 
 fn reveal_last_chat(
@@ -547,11 +561,53 @@ mod tests {
             .map(|name| directory.path().join(name))
             .to_vec();
         workspace.update_in(cx, |workspace, window, cx| {
-            add_to_chat(workspace, paths, window, cx)
+            add_to_chat(workspace, paths, "", window, cx)
         });
         assert_eq!(
             chat.read_with(cx, |chat, cx| chat.composer_text_for_test(cx)),
             "@a.rs @b.rs @dir/ "
+        );
+    }
+
+    #[gpui::test]
+    async fn resolve_conflicts_prefills_mentions(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let chat = workspace.update_in(cx, |workspace, window, cx| {
+            let weak = cx.entity().downgrade();
+            let chat = cx
+                .new(|cx| ChatView::new(session, store.clone(), project.clone(), weak, window, cx));
+            workspace.add_item_to_active_pane(Box::new(chat.clone()), None, true, window, cx);
+            chat
+        });
+        let paths = ["a.ts", "dir/b.ts"]
+            .map(|name| directory.path().join(name))
+            .to_vec();
+        workspace.update_in(cx, |workspace, window, cx| {
+            add_to_chat(
+                workspace,
+                paths,
+                "Resolve the merge conflicts in ",
+                window,
+                cx,
+            )
+        });
+        assert_eq!(
+            chat.read_with(cx, |chat, cx| chat.composer_text_for_test(cx)),
+            "Resolve the merge conflicts in @a.ts @dir/b.ts "
         );
     }
 }

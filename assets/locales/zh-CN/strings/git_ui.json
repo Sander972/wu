@@ -231,6 +231,7 @@
   "Rename Branch ({branch})": "重命名分支（{branch}）",
   "Repositories": "仓库",
   "Republish": "重新发布",
+  "Resolve Merge Conflicts": "解决合并冲突",
   "Restore": "还原",
   "Restore All": "全部还原",
   "Restore All Changes": "还原所有更改",
