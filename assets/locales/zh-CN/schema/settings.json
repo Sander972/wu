@@ -416,6 +416,7 @@
   "Restore the workspace that was closed last.": "恢复最后关闭的工作区。",
   "Rules for rendering LSP semantic tokens.": "渲染 LSP 语义标记的规则。",
   "Save after inactivity period of `milliseconds`.": "在空闲 `milliseconds` 毫秒后保存。",
+  "Save unsaved changes in an open file before Claude Code reads or edits it.\n\nDefault: true": "在 Claude Code 读取或编辑已打开的文件前，先保存其中未保存的更改。\n\n默认值：true",
   "Scroll sensitivity multiplier for fast scrolling. This multiplier is applied\nto both the horizontal and vertical delta values while scrolling. Fast scrolling\nhappens when a user holds the alt or option key while scrolling.\n\nDefault: 4.0": "快速滚动的滚动灵敏度倍数。滚动时，此倍数同时作用于水平和垂直方向的滚动量。用户在滚动时按住 alt 或 option 键即为快速滚动。\n\n默认值：4.0",
   "Scroll sensitivity multiplier. This multiplier is applied\nto both the horizontal and vertical delta values while scrolling.\n\nDefault: 1.0": "滚动灵敏度倍数。滚动时，此倍数同时作用于水平和垂直方向的滚动量。\n\n默认值：1.0",
   "Scroll so the target appears near the top of the viewport.": "滚动到目标显示在视口顶部附近。",

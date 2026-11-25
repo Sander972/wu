@@ -268,6 +268,7 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        session.update(cx, |session, _| session.set_project(project.downgrade()));
         let flavour = flavour_seed(&session.read(cx).metadata().id);
         let composer = cx.new(|cx| {
             let mut editor = Editor::auto_height(1, 10, window, cx);

@@ -117,6 +117,16 @@ pub struct RunControls {
     pub interrupt: CancellationToken,
     /// Permission mode changes made while the run is going.
     pub permission: watch::Receiver<PermissionMode>,
+    /// Called with the absolute path of a file the agent is about to read or edit; the tool waits until the receiver resolves.
+    pub before_file_tool: BeforeFileToolFn,
+}
+
+pub type BeforeFileToolFn = std::sync::Arc<dyn Fn(String) -> oneshot::Receiver<()> + Send + Sync>;
+
+/// A `before_file_tool` for runs with nothing to do before a file tool.
+pub fn file_tools_go_ahead() -> BeforeFileToolFn {
+    // The sender is dropped at once, so the receiver resolves at once.
+    std::sync::Arc::new(|_| oneshot::channel().1)
 }
 
 #[derive(Clone, Debug)]

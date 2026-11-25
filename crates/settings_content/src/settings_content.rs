@@ -1183,6 +1183,10 @@ pub struct AgentChatSettingsContent {
     ///
     /// Default: true
     pub claude_in_chrome: Option<bool>,
+    /// Save unsaved changes in an open file before Claude Code reads or edits it.
+    ///
+    /// Default: true
+    pub autosave: Option<bool>,
     /// How the Git panel writes commit messages.
     pub commit_message: Option<AgentChatCommitMessageContent>,
 }

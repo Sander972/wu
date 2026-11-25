@@ -142,6 +142,7 @@ async fn run_once(
         steering,
         interrupt,
         permission: permission_changes,
+        before_file_tool: agent_harness::file_tools_go_ahead(),
     };
     let mut events = harness.run(request, controls).await?;
     let mut current = String::new();

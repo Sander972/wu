@@ -80,6 +80,7 @@ fn controls(answer_label: &'static str) -> (RunControls, mpsc::Sender<Steer>, Ca
         steering: steer_rx,
         interrupt: token.clone(),
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
+        before_file_tool: agent_harness::file_tools_go_ahead(),
     };
     (controls, steer_tx, token)
 }
@@ -450,6 +451,7 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
         steering: steer_rx,
         interrupt: token.clone(),
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
+        before_file_tool: agent_harness::file_tools_go_ahead(),
     };
     let events = run_to_end(&harness(), request("scenario:askuser"), controls).await;
 
@@ -473,6 +475,39 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
             result: Some("answered".into()),
             error: None,
             session_id: Some("sess-ask".into()),
+        })
+    );
+}
+
+#[tokio::test]
+async fn files_are_saved_before_claude_reads_them() {
+    let cwd = tempfile::tempdir().expect("temporary directory");
+    let mut req = request("scenario:hook");
+    req.cwd = cwd.path().display().to_string();
+    let (mut controls, _steer, _token) = controls("Allow");
+    let saved = Arc::new(Mutex::new(Vec::new()));
+    controls.before_file_tool = Arc::new({
+        let saved = saved.clone();
+        move |path| {
+            saved.lock().unwrap().push(path);
+            let (done_tx, done_rx) = oneshot::channel();
+            done_tx.send(()).expect("receiver is still held");
+            done_rx
+        }
+    });
+    let events = run_to_end(&harness(), req, controls).await;
+
+    assert_eq!(*saved.lock().unwrap(), vec!["/x/a.rs".to_string()]);
+    // The command list from the initialize reply can arrive after the turn ends.
+    assert_eq!(
+        events
+            .iter()
+            .find(|event| matches!(event, AgentEvent::Done { .. })),
+        Some(&AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: Some("read it".into()),
+            error: None,
+            session_id: Some("sess-hook".into()),
         })
     );
 }
@@ -942,6 +977,7 @@ fn permission_controls(
         steering: steer_rx,
         interrupt: CancellationToken::new(),
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
+        before_file_tool: agent_harness::file_tools_go_ahead(),
     };
     (controls, steer_tx)
 }
@@ -1150,6 +1186,7 @@ async fn a_stop_withdraws_the_question_the_turn_was_waiting_on() {
         steering: steer_rx,
         interrupt: CancellationToken::new(),
         permission: tokio::sync::watch::channel(PermissionMode::Ask).1,
+        before_file_tool: agent_harness::file_tools_go_ahead(),
     };
     let mut req = request("scenario:stop-asking");
     req.permission = PermissionMode::Ask;

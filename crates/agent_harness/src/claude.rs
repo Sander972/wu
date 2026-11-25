@@ -24,7 +24,9 @@ use crate::{
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls, Steer, TurnSettings, shutdown_child};
+use crate::{
+    BeforeFileToolFn, Harness, HarnessError, RunControls, Steer, TurnSettings, shutdown_child,
+};
 use catalog::{apply_ultrathink, to_effort};
 use normalize::Normalizer;
 use wire::{
@@ -736,7 +738,7 @@ impl Harness for ClaudeHarness {
         let request_id = format!("{CONTROL_REQUEST_PREFIX}{}", uuid::Uuid::new_v4());
         let mut lines = BufReader::new(stdout).lines();
         let answer = async {
-            let initialize = wire::initialize_request_line(INITIALIZE_ID);
+            let initialize = wire::initialize_request_line(INITIALIZE_ID, false);
             control_exchange(&mut stdin, &mut lines, &initialize, INITIALIZE_ID).await?;
             let line = wire::control_request_line(&request_id, &request);
             control_exchange(&mut stdin, &mut lines, &line, &request_id).await
@@ -848,7 +850,7 @@ impl ClaudeHarness {
         let commands_scan =
             (!request.cwd.is_empty()).then(|| (PathBuf::from(&request.cwd), self.config_dir()));
         if commands_scan.is_some() {
-            let line = wire::initialize_request_line(RUN_INITIALIZE_REQUEST);
+            let line = wire::initialize_request_line(RUN_INITIALIZE_REQUEST, true);
             stdin_tx.send(StdinMsg::Line(line)).ok();
         }
 
@@ -1110,6 +1112,7 @@ async fn run_session(session: Session) {
         mut steering,
         interrupt,
         mut permission,
+        before_file_tool,
     } = controls;
     let request_input = Arc::new(request_input);
     let launched_bypass = skip_prompts;
@@ -1203,7 +1206,7 @@ async fn run_session(session: Session) {
                             skip_prompts = current.skips_prompts();
                         }
                         request_tasks.retain(|task| !task.is_finished());
-                        request_tasks.extend(handle_control_request(req, skip_prompts, &request_input, &stdin_tx));
+                        request_tasks.extend(handle_control_request(req, skip_prompts, &request_input, &before_file_tool, &stdin_tx));
                         continue;
                     }
                     if starts_parent_turn(&frame) {
@@ -1518,11 +1521,16 @@ fn handle_control_request(
     req: ControlRequestFrame,
     skip_prompts: bool,
     request_input: &Arc<RequestInputFn>,
+    before_file_tool: &BeforeFileToolFn,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
 ) -> Option<tokio::task::AbortHandle> {
     match req.request.subtype.as_str() {
         "can_use_tool" => {}
         "elicitation" => return answer_elicitation(req, request_input, stdin_tx),
+        // The extension (2.1.331) answers its own save hook with the hook output `{continue: true}`.
+        "hook_callback" if req.request.text("callback_id") == Some(wire::PRESAVE_CALLBACK_ID) => {
+            return answer_presave_hook(req, before_file_tool, stdin_tx);
+        }
         subtype => {
             log::warn!("claude sent an unsupported {subtype} request; answering with an error");
             let error = format!("Wu can't answer {subtype} requests.");
@@ -1581,6 +1589,38 @@ fn handle_control_request(
         let line = control_response_line(&request_id, allow_response(updated));
         if stdin_tx.send(StdinMsg::Line(line)).is_err() {
             log::debug!("claude stdin writer gone before the AskUserQuestion answer was sent");
+        }
+    });
+    Some(task.abort_handle())
+}
+
+/// A save must never hold a tool up for long.
+const PRESAVE_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn answer_presave_hook(
+    req: ControlRequestFrame,
+    before_file_tool: &BeforeFileToolFn,
+    stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
+) -> Option<tokio::task::AbortHandle> {
+    let line = control_response_line(&req.request_id, serde_json::json!({ "continue": true }));
+    let Some(path) = req
+        .request
+        .input
+        .pointer("/tool_input/file_path")
+        .and_then(Value::as_str)
+    else {
+        stdin_tx.send(StdinMsg::Line(line)).ok();
+        return None;
+    };
+    let saved = before_file_tool(path.to_owned());
+    let path = path.to_owned();
+    let stdin_tx = stdin_tx.clone();
+    let task = tokio::spawn(async move {
+        if tokio::time::timeout(PRESAVE_TIMEOUT, saved).await.is_err() {
+            log::warn!("{path} wasn't saved within 2 seconds, so Claude uses it as it is on disk");
+        }
+        if stdin_tx.send(StdinMsg::Line(line)).is_err() {
+            log::debug!("claude stdin writer gone before the save hook was answered");
         }
     });
     Some(task.abort_handle())
@@ -1762,12 +1802,54 @@ mod tests {
         stdin_rx: &mut mpsc::UnboundedReceiver<StdinMsg>,
     ) -> Value {
         let request: ControlRequestFrame = serde_json::from_value(raw).unwrap();
-        handle_control_request(request, false, request_input, stdin_tx);
+        handle_control_request(
+            request,
+            false,
+            request_input,
+            &crate::file_tools_go_ahead(),
+            stdin_tx,
+        );
         let reply = tokio::time::timeout(std::time::Duration::from_secs(5), stdin_rx.recv());
         match reply.await {
             Ok(Some(StdinMsg::Line(line))) => serde_json::from_str(&line).unwrap(),
             _ => panic!("the request was never answered"),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_save_that_never_finishes_lets_the_tool_go_ahead() {
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel();
+        let held = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let before_file_tool: BeforeFileToolFn = Arc::new({
+            let held = held.clone();
+            move |_| {
+                let (saved_tx, saved_rx) = tokio::sync::oneshot::channel();
+                held.lock().unwrap().push(saved_tx);
+                saved_rx
+            }
+        });
+        let request: ControlRequestFrame = serde_json::from_value(json!({
+            "request_id": "h1",
+            "request": {
+                "subtype": "hook_callback",
+                "callback_id": wire::PRESAVE_CALLBACK_ID,
+                "input": {"tool_name": "Read", "tool_input": {"file_path": "/x/a.rs"}},
+            },
+        }))
+        .unwrap();
+        let request_input: Arc<RequestInputFn> =
+            Arc::new(Box::new(|_| tokio::sync::oneshot::channel().1));
+        handle_control_request(request, false, &request_input, &before_file_tool, &stdin_tx);
+
+        let started = tokio::time::Instant::now();
+        let Some(StdinMsg::Line(line)) = stdin_rx.recv().await else {
+            panic!("the hook was never answered");
+        };
+        assert_eq!(started.elapsed(), PRESAVE_TIMEOUT);
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["response"]["request_id"], "h1");
+        assert_eq!(reply["response"]["response"], json!({"continue": true}));
+        assert_eq!(held.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -1809,7 +1891,7 @@ mod tests {
             async |raw: Value| answer_to(raw, &request_input, &stdin_tx, &mut stdin_rx).await;
 
         let unknown =
-            answer(json!({"request_id": "r1", "request": {"subtype": "hook_callback"}})).await;
+            answer(json!({"request_id": "r1", "request": {"subtype": "mcp_message"}})).await;
         assert_eq!(unknown["response"]["subtype"], "error");
         assert_eq!(unknown["response"]["request_id"], "r1");
 

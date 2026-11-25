@@ -34,6 +34,7 @@ pub struct AgentChatSettings {
     pub confirm_quit_while_working: bool,
     pub prevent_idle_sleep: bool,
     pub claude_in_chrome: bool,
+    pub autosave: bool,
     pub commit_message: CommitMessageSettings,
 }
 
@@ -123,6 +124,7 @@ impl Settings for AgentChatSettings {
             confirm_quit_while_working: content.confirm_quit_while_working.unwrap_or(true),
             prevent_idle_sleep: content.prevent_idle_sleep.unwrap_or(true),
             claude_in_chrome: content.claude_in_chrome.unwrap_or(true),
+            autosave: content.autosave.unwrap_or(true),
             commit_message: {
                 let commit_message = content.commit_message.unwrap_or_default();
                 CommitMessageSettings {

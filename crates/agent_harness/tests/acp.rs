@@ -99,6 +99,7 @@ fn controls(answer: &'static str) -> (RunControls, mpsc::Sender<Steer>, Cancella
         steering: steer_rx,
         interrupt: token.clone(),
         permission: tokio::sync::watch::channel(PermissionMode::Ask).1,
+        before_file_tool: agent_harness::file_tools_go_ahead(),
     };
     (controls, steer_tx, token)
 }
@@ -589,6 +590,7 @@ async fn a_stopped_turn_withdraws_its_questions_and_drops_late_output() {
         steering: steer_rx,
         interrupt: CancellationToken::new(),
         permission: tokio::sync::watch::channel(PermissionMode::Ask).1,
+        before_file_tool: agent_harness::file_tools_go_ahead(),
     };
     let mut stream = harness().run(request("halt"), run_controls).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), asked.recv())
@@ -626,6 +628,7 @@ async fn output_trailing_a_stopped_turn_stays_out_of_the_next_reply() {
         steering: steer_rx,
         interrupt: CancellationToken::new(),
         permission: tokio::sync::watch::channel(PermissionMode::Ask).1,
+        before_file_tool: agent_harness::file_tools_go_ahead(),
     };
     let mut stream = harness().run(request("halt"), run_controls).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), asked.recv())

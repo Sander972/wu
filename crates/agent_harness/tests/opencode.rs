@@ -297,6 +297,7 @@ fn controls_answering(
         steering,
         interrupt: token.clone(),
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
+        before_file_tool: agent_harness::file_tools_go_ahead(),
     };
     (controls, steer_tx, token, asked)
 }

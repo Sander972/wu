@@ -1029,6 +1029,7 @@ async fn run_session(session: Session) {
         mut steering,
         interrupt,
         permission: mut permission_changes,
+        ..
     } = controls;
     let mut permission_open = true;
     let request_input = Arc::new(request_input);

@@ -1060,6 +1060,10 @@ enum RunInput {
         questions: Vec<UserInputQuestion>,
         responder: tokio::sync::oneshot::Sender<Vec<UserInputAnswer>>,
     },
+    FileTool {
+        path: String,
+        saved: tokio::sync::oneshot::Sender<()>,
+    },
     Ended,
 }
 
@@ -1160,6 +1164,8 @@ pub struct AgentSession {
     pending_entries_save: Option<PendingSave>,
     unfinished_writes: Arc<()>,
     active_at: Instant,
+    /// The project of the chat's view, whose open files are saved before the agent reads or edits them.
+    project: Option<WeakEntity<project::Project>>,
 }
 
 impl EventEmitter<SessionEvent> for AgentSession {}
@@ -1238,7 +1244,46 @@ impl AgentSession {
             pending_entries_save: None,
             unfinished_writes: Arc::new(()),
             active_at: Instant::now(),
+            project: None,
         }
+    }
+
+    pub fn set_project(&mut self, project: WeakEntity<project::Project>) {
+        self.project = Some(project);
+    }
+
+    /// Saves the open file at `path` if it has unsaved changes, then tells the agent to go ahead.
+    fn save_before_file_tool(
+        &mut self,
+        path: String,
+        saved: tokio::sync::oneshot::Sender<()>,
+        cx: &mut Context<Self>,
+    ) {
+        let save = AgentChatSettings::get_global(cx)
+            .autosave
+            .then(|| self.project.as_ref()?.upgrade())
+            .flatten()
+            .and_then(|project| {
+                project.update(cx, |project, cx| {
+                    let project_path = project.find_project_path(&path, cx)?;
+                    let buffer = project.get_open_buffer(&project_path, cx)?;
+                    buffer
+                        .read(cx)
+                        .is_dirty()
+                        .then(|| project.save_buffer(buffer, cx))
+                })
+            });
+        let Some(save) = save else {
+            saved.send(()).ok();
+            return;
+        };
+        cx.spawn(async move |_, _| {
+            if let Err(error) = save.await {
+                log::warn!("couldn't save {path} before the agent used it: {error:#}");
+            }
+            saved.send(()).ok();
+        })
+        .detach();
     }
 
     pub fn metadata(&self) -> &SessionMetadata {
@@ -2150,6 +2195,8 @@ impl AgentSession {
             Vec<UserInputQuestion>,
             tokio::sync::oneshot::Sender<Vec<UserInputAnswer>>,
         )>();
+        let (file_tool_tx, file_tool_rx) =
+            futures::channel::mpsc::unbounded::<(String, tokio::sync::oneshot::Sender<()>)>();
         let controls = RunControls {
             request_input: Box::new(move |questions| {
                 let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
@@ -2161,6 +2208,13 @@ impl AgentSession {
             steering: steering_rx,
             interrupt: interrupt.clone(),
             permission: permission_rx,
+            before_file_tool: Arc::new(move |path| {
+                let (saved_tx, saved_rx) = tokio::sync::oneshot::channel();
+                if file_tool_tx.unbounded_send((path, saved_tx)).is_err() {
+                    log::debug!("agent used a file after its chat closed");
+                }
+                saved_rx
+            }),
         };
 
         let run = spawn_agent_work(cx, async move { harness.run(request, controls).await });
@@ -2185,8 +2239,10 @@ impl AgentSession {
                 questions,
                 responder,
             });
+            let file_tools = file_tool_rx.map(|(path, saved)| RunInput::FileTool { path, saved });
             let mut inputs =
-                futures::stream::select(events, questions).ready_chunks(RUN_INPUT_BATCH);
+                futures::stream::select(events, futures::stream::select(questions, file_tools))
+                    .ready_chunks(RUN_INPUT_BATCH);
             while let Some(batch) = inputs.next().await {
                 let Ok(stream) = this.update(cx, |this, cx| this.apply_run_inputs(batch, cx))
                 else {
@@ -2239,6 +2295,7 @@ impl AgentSession {
                     .detach();
                     self.push_question(questions, relay_tx, cx);
                 }
+                RunInput::FileTool { path, saved } => self.save_before_file_tool(path, saved, cx),
                 RunInput::Ended => return ControlFlow::Break(()),
             }
         }
@@ -4929,6 +4986,66 @@ pub(crate) mod tests {
         });
         assert_eq!(summaries.len(), 1);
         assert!(!summaries[0].working);
+    }
+
+    #[gpui::test]
+    async fn dirty_buffer_is_saved_before_the_tool_runs(cx: &mut TestAppContext) {
+        cx.update(|cx| workspace::AppState::test(cx));
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let file = util::path!("/project/a.rs");
+        // The fake CLI asks to save the file named here, as Claude would before reading it.
+        std::fs::write(directory.path().join(".hook-path"), file.replace('\\', "/"))
+            .expect("write the hook path");
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/project"),
+            serde_json::json!({ "a.rs": "on disk" }),
+        )
+        .await;
+        let project =
+            project::Project::test(fs.clone(), [util::path!("/project").as_ref()], cx).await;
+        let buffer = project
+            .update(cx, |project, cx| project.open_local_buffer(file, cx))
+            .await
+            .expect("open a.rs");
+        buffer.update(cx, |buffer, cx| buffer.set_text("typed, not saved", cx));
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.set_project(project.downgrade());
+            session.send_message("scenario:hook", cx);
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+
+        let on_disk = fs::Fs::load(fs.as_ref(), Path::new(file))
+            .await
+            .expect("read a.rs");
+        assert_eq!(on_disk, "typed, not saved");
+        assert!(!buffer.read_with(cx, |buffer, _| buffer.is_dirty()));
+        let notices: Vec<String> = session.read_with(cx, |session, _| {
+            session
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Notice { text, .. } => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect()
+        });
+        assert_eq!(notices, Vec::<String>::new());
+
+        update_chat_settings(cx, |settings| settings.autosave = Some(false));
+        buffer.update(cx, |buffer, cx| buffer.set_text("typed again", cx));
+        let (saved_tx, mut saved_rx) = tokio::sync::oneshot::channel();
+        session.update(cx, |session, cx| {
+            session.save_before_file_tool(file.into(), saved_tx, cx)
+        });
+        assert_eq!(saved_rx.try_recv(), Ok(()));
+        assert!(buffer.read_with(cx, |buffer, _| buffer.is_dirty()));
     }
 
     #[gpui::test]

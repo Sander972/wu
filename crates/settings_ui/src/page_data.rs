@@ -8268,7 +8268,7 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
-    fn agents_section() -> [SettingsPageItem; 6] {
+    fn agents_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader(n!("Agents")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -8290,6 +8290,23 @@ fn agent_chat_page() -> SettingsPage {
                             .agent_chat
                             .get_or_insert_default()
                             .claude_in_chrome = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Save Before Claude Reads Files"),
+                description: n!(
+                    "Save unsaved changes in an open file before Claude Code reads or edits it."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.autosave"),
+                    pick: |settings_content| {
+                        settings_content.agent_chat.as_ref()?.autosave.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.agent_chat.get_or_insert_default().autosave = value;
                     },
                 }),
                 metadata: None,

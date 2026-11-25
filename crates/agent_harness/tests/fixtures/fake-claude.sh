@@ -43,6 +43,7 @@ case "$first" in
   case " $* " in
   *' --include-partial-messages '*)
     answer_initialize "$first"
+    init_line=$first
     read -r first || exit 1
     ;;
   esac
@@ -435,6 +436,37 @@ case "$first" in
       ;;
     esac
   done
+  ;;
+
+*scenario:hook*)
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Read"],"cwd":"/tmp","session_id":"sess-hook"}'
+  case "$init_line" in
+  *'"matcher":"Edit|Write|MultiEdit|Read"'*) ;;
+  *)
+    emit '{"type":"result","subtype":"error_during_execution","errors":["initialize had no save hook"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-hook"}'
+    exit 0
+    ;;
+  esac
+  case "$init_line" in
+  *'"hookCallbackIds":["wu-presave"]'*) ;;
+  *)
+    emit '{"type":"result","subtype":"error_during_execution","errors":["initialize had no save hook"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-hook"}'
+    exit 0
+    ;;
+  esac
+  hook_path=/x/a.rs
+  if [ -f .hook-path ]; then hook_path=$(cat .hook-path); fi
+  # Shape mirrors 2.1.331's hook_callback for a PreToolUse hook.
+  emit "{\"type\":\"control_request\",\"request_id\":\"hk-1\",\"request\":{\"subtype\":\"hook_callback\",\"callback_id\":\"wu-presave\",\"input\":{\"session_id\":\"sess-hook\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$hook_path\"}},\"tool_use_id\":\"tu-1\"}}"
+  read_reply hook_reply || exit 1
+  case "$hook_reply" in
+  *'"request_id":"hk-1"'*'"continue":true'* | *'"continue":true'*'"request_id":"hk-1"'*)
+    emit '{"type":"result","subtype":"success","result":"read it","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-hook"}'
+    ;;
+  *)
+    emit '{"type":"result","subtype":"error_during_execution","errors":["the save hook was not answered with continue"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-hook"}'
+    ;;
+  esac
   ;;
 
 *scenario:commands*)

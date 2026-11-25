@@ -155,6 +155,8 @@
     "prevent_idle_sleep": true,
     // Lets Claude Code chats use Chrome through the Claude in Chrome extension.
     "claude_in_chrome": true,
+    // Saves unsaved changes in an open file before Claude Code reads or edits it.
+    "autosave": true,
     // How the Git panel writes commit messages.
     "commit_message": {
       // "claude_code", "codex", "opencode" or "antigravity". When unset, the first installed agent.

@@ -444,13 +444,19 @@ pub(crate) fn set_model_line(request_id: &str, model: &str) -> String {
     .to_string()
 }
 
-pub(crate) fn initialize_request_line(request_id: &str) -> String {
-    json!({
-        "type": "control_request",
-        "request_id": request_id,
-        "request": { "subtype": "initialize" },
-    })
-    .to_string()
+pub(crate) const PRESAVE_CALLBACK_ID: &str = "wu-presave";
+
+pub(crate) fn initialize_request_line(request_id: &str, presave_hook: bool) -> String {
+    let mut request = json!({ "subtype": "initialize" });
+    if presave_hook {
+        request["hooks"] = json!({
+            "PreToolUse": [{
+                "matcher": "Edit|Write|MultiEdit|Read",
+                "hookCallbackIds": [PRESAVE_CALLBACK_ID],
+            }],
+        });
+    }
+    control_request_line(request_id, &request)
 }
 
 pub(crate) fn control_request_line(request_id: &str, request: &Value) -> String {
