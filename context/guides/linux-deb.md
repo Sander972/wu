@@ -69,4 +69,18 @@ User data (`~/.config/wu`, `~/.local/share/wu`) is not touched by remove/purge.
 The binary links against the build machine's glibc: build on the oldest Ubuntu release you need to install on (or in a container of it). `libstdc++` is bundled; glibc cannot be.
 
 - Built on Ubuntu 26.04 (2026-11-25) the package gets `Depends: libc6 (>= 2.43), libasound2t64`: apt refuses it on 24.04 (glibc 2.39) and older.
-- For 24.04 targets, build inside an `ubuntu:24.04` container (run `script/linux` there first).
+- For 24.04 targets use `script/bundle-deb-container` (below).
+
+## Build for an older Ubuntu (container)
+
+```sh
+script/bundle-deb-container                       # Ubuntu 24.04 (default)
+script/bundle-deb-container --ubuntu 22.04        # another release
+script/bundle-deb-container -- --revision 2       # options after -- go to bundle-deb
+```
+
+- Runs `script/bundle-deb` in an `ubuntu:<version>` container (docker, or podman if docker is missing; `CONTAINER_ENGINE` overrides). The resulting `.deb` installs on that release and newer ones.
+- Builder image `wu-deb-builder:ubuntu-<version>`: `script/linux` deps, `dpkg-dev`, `fakeroot` and the toolchain of `rust-toolchain.toml`, built once. After changing `script/linux` or `rust-toolchain.toml` pass `--rebuild-image`.
+- Separate target dir `target/ubuntu-<version>/`: output in `target/ubuntu-<version>/release/`. Objects built against another glibc must not mix with the host's `target/`.
+- `target/ubuntu-<version>/container-cache/` keeps `CARGO_HOME` (registry, `cargo-about`) between runs.
+- Runs as the host user (`--user` for docker, `--userns=keep-id` for podman), so the files in `target/` are not owned by root. `Maintainer` defaults to the host's `git config`.
