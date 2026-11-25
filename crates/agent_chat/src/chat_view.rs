@@ -2221,44 +2221,44 @@ impl ChatView {
             .update(cx, |session, cx| session.rewind_preview(index, cx));
         cx.spawn_in(window, async move |this, cx| {
             // A refused or empty preview has already told the user why in the transcript.
-            let Ok(preview) = preview.await else {
+            let (Ok(preview), Some(prompt_id)) = (preview.await, prompt_id) else {
                 return anyhow::Ok(());
             };
-            if !preview.succeeded() || preview.files_changed.is_empty() {
+            let nothing_to_rewind = preview.files_changed.is_empty();
+            if !preview.succeeded() || (nothing_to_rewind && !then_fork) {
                 return Ok(());
             }
-            let answer = this.update_in(cx, |_, window, cx| {
-                window.prompt(
-                    PromptLevel::Warning,
-                    &t!("Rewind code to this message?"),
-                    Some(&rewind_detail(&preview, &cwd)),
-                    &[
-                        PromptButton::new(t!("Rewind")),
-                        PromptButton::cancel(t!("Cancel")),
-                    ],
-                    cx,
-                )
-            })?;
-            if answer.await.ok() != Some(0) {
-                return Ok(());
+            if !nothing_to_rewind {
+                let answer = this.update_in(cx, |_, window, cx| {
+                    window.prompt(
+                        PromptLevel::Warning,
+                        &t!("Rewind code to this message?"),
+                        Some(&rewind_detail(&preview, &cwd)),
+                        &[
+                            PromptButton::new(t!("Rewind")),
+                            PromptButton::cancel(t!("Cancel")),
+                        ],
+                        cx,
+                    )
+                })?;
+                if answer.await.ok() != Some(0) {
+                    return Ok(());
+                }
+                let rewound = this.update(cx, |this, cx| {
+                    this.session.update(cx, |session, cx| {
+                        session.rewind_code(prompt_id.clone(), preview.files_changed, cx)
+                    })
+                })?;
+                if !rewound.await.is_ok_and(|rewound| rewound.succeeded()) {
+                    return Ok(());
+                }
             }
-            let rewound = this.update(cx, |this, cx| {
-                this.session.update(cx, |session, cx| {
-                    session.rewind_code(index, preview.files_changed, cx)
-                })
-            })?;
-            let rewound = rewound.await.is_ok_and(|rewound| rewound.succeeded());
-            if !rewound || !then_fork {
+            if !then_fork {
                 return Ok(());
             }
             this.update_in(cx, |this, window, cx| {
                 // The rewind waited for the turn to stop, which can move the message.
-                let index = this.session.read(cx).entries().iter().position(|entry| {
-                    matches!(
-                        entry,
-                        Entry::User { prompt_id: Some(id), .. } if Some(id) == prompt_id.as_ref()
-                    )
-                });
+                let index = this.session.read(cx).entry_index_for_prompt(&prompt_id);
                 if let Some(index) = index {
                     this.fork_from(index, window, cx);
                 }
@@ -4592,7 +4592,7 @@ mod tests {
     use super::*;
     use crate::{
         AcceptCommand, AgentKind, DismissCommands, SelectNextCommand, SelectPreviousCommand,
-        session::tests::{new_store, run_until},
+        session::tests::{feed_prompt, new_store, run_until},
     };
     use gpui::{KeyBinding, TestAppContext, VisualTestContext};
     use project::FakeFs;
@@ -4609,6 +4609,82 @@ mod tests {
                 KeyBinding::new("escape", DismissCommands, menu),
             ]);
         });
+    }
+
+    #[gpui::test]
+    async fn fork_and_rewind_forks_only_after_a_rewind_or_when_nothing_changed(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(&directory.path().join("chats"), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        // (checkpoint, answer to the confirm, forked, rewind requests sent)
+        let cases = [
+            ("p1", Some("Rewind"), 1, 3),
+            ("p1", Some("Cancel"), 0, 1),
+            ("no-changes", None, 1, 1),
+            ("no-checkpoint", None, 0, 1),
+        ];
+        for (case, (prompt_id, answer, forks, requests)) in cases.into_iter().enumerate() {
+            let cwd = directory.path().join(format!("case-{case}"));
+            std::fs::create_dir_all(&cwd).expect("case directory");
+            let session = store.update(cx, |store, cx| {
+                store.create_session(AgentKind::Claude, cwd.clone(), cx)
+            });
+            feed_prompt(&session, "edit a file", Some(prompt_id), cx);
+            let parent_id = session.read_with(cx, |session, _| session.metadata().id.clone());
+            let window = cx.add_window(|window, cx| {
+                ChatView::new(
+                    session.clone(),
+                    store.clone(),
+                    project.clone(),
+                    WeakEntity::new_invalid(),
+                    window,
+                    cx,
+                )
+            });
+            window
+                .update(cx, |view, window, cx| {
+                    view.rewind_code_to(0, true, window, cx)
+                })
+                .expect("window");
+            let sent = || {
+                std::fs::read_to_string(cwd.join(".rewind-requests"))
+                    .unwrap_or_default()
+                    .lines()
+                    .count()
+            };
+            let forked = |cx: &mut TestAppContext| {
+                store.read_with(cx, |store, _| {
+                    store
+                        .sessions_metadata()
+                        .filter(|metadata| metadata.parent_id.as_deref() == Some(&parent_id))
+                        .count()
+                })
+            };
+            if let Some(answer) = answer {
+                run_until(cx, |cx| cx.has_pending_prompt());
+                cx.simulate_prompt_answer(answer);
+            }
+            // Without a confirm, the preview's notice shows it was answered.
+            run_until(cx, |cx| {
+                sent() == requests
+                    && forked(cx) == forks
+                    && (answer.is_some()
+                        || session.read_with(cx, |session, _| session.entries().len()) > 1)
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                (forked(cx), sent()),
+                (forks, requests),
+                "case {prompt_id} {answer:?}"
+            );
+        }
     }
 
     fn composer_text(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> String {

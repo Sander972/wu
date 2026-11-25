@@ -57,6 +57,7 @@ const NOTHING_TO_REWIND_NOTICE: &str =
 const REWIND_STALE_NOTICE: &str =
     n!("The files to rewind changed since you confirmed, so nothing was rewound.");
 const ALREADY_REWINDING_NOTICE: &str = n!("A rewind is already running.");
+const MESSAGE_GONE_NOTICE: &str = n!("This message is no longer in its chat.");
 
 pub(crate) fn display_title(title: &str) -> SharedString {
     if title.is_empty() {
@@ -2250,27 +2251,25 @@ impl AgentSession {
         })
     }
 
-    /// Restores the files to how they were at this user message, once a fresh dry run still lists the `confirmed` files.
+    /// Restores the files to how they were at the user message with this id, once a fresh dry run still lists the `confirmed` files.
     pub fn rewind_code(
         &mut self,
-        entry_index: usize,
+        prompt_id: String,
         confirmed: Vec<String>,
         cx: &mut Context<Self>,
     ) -> Task<Result<RewindPreview>> {
-        // Resolved now, as edits and retries while the turn stops can shift the entries.
-        let prompt_id = if self.rewinding {
-            Err(anyhow::anyhow!(ALREADY_REWINDING_NOTICE))
+        let refusal = if self.rewinding {
+            Some(ALREADY_REWINDING_NOTICE)
+        } else if self.entry_index_for_prompt(&prompt_id).is_none() {
+            Some(MESSAGE_GONE_NOTICE)
         } else {
-            self.checkpoint_at(entry_index)
+            None
         };
-        let prompt_id = match prompt_id {
-            Ok(prompt_id) => prompt_id,
-            Err(error) => {
-                let refused = Err(error);
-                self.report_rewind_refusal(&refused, cx);
-                return Task::ready(refused);
-            }
-        };
+        if let Some(refusal) = refusal {
+            let refused = Err(anyhow::anyhow!(refusal));
+            self.report_rewind_refusal(&refused, cx);
+            return Task::ready(refused);
+        }
         self.rewinding = true;
         // A running turn could keep editing the files being restored.
         if self.working {
@@ -2322,6 +2321,12 @@ impl AgentSession {
             })?;
             rewound
         })
+    }
+
+    pub fn entry_index_for_prompt(&self, prompt_id: &str) -> Option<usize> {
+        self.entries().iter().position(
+            |entry| matches!(entry, Entry::User { prompt_id: Some(id), .. } if id == prompt_id),
+        )
     }
 
     fn checkpoint_at(&self, entry_index: usize) -> Result<String> {
@@ -5118,13 +5123,22 @@ pub(crate) mod tests {
         let session = store.update(cx, |store, cx| {
             store.create_session(AgentKind::Claude, directory.to_path_buf(), cx)
         });
-        feed_user(&session, "edit a file", cx);
+        feed_prompt(&session, "edit a file", prompt_id, cx);
+        session
+    }
+
+    pub(crate) fn feed_prompt(
+        session: &Entity<AgentSession>,
+        text: &str,
+        prompt_id: Option<&str>,
+        cx: &mut TestAppContext,
+    ) {
+        feed_user(session, text, cx);
         session.update(cx, |session, _| {
             if let Some(Entry::User { prompt_id: id, .. }) = session.transcript.entries.last_mut() {
                 *id = prompt_id.map(str::to_string);
             }
         });
-        session
     }
 
     fn rewind_requests(directory: &Path) -> Vec<String> {
@@ -5163,7 +5177,7 @@ pub(crate) mod tests {
         let session = session_with_message(directory.path(), Some("no-checkpoint"), cx);
         let result = session
             .update(cx, |session, cx| {
-                session.rewind_code(0, confirmed_files(), cx)
+                session.rewind_code("no-checkpoint".into(), confirmed_files(), cx)
             })
             .await
             .expect("the CLI answered");
@@ -5185,9 +5199,7 @@ pub(crate) mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let session = session_with_message(directory.path(), None, cx);
         let error = session
-            .update(cx, |session, cx| {
-                session.rewind_code(0, confirmed_files(), cx)
-            })
+            .update(cx, |session, cx| session.rewind_preview(0, cx))
             .await
             .expect_err("no checkpoint to rewind to");
         assert_eq!(
@@ -5212,7 +5224,7 @@ pub(crate) mod tests {
         let session = session_with_message(directory.path(), Some("p1"), cx);
         let result = session
             .update(cx, |session, cx| {
-                session.rewind_code(0, confirmed_files(), cx)
+                session.rewind_code("p1".into(), confirmed_files(), cx)
             })
             .await
             .expect("the CLI answered");
@@ -5245,7 +5257,7 @@ pub(crate) mod tests {
             if let Some(Entry::User { prompt_id, .. }) = session.transcript.entries.first_mut() {
                 *prompt_id = Some("p1".into());
             }
-            session.rewind_code(0, confirmed_files(), cx)
+            session.rewind_code("p1".into(), confirmed_files(), cx)
         });
         run_until(cx, |cx| {
             cx.executor().advance_clock(REWIND_IDLE_POLL);
@@ -5265,7 +5277,7 @@ pub(crate) mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let session = session_with_message(directory.path(), Some("p1"), cx);
         let rewound = session.update(cx, |session, cx| {
-            let rewound = session.rewind_code(0, confirmed_files(), cx);
+            let rewound = session.rewind_code("p1".into(), confirmed_files(), cx);
             session.transcript.push_notice("shifted".into(), false);
             session.transcript.entries.rotate_right(1);
             rewound
@@ -5281,12 +5293,26 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    async fn rewind_code_refuses_a_message_no_longer_in_the_chat(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let session = session_with_message(directory.path(), Some("p1"), cx);
+        let error = session
+            .update(cx, |session, cx| {
+                session.rewind_code("gone".into(), confirmed_files(), cx)
+            })
+            .await
+            .expect_err("the message is gone");
+        assert_eq!(error.to_string(), "This message is no longer in its chat.");
+        assert!(rewind_requests(directory.path()).is_empty());
+    }
+
+    #[gpui::test]
     async fn rewind_refused_when_the_files_changed_since_confirming(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().expect("temporary directory");
         let session = session_with_message(directory.path(), Some("p1"), cx);
         session
             .update(cx, |session, cx| {
-                session.rewind_code(0, vec!["/repo/src/a.rs".into()], cx)
+                session.rewind_code("p1".into(), vec!["/repo/src/a.rs".into()], cx)
             })
             .await
             .expect_err("the confirmation is stale");
@@ -5309,7 +5335,7 @@ pub(crate) mod tests {
         let session = session_with_message(directory.path(), Some("rewind-error"), cx);
         let result = session
             .update(cx, |session, cx| {
-                session.rewind_code(0, vec!["/repo/b.rs".into()], cx)
+                session.rewind_code("rewind-error".into(), vec!["/repo/b.rs".into()], cx)
             })
             .await
             .expect("the CLI answered");
@@ -5349,8 +5375,8 @@ pub(crate) mod tests {
         let session = session_with_message(directory.path(), Some("p1"), cx);
         let (first, second) = session.update(cx, |session, cx| {
             (
-                session.rewind_code(0, confirmed_files(), cx),
-                session.rewind_code(0, confirmed_files(), cx),
+                session.rewind_code("p1".into(), confirmed_files(), cx),
+                session.rewind_code("p1".into(), confirmed_files(), cx),
             )
         });
         let refused = second.await.expect_err("already rewinding");
@@ -5359,7 +5385,7 @@ pub(crate) mod tests {
         assert_eq!(rewind_requests(directory.path()).len(), 2);
         session
             .update(cx, |session, cx| {
-                session.rewind_code(0, confirmed_files(), cx)
+                session.rewind_code("p1".into(), confirmed_files(), cx)
             })
             .await
             .expect("a later rewind runs");
