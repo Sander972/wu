@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use chardetng::EncodingDetector;
+use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
 use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 
 pub const FILE_ANALYSIS_BYTES: usize = 1024;
@@ -81,9 +81,9 @@ pub fn encode_text(text: String, encoding: &'static Encoding, has_bom: bool) -> 
 }
 
 fn decode_with_detected_encoding(bytes: Vec<u8>) -> DecodedText {
-    let mut detector = EncodingDetector::new();
+    let mut detector = EncodingDetector::new(Iso2022JpDetection::Allow);
     detector.feed(&bytes, true);
-    let encoding = detector.guess(None, true);
+    let encoding = detector.guess(None, Utf8Detection::Allow);
     let (text, _, _) = encoding.decode(&bytes);
     DecodedText {
         text: text.into_owned(),

@@ -422,7 +422,7 @@ bytes = "1.0"
 cargo_metadata = "0.23"
 cargo_toml = "1.0"
 cbindgen = { version = "0.28.0", default-features = false }
-chardetng = "0.1"
+chardetng = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 circular-buffer = "1.0"
