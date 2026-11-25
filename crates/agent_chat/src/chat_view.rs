@@ -464,6 +464,15 @@ impl ChatView {
             _poll_usage: Task::ready(()),
             _subscriptions: subscriptions,
         };
+        if view.subagent.is_none() {
+            for handle in [view.composer.focus_handle(cx), view.question_focus.clone()] {
+                view._subscriptions
+                    .push(cx.on_focus_in(&handle, window, |this, _, cx| {
+                        let workspace = this.workspace.entity_id();
+                        crate::remember_focused_chat(workspace, cx.weak_entity(), cx);
+                    }));
+            }
+        }
         view.pin_default_settings(cx);
         if view.subagent.is_none()
             && let Some(draft) = view.session.update(cx, |session, _| session.take_draft())

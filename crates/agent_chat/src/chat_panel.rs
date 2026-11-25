@@ -826,6 +826,39 @@ mod tests {
         cx.run_until_parked();
     }
 
+    #[gpui::test]
+    async fn insert_mention_goes_to_the_chat_focused_last_even_when_docked(
+        cx: &mut TestAppContext,
+    ) {
+        let (setup, cx) = setup(cx).await;
+        let tab = open_tab(&setup, cx);
+        let docked = open_tab(&setup, cx);
+        dock(&setup, &docked, cx);
+        let focus = |chat: &Entity<ChatView>, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.focus(&gpui::Focusable::focus_handle(chat.read(cx), cx), cx)
+            });
+            cx.run_until_parked();
+        };
+        let path = setup.directory.path().join("a.rs");
+        let mention = |cx: &mut VisualTestContext| {
+            setup.workspace.update_in(cx, |workspace, window, cx| {
+                crate::mention_in_last_chat(workspace, &path, None, window, cx)
+            });
+            cx.run_until_parked();
+        };
+        let text = |chat: &Entity<ChatView>, cx: &mut VisualTestContext| {
+            chat.read_with(cx, |chat, cx| chat.composer_text_for_test(cx))
+        };
+        focus(&tab, cx);
+        focus(&docked, cx);
+        mention(cx);
+        assert_eq!((text(&tab, cx), text(&docked, cx)), (String::new(), "@a.rs ".into()));
+        focus(&tab, cx);
+        mention(cx);
+        assert_eq!(text(&tab, cx), "@a.rs ");
+    }
+
     fn undock(setup: &Setup, view: &Entity<ChatView>, cx: &mut VisualTestContext) {
         setup.workspace.update_in(cx, |workspace, window, cx| {
             move_chat_to_tab(workspace, view.clone(), window, cx)

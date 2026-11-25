@@ -159,20 +159,22 @@ pub(crate) fn mention_target(
     Some((absolute_path, lines))
 }
 
-pub(crate) fn line_suffix((start, end): (u32, u32)) -> String {
-    if start == end {
-        format!("#{start}")
-    } else {
-        format!("#{start}-{end}")
+pub(crate) fn applied_line_suffix(relative_path: &str, lines: Option<(u32, u32)>) -> String {
+    match lines {
+        Some((start, end)) if !relative_path.contains(['"', '#']) => {
+            if start == end {
+                format!("#{start}")
+            } else {
+                format!("#{start}-{end}")
+            }
+        }
+        _ => String::new(),
     }
 }
 
 /// Quoting and the line suffix follow Claude Code: a path with whitespace or `:` is quoted with the suffix inside, and one containing `"` or `#` gets no suffix since the suffix could not be told apart.
 pub(crate) fn mention_text_with_lines(relative_path: &str, lines: Option<(u32, u32)>) -> String {
-    let suffix = lines
-        .filter(|_| !relative_path.contains(['"', '#']))
-        .map(line_suffix)
-        .unwrap_or_default();
+    let suffix = applied_line_suffix(relative_path, lines);
     if relative_path.contains(char::is_whitespace) || relative_path.contains(':') {
         format!("@\"{relative_path}{suffix}\"")
     } else {

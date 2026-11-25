@@ -22,13 +22,13 @@ pub use commit_message::{
 use command_palette_hooks::CommandPaletteFilter;
 use futures::FutureExt as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, EntityId, PromptButton, PromptLevel, TaskExt as _,
-    Window, WindowHandle, actions,
+    App, AppContext as _, Context, Entity, EntityId, Global, PromptButton, PromptLevel,
+    TaskExt as _, WeakEntity, Window, WindowHandle, actions,
 };
 use i18n::t;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use settings::{Settings as _, SettingsStore};
+use std::path::Path;
 use util::ResultExt as _;
 use workspace::{MultiWorkspace, SaveIntent, Workspace};
 
@@ -151,32 +151,42 @@ fn insert_mention(workspace: &mut Workspace, window: &mut Window, cx: &mut Conte
     mention_in_last_chat(workspace, &path, lines, window, cx);
 }
 
-/// The chat you last used, whether open as a tab or docked in the chat panel.
+/// The chat that last had focus per workspace. Pane activation timestamps can't tell a tab from a docked chat since the chat panel's pane counts separately.
+#[derive(Default)]
+struct LastFocusedChats(collections::HashMap<EntityId, WeakEntity<ChatView>>);
+
+impl Global for LastFocusedChats {}
+
+pub(crate) fn remember_focused_chat(
+    workspace: EntityId,
+    chat: WeakEntity<ChatView>,
+    cx: &mut App,
+) {
+    cx.default_global::<LastFocusedChats>()
+        .0
+        .insert(workspace, chat);
+}
+
+/// The chat you last focused, whether open as a tab or docked in the chat panel, else any open chat.
 fn last_focused_chat(workspace: &Workspace, cx: &App) -> Option<Entity<ChatView>> {
-    let panel_pane = workspace
+    let panel_chats = workspace
         .panel::<ChatPanel>(cx)
-        .map(|panel| panel.read(cx).pane().clone());
-    workspace
-        .panes()
-        .iter()
-        .cloned()
-        .chain(panel_pane)
-        .flat_map(|pane| {
-            let pane = pane.read(cx);
-            pane.activation_history()
-                .iter()
-                .filter_map(|entry| {
-                    let chat = pane
-                        .items()
-                        .find(|item| item.item_id() == entry.entity_id)?
-                        .downcast::<ChatView>()?;
-                    Some((entry.timestamp, chat))
-                })
-                .collect::<Vec<_>>()
+        .map(|panel| {
+            let pane = panel.read(cx).pane().read(cx);
+            pane.items_of_type::<ChatView>().collect::<Vec<_>>()
         })
-        .filter(|(_, chat)| !chat.read(cx).is_subagent())
-        .max_by_key(|(timestamp, _)| *timestamp)
-        .map(|(_, chat)| chat)
+        .unwrap_or_default();
+    let open: Vec<Entity<ChatView>> = workspace
+        .items_of_type::<ChatView>(cx)
+        .chain(panel_chats)
+        .filter(|chat| !chat.read(cx).is_subagent())
+        .collect();
+    let remembered = cx
+        .try_global::<LastFocusedChats>()
+        .and_then(|chats| chats.0.get(&workspace.weak_handle().entity_id()))
+        .and_then(|chat| chat.upgrade())
+        .filter(|chat| open.contains(chat));
+    remembered.or_else(|| open.into_iter().next())
 }
 
 fn mention_in_last_chat(
@@ -440,9 +450,14 @@ mod tests {
             });
             chats.push(chat);
         }
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.activate_item(&chats[0], true, true, window, cx);
-        });
+        let focus = |chat: &Entity<ChatView>, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.focus(&gpui::Focusable::focus_handle(chat.read(cx), cx), cx)
+            });
+            cx.run_until_parked();
+        };
+        focus(&chats[1], cx);
+        focus(&chats[0], cx);
         let path = directory.path().join("src").join("a.rs");
         let mention = |cx: &mut gpui::VisualTestContext| {
             workspace.update_in(cx, |workspace, window, cx| {

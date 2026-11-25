@@ -1,5 +1,5 @@
 use super::{ChatView, ui};
-use super::editor_context::{line_suffix, mention_text_with_lines};
+use super::editor_context::{applied_line_suffix, mention_text_with_lines};
 use crate::{
     AcceptCommand, AgentKind, DismissCommands, NewAntigravityChat, NewClaudeChat, NewCodexChat,
     NewOpencodeChat, SelectNextCommand, SelectPreviousCommand, Send, ToggleFocus,
@@ -101,7 +101,7 @@ fn skill_display_name(name: &str) -> String {
         .join(" ")
 }
 
-fn mention_text(path: &Path, is_dir: bool, cwd: &Path, lines: Option<(u32, u32)>) -> String {
+fn relative_mention_path(path: &Path, is_dir: bool, cwd: &Path) -> String {
     let mut shown = path
         .strip_prefix(cwd)
         .unwrap_or(path)
@@ -113,7 +113,11 @@ fn mention_text(path: &Path, is_dir: bool, cwd: &Path, lines: Option<(u32, u32)>
     if is_dir && !shown.ends_with('/') {
         shown.push('/');
     }
-    mention_text_with_lines(&shown, lines)
+    shown
+}
+
+fn mention_text(path: &Path, is_dir: bool, cwd: &Path, lines: Option<(u32, u32)>) -> String {
+    mention_text_with_lines(&relative_mention_path(path, is_dir, cwd), lines)
 }
 
 /// Splits a typed `#5` or `#5-10` off the end of a mention query.
@@ -595,8 +599,9 @@ impl ChatView {
             }
             Row::Mention(item) => mention_text(&item.path, item.is_dir, &cwd, lines),
         };
-        if let (Row::Mention(item), Some(lines)) = (&mut row, lines) {
-            item.label.push_str(&line_suffix(lines));
+        if let Row::Mention(item) = &mut row {
+            let relative = relative_mention_path(&item.path, item.is_dir, &cwd);
+            item.label.push_str(&applied_line_suffix(&relative, lines));
         }
         let badge_range = range.start..range.start + text.len();
         self.insert_at_token(range, text, window, cx);
