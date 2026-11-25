@@ -15,6 +15,7 @@ doctest = false
 [dependencies]
 agent_harness.workspace = true
 anyhow.workspace = true
+async-tungstenite.workspace = true
 buffer_diff.workspace = true
 chrono.workspace = true
 collections.workspace = true
@@ -46,6 +47,8 @@ resvg.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
+smol.workspace = true
+sysinfo.workspace = true
 task.workspace = true
 terminal.workspace = true
 theme.workspace = true

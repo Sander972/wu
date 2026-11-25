@@ -420,7 +420,7 @@ pub fn is_hidden_command(name: &str) -> bool {
     HIDDEN_COMMANDS.contains(&name)
 }
 
-fn claude_config_dir() -> PathBuf {
+pub fn claude_config_dir() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)

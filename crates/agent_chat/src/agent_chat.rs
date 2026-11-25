@@ -149,6 +149,7 @@ pub fn init(shell_env_loaded: Option<futures::channel::oneshot::Receiver<()>>, c
     })
     .detach();
     offer_fix_actions(cx);
+    ide_server::init(cx);
     watch_enabled(cx);
 }
 
