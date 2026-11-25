@@ -373,6 +373,10 @@ struct GlobalIdeServer {
 impl Global for GlobalIdeServer {}
 
 pub(crate) fn init(cx: &mut App) {
+    // Tests run on a fake file system and must not leave lock files in the real Claude config directory.
+    if <dyn fs::Fs>::global(cx).is_fake() {
+        return;
+    }
     let server = match IdeServer::start(Vec::new(), Arc::new(TerminalTools), cx) {
         Ok(server) => server,
         Err(error) => {
@@ -384,6 +388,14 @@ pub(crate) fn init(cx: &mut App) {
         server,
         folders: HashMap::default(),
     });
+    // Globals aren't dropped when wu exits, so the lock file is removed here.
+    cx.on_app_quit(|cx| {
+        if cx.has_global::<GlobalIdeServer>() {
+            cx.remove_global::<GlobalIdeServer>();
+        }
+        async {}
+    })
+    .detach();
     let directory = lock_directory();
     cx.background_spawn(async move {
         remove_stale_lock_files(&directory, process_is_alive)
