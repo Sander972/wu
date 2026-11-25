@@ -7,10 +7,12 @@ help_info() {
 Usage: ${0##*/} [options]
 Build a .deb package for Debian/Ubuntu from the Linux release bundle.
 
-The release channel comes from crates/wu/RELEASE_CHANNEL, like script/bundle-linux.
+The release channel defaults to crates/wu/RELEASE_CHANNEL, like script/bundle-linux.
 
 Options:
   -h, --help            Display this help and exit.
+  --channel <c>         Release channel to build (dev or stable): stable makes the
+                        'wu' package, dev the 'wu-dev' one.
   --skip-build          Reuse the tarball already produced by script/bundle-linux
                         instead of rebuilding it.
   --revision <n>        Debian revision appended to the version (default: 1).
@@ -19,6 +21,7 @@ Options:
 }
 
 skip_build=false
+channel=""
 revision=1
 maintainer=""
 
@@ -27,6 +30,10 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             help_info
             exit 0
+            ;;
+        --channel)
+            channel="$(echo "${2:?--channel needs a value}" | tr '[:upper:]' '[:lower:]')"
+            shift 2
             ;;
         --skip-build)
             skip_build=true
@@ -55,7 +62,16 @@ for tool in dpkg-deb dpkg-shlibdeps fakeroot; do
     fi
 done
 
-channel=$(<crates/wu/RELEASE_CHANNEL)
+if [[ -z "$channel" ]]; then
+    channel=$(<crates/wu/RELEASE_CHANNEL)
+fi
+case "$channel" in
+    dev|stable) ;;
+    *)
+        echo "Invalid channel: $channel (expected dev or stable)." >&2
+        exit 1
+        ;;
+esac
 target_dir="${CARGO_TARGET_DIR:-target}"
 arch="$(uname -m)"
 archive="${target_dir}/release/wu-linux-${arch}.tar.gz"
@@ -73,7 +89,7 @@ if ! "$skip_build"; then
     # Updates of a .deb install go through apt/dpkg: this compiles the explanation
     # into the binaries so the built-in auto-updater stays off.
     export ZED_UPDATE_EXPLANATION="${ZED_UPDATE_EXPLANATION:-Wu was installed from a .deb package: install a newer .deb to update.}"
-    script/bundle-linux
+    script/bundle-linux --channel "$channel"
 fi
 
 if [[ ! -f "$archive" ]]; then
@@ -109,6 +125,10 @@ root="${work_dir}/root"
 
 mkdir -p "${root}/opt"
 tar -xzf "$archive" -C "${root}/opt"
+if [[ ! -d "${root}/opt/wu${suffix}.app" ]]; then
+    echo "$archive was not built for the ${channel} channel: rebuild without --skip-build or pass its --channel." >&2
+    exit 1
+fi
 mv "${root}/opt/wu${suffix}.app" "${root}${install_dir}"
 app="${root}${install_dir}"
 

@@ -11,6 +11,7 @@ links against that release's glibc and installs there (and on newer releases).
 Options:
   -h, --help            Display this help and exit.
   --ubuntu <version>    Ubuntu release of the build container (default: 24.04).
+  --channel <c>         Release channel to build (dev or stable), passed to bundle-deb.
   --rebuild-image       Rebuild the builder image even if it already exists.
 
 Options after '--' go to script/bundle-deb (e.g. -- --revision 2).
@@ -33,13 +34,17 @@ while [[ $# -gt 0 ]]; do
             ubuntu_version="${2:?--ubuntu needs a value}"
             shift 2
             ;;
+        --channel)
+            bundle_deb_args+=(--channel "${2:?--channel needs a value}")
+            shift 2
+            ;;
         --rebuild-image)
             rebuild_image=true
             shift
             ;;
         --)
             shift
-            bundle_deb_args=("$@")
+            bundle_deb_args+=("$@")
             break
             ;;
         *)
