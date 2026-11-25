@@ -1716,6 +1716,7 @@ async fn run_session(session: Session) {
                             }
                         }
                     }
+                    Some(Steer::Control(call)) => call.refuse(),
                     None => {
                         steering_open = false;
                         if !turn.active {

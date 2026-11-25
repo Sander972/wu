@@ -1259,6 +1259,7 @@ async fn run_session(session: Session) {
                     }
                     start_prompt!(blocks, 'main);
                 }
+                Some(Steer::Control(call)) => call.refuse(),
                 None => {
                     steering_open = false;
                     if !running {

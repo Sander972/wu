@@ -1465,6 +1465,7 @@ async fn run_session(session: Session) {
                         }
                     }
                 }
+                Some(Steer::Control(call)) => call.refuse(),
                 None => {
                     steering_open = false;
                     if done_current && router.active.is_none() && queued_steers.is_empty() {

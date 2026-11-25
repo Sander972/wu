@@ -68,6 +68,21 @@ pub enum Steer {
     Message(SteerMessage),
     /// Stops the running turn only. The sender fires just before its `Done` if the run goes on.
     StopTurn(oneshot::Sender<()>),
+    Control(ControlCall),
+}
+
+/// A request on the agent's control channel; the reply carries the agent's answer or its error text.
+pub struct ControlCall {
+    pub request: serde_json::Value,
+    pub reply: oneshot::Sender<Result<serde_json::Value, String>>,
+}
+
+impl ControlCall {
+    pub(crate) fn refuse(self) {
+        if self.reply.send(Err("unsupported".into())).is_err() {
+            log::debug!("nothing waited for the refused control call");
+        }
+    }
 }
 
 pub(crate) fn acknowledge_stop(stop: &mut Option<oneshot::Sender<()>>) {
@@ -180,6 +195,18 @@ pub trait Harness: Send + Sync {
         _session_id: &str,
     ) -> Result<Vec<AgentEvent>, HarnessError> {
         Ok(Vec::new())
+    }
+
+    /// Sends one control request to a fresh agent process for the chat `resume` names, or a throwaway one.
+    async fn control_once(
+        &self,
+        _cwd: &std::path::Path,
+        _resume: Option<&str>,
+        _request: serde_json::Value,
+    ) -> Result<serde_json::Value, HarnessError> {
+        Err(HarnessError::Protocol(
+            i18n::n!("This agent has no control channel.").into(),
+        ))
     }
 
     async fn run(

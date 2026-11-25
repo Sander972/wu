@@ -4,7 +4,7 @@ mod history;
 mod normalize;
 mod wire;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -666,6 +666,58 @@ impl Harness for ClaudeHarness {
         }
     }
 
+    async fn control_once(
+        &self,
+        cwd: &std::path::Path,
+        resume: Option<&str>,
+        request: Value,
+    ) -> Result<Value, HarnessError> {
+        let exe = self.resolve_executable()?;
+        let launch = RunRequest {
+            prompt: String::new(),
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            permission: PermissionMode::default(),
+            resume: resume.map(str::to_owned),
+            fork: None,
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            auto_compact_tokens: None,
+            chrome: false,
+            drop_prompt: None,
+            ephemeral: resume.is_none(),
+        };
+        let mut cmd = self.build_command(&exe, &launch, None);
+        cmd.stderr(Stdio::null());
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
+            } else {
+                HarnessError::Io(e)
+            }
+        })?;
+        let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            shutdown_child(&mut child, self.kill_grace).await;
+            return Err(HarnessError::Protocol("claude child has no stdio".into()));
+        };
+        const INITIALIZE_ID: &str = "wu-control-initialize";
+        let request_id = format!("{CONTROL_REQUEST_PREFIX}{}", uuid::Uuid::new_v4());
+        let mut lines = BufReader::new(stdout).lines();
+        let answer = async {
+            let initialize = wire::initialize_request_line(INITIALIZE_ID);
+            control_exchange(&mut stdin, &mut lines, &initialize, INITIALIZE_ID).await?;
+            let line = wire::control_request_line(&request_id, &request);
+            control_exchange(&mut stdin, &mut lines, &line, &request_id).await
+        }
+        .await;
+        drop(stdin);
+        let kill_grace = self.kill_grace;
+        tokio::spawn(async move { shutdown_child(&mut child, kill_grace).await });
+        answer
+    }
+
     async fn run(
         &self,
         request: RunRequest,
@@ -673,6 +725,25 @@ impl Harness for ClaudeHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.run_with_mode(request, controls).await
     }
+}
+
+async fn control_exchange(
+    stdin: &mut ChildStdin,
+    lines: &mut tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
+    line: &str,
+    request_id: &str,
+) -> Result<Value, HarnessError> {
+    stdin.write_all(line.as_bytes()).await?;
+    stdin.write_all(b"\n").await?;
+    stdin.flush().await?;
+    while let Some(output) = lines.next_line().await? {
+        if let Some((_, answer)) = wire::control_reply(&output, request_id) {
+            return answer.map_err(HarnessError::Protocol);
+        }
+    }
+    Err(HarnessError::Protocol(
+        "claude exited before answering the control request".into(),
+    ))
 }
 
 impl ClaudeHarness {
@@ -1034,6 +1105,8 @@ async fn run_session(session: Session) {
     let mut stop_kill_starts_at = None;
     let mut model_switched = false;
     let mut request_tasks: Vec<tokio::task::AbortHandle> = Vec::new();
+    // Dropped when the loop ends, so callers still waiting get an error instead of hanging.
+    let mut pending_controls: HashMap<String, tokio::sync::oneshot::Sender<_>> = HashMap::new();
 
     'main: loop {
         tokio::select! {
@@ -1041,6 +1114,14 @@ async fn run_session(session: Session) {
                 Ok(Some(line)) => {
                     let line = line.trim();
                     if line.is_empty() {
+                        continue;
+                    }
+                    if let Some((request_id, answer)) = wire::control_reply(line, CONTROL_REQUEST_PREFIX) {
+                        if let Some(reply) = pending_controls.remove(&request_id)
+                            && reply.send(answer).is_err()
+                        {
+                            log::debug!("nothing waited for the claude control reply");
+                        }
                         continue;
                     }
                     if let Some((_, deadline)) = held_done.as_mut() {
@@ -1231,6 +1312,11 @@ async fn run_session(session: Session) {
                     pending_steers.push_back(id);
                     if stdin_tx.send(StdinMsg::Line(line)).is_err() { break 'main; }
                 }
+                Some(Steer::Control(call)) => {
+                    let id = format!("{CONTROL_REQUEST_PREFIX}{}", uuid::Uuid::new_v4());
+                    if stdin_tx.send(StdinMsg::Line(wire::control_request_line(&id, &call.request))).is_err() { break 'main; }
+                    pending_controls.insert(id, call.reply);
+                }
                 None => {
                     steering_open = false;
                     if stdin_tx.send(StdinMsg::Close).is_err() {
@@ -1329,6 +1415,7 @@ type RequestInputFn = Box<
 const SET_MODE_REQUEST_PREFIX: &str = "wu-set-mode-";
 const SET_MODEL_REQUEST_PREFIX: &str = "wu-set-model-";
 const RUN_INITIALIZE_REQUEST: &str = "wu-run-initialize";
+const CONTROL_REQUEST_PREFIX: &str = "wu-ctl-";
 
 /// Claude refuses `bypassPermissions` unless launched in it, so it asks instead and Wu approves.
 fn live_permission_mode_name(permission: PermissionMode, launched_bypass: bool) -> &'static str {

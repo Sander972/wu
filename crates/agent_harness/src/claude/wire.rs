@@ -264,6 +264,39 @@ pub(crate) fn control_response_to(line: &str, request_id: &str) -> Option<Value>
     (response.get("request_id").and_then(Value::as_str) == Some(request_id)).then_some(response)
 }
 
+/// The request id and answer of a reply to one of Wu's control requests whose id starts with `request_id_prefix`.
+pub(crate) fn control_reply(
+    line: &str,
+    request_id_prefix: &str,
+) -> Option<(String, Result<Value, String>)> {
+    if !line.contains(request_id_prefix) {
+        return None;
+    }
+    let mut value: Value = serde_json::from_str(line).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("control_response") {
+        return None;
+    }
+    let mut response = value.get_mut("response")?.take();
+    let request_id = response
+        .get("request_id")
+        .and_then(Value::as_str)
+        .filter(|id| id.starts_with(request_id_prefix))?
+        .to_owned();
+    let answer = if response.get("subtype").and_then(Value::as_str) == Some("error") {
+        Err(response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned())
+    } else {
+        Ok(response
+            .get_mut("response")
+            .map(Value::take)
+            .unwrap_or(Value::Null))
+    };
+    Some((request_id, answer))
+}
+
 pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
     let value: Value = serde_json::from_str(line)?;
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -396,6 +429,15 @@ pub(crate) fn initialize_request_line(request_id: &str) -> String {
     .to_string()
 }
 
+pub(crate) fn control_request_line(request_id: &str, request: &Value) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": request,
+    })
+    .to_string()
+}
+
 pub(crate) fn interrupt_request_line(request_id: &str) -> String {
     json!({
         "type": "control_request",
@@ -430,6 +472,31 @@ mod tests {
         assert_eq!(control_response_to(answer, "wu-other"), None);
         let echoed = r#"{"type":"user","message":{"content":"wu-run-initialize"}}"#;
         assert_eq!(control_response_to(echoed, "wu-run-initialize"), None);
+    }
+
+    #[test]
+    fn control_request_line_shape() {
+        let line = control_request_line("wu-ctl-1", &json!({ "subtype": "get_plan" }));
+        let v: Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(v["type"], "control_request");
+        assert_eq!(v["request_id"], "wu-ctl-1");
+        assert_eq!(v["request"]["subtype"], "get_plan");
+    }
+
+    #[test]
+    fn control_reply_matches_prefix_only() {
+        let success = r#"{"type":"control_response","response":{"subtype":"success","request_id":"wu-ctl-1","response":{"exists":true}}}"#;
+        assert_eq!(
+            control_reply(success, "wu-ctl-"),
+            Some(("wu-ctl-1".to_owned(), Ok(json!({ "exists": true }))))
+        );
+        let error = r#"{"type":"control_response","response":{"subtype":"error","request_id":"wu-ctl-2","error":"nope"}}"#;
+        assert_eq!(
+            control_reply(error, "wu-ctl-"),
+            Some(("wu-ctl-2".to_owned(), Err("nope".to_owned())))
+        );
+        let other = r#"{"type":"control_response","response":{"subtype":"success","request_id":"wu-set-mode-1"}}"#;
+        assert_eq!(control_reply(other, "wu-ctl-"), None);
     }
 
     #[test]

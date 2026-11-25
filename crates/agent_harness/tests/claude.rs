@@ -10,7 +10,8 @@ use agent_harness::{
     UserInputQuestion,
 };
 use agent_harness::{
-    CancellationToken, ClaudeHarness, Harness, HarnessError, RunControls, Steer, SteerMessage,
+    CancellationToken, ClaudeHarness, ControlCall, Harness, HarnessError, RunControls, Steer,
+    SteerMessage,
 };
 
 #[cfg(windows)]
@@ -1266,4 +1267,63 @@ async fn a_run_reports_the_same_commands_as_the_lookup() {
         .collect();
     assert_eq!(reported, [looked_up]);
     assert_eq!(done_statuses(&events), [DoneStatus::Completed]);
+}
+
+async fn control(
+    steer: &mpsc::Sender<Steer>,
+    request: serde_json::Value,
+) -> oneshot::Receiver<Result<serde_json::Value, String>> {
+    let (reply, answer) = oneshot::channel();
+    steer
+        .send(Steer::Control(ControlCall { request, reply }))
+        .await
+        .expect("control queued");
+    answer
+}
+
+#[tokio::test]
+async fn control_call_round_trips() {
+    let (controls, steer, _token) = controls("A");
+    let mut stream = harness()
+        .run(request("scenario:control"), controls)
+        .await
+        .expect("run starts");
+    turn_events(&mut stream).await;
+
+    let answer = control(&steer, serde_json::json!({ "subtype": "get_plan" })).await;
+    let reply = tokio::time::timeout(Duration::from_secs(10), answer)
+        .await
+        .expect("answered in time")
+        .expect("the run kept the reply")
+        .expect("the CLI answered with success");
+    assert_eq!(reply["exists"], true);
+}
+
+#[tokio::test]
+async fn control_error_and_timeout_surface() {
+    let (controls, steer, _token) = controls("A");
+    let mut stream = harness()
+        .run(request("scenario:control"), controls)
+        .await
+        .expect("run starts");
+    turn_events(&mut stream).await;
+
+    let refused = control(&steer, serde_json::json!({ "subtype": "mcp_status" })).await;
+    let refused = tokio::time::timeout(Duration::from_secs(10), refused)
+        .await
+        .expect("answered in time")
+        .expect("the run kept the reply");
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| error.contains("MCP servers are unavailable")),
+        "{refused:?}"
+    );
+
+    let unanswered = control(&steer, serde_json::json!({ "subtype": "hang" })).await;
+    drop(steer);
+    let ended = tokio::time::timeout(Duration::from_secs(10), unanswered)
+        .await
+        .expect("the run ending resolved the call");
+    assert!(!matches!(ended, Ok(Ok(_))), "{ended:?}");
 }

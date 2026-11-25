@@ -1,15 +1,15 @@
 use agent_harness::{
-    AcpHarness, AgentEvent, CancellationToken, ClaudeHarness, CodexHarness, DoneStatus,
-    ExternalSession, Harness, HarnessId, Model, OpencodeHarness, PermissionMode, ReasoningLevel,
-    RunControls, RunRequest, SkillRef, SlashCommand, Steer, SteerMessage, ToolCall, TurnSettings,
-    UserInputAnswer, UserInputQuestion, usage::PlanUsage,
+    AcpHarness, AgentEvent, CancellationToken, ClaudeHarness, CodexHarness, ControlCall,
+    DoneStatus, ExternalSession, Harness, HarnessId, Model, OpencodeHarness, PermissionMode,
+    ReasoningLevel, RunControls, RunRequest, SkillRef, SlashCommand, Steer, SteerMessage, ToolCall,
+    TurnSettings, UserInputAnswer, UserInputQuestion, usage::PlanUsage,
 };
 use anyhow::{Context as _, Result};
 use collections::{HashMap, HashSet};
 use futures::{FutureExt as _, StreamExt as _, future::Shared};
 use gpui::{
-    App, AppContext as _, Context, Entity, EntityId, EventEmitter, Global, SharedString, Task,
-    WeakEntity,
+    App, AppContext as _, Context, Entity, EntityId, EventEmitter, FutureExt as _, Global,
+    SharedString, Task, WeakEntity,
 };
 use i18n::{n, t};
 use language::LanguageRegistry;
@@ -32,6 +32,7 @@ const AGENT_TITLE_CHARS: usize = 60;
 const TOOL_OUTPUT_MAX_CHARS: usize = 200_000;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const STOP_IN_PLACE_TIMEOUT: Duration = Duration::from_secs(10);
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 const SAVE_INTERVAL_WHILE_WORKING: Duration = Duration::from_secs(5);
 const RUN_INPUT_BATCH: usize = 128;
 const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -1876,6 +1877,48 @@ impl AgentSession {
             })
             .collect();
         self.answer(id, answers, cx);
+    }
+
+    /// Asks the running agent, or a one-off agent process for this chat when none runs.
+    pub fn control(
+        &mut self,
+        request: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<serde_json::Value>> {
+        let stopped = || anyhow::anyhow!(t!("The agent stopped before it answered.").to_string());
+        let answer = match &self.run {
+            Some(run) => {
+                let (reply, answer) = tokio::sync::oneshot::channel();
+                if run
+                    .steering
+                    .try_send(Steer::Control(ControlCall { request, reply }))
+                    .is_err()
+                {
+                    return Task::ready(Err(stopped()));
+                }
+                cx.background_spawn(async move {
+                    answer
+                        .await
+                        .map_err(|_| stopped())?
+                        .map_err(anyhow::Error::msg)
+                })
+            }
+            None => {
+                let harness = self.harness.clone();
+                let cwd = self.metadata.cwd.clone();
+                let resume = self.metadata.native_session_id.clone();
+                let work = spawn_agent_work(cx, async move {
+                    harness.control_once(&cwd, resume.as_deref(), request).await
+                });
+                cx.background_spawn(async move { Ok(work.await??) })
+            }
+        };
+        let answer = answer.with_timeout(CONTROL_TIMEOUT, cx.background_executor());
+        cx.background_spawn(async move {
+            answer
+                .await
+                .map_err(|_| anyhow::anyhow!(t!("The agent didn't answer in time.").to_string()))?
+        })
     }
 
     fn start_run(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
@@ -4508,6 +4551,21 @@ pub(crate) mod tests {
         feed_events(&session, reported("default"), cx);
         feed_events(&session, reported("default"), cx);
         assert_eq!(notices(cx), 1);
+    }
+
+    #[gpui::test]
+    async fn control_without_a_run_uses_control_once(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let reply = session.update(cx, |session, cx| {
+            assert!(session.run.is_none());
+            session.control(serde_json::json!({ "subtype": "get_plan" }), cx)
+        });
+        let reply = reply.await.expect("the CLI answered");
+        assert_eq!(reply["exists"], true);
     }
 
     #[gpui::test]

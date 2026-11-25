@@ -279,6 +279,33 @@ case "$first" in
   exec sleep 30
   ;;
 
+*scenario:control*|*'"type":"control_request"'*)
+  # A run's turn or a one-off control call (the request comes right after initialize); a `hang` request is never answered.
+  answer_control() {
+    rid=$(request_id "$1")
+    case "$1" in
+    *'"subtype":"get_plan"'*)
+      emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{\"exists\":true,\"content\":\"the plan\",\"path\":\"plan.md\"}}}"
+      ;;
+    *'"subtype":"mcp_status"'*)
+      emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$rid\",\"error\":\"MCP servers are unavailable\"}}"
+      ;;
+    esac
+  }
+  case "$first" in
+  *'"type":"control_request"'*) answer_control "$first" ;;
+  *)
+    emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-control"}'
+    emit '{"type":"result","subtype":"success","result":"ready","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-control"}'
+    ;;
+  esac
+  while read -r line; do
+    case "$line" in
+    *'"type":"control_request"'*) answer_control "$line" ;;
+    esac
+  done
+  ;;
+
 *scenario:stop*)
   # One process, many turns: an interrupt ends the running turn, a user line starts the next.
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-stop"}'
