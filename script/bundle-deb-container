@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+help_info() {
+  echo "
+Usage: ${0##*/} [options] [-- bundle-deb options]
+Build the .deb with script/bundle-deb inside an Ubuntu container, so the package
+links against that release's glibc and installs there (and on newer releases).
+
+Options:
+  -h, --help            Display this help and exit.
+  --ubuntu <version>    Ubuntu release of the build container (default: 24.04).
+  --rebuild-image       Rebuild the builder image even if it already exists.
+
+Options after '--' go to script/bundle-deb (e.g. -- --revision 2).
+The engine is docker, or podman when docker is missing; set CONTAINER_ENGINE to choose.
+Output: target/ubuntu-<version>/release/<package>_<version>_<arch>.deb
+  "
+}
+
+ubuntu_version="24.04"
+rebuild_image=false
+bundle_deb_args=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            help_info
+            exit 0
+            ;;
+        --ubuntu)
+            ubuntu_version="${2:?--ubuntu needs a value}"
+            shift 2
+            ;;
+        --rebuild-image)
+            rebuild_image=true
+            shift
+            ;;
+        --)
+            shift
+            bundle_deb_args=("$@")
+            break
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            help_info
+            exit 1
+            ;;
+    esac
+done
+
+if [[ ! "$ubuntu_version" =~ ^[0-9]{2}\.[0-9]{2}$ ]]; then
+    echo "Invalid Ubuntu version: $ubuntu_version (expected e.g. 24.04)." >&2
+    exit 1
+fi
+
+engine="${CONTAINER_ENGINE:-}"
+if [[ -z "$engine" ]]; then
+    if command -v docker >/dev/null 2>&1; then
+        engine=docker
+    elif command -v podman >/dev/null 2>&1; then
+        engine=podman
+    else
+        echo "Neither docker nor podman found: install one, or set CONTAINER_ENGINE." >&2
+        exit 1
+    fi
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+image="wu-deb-builder:ubuntu-${ubuntu_version}"
+
+if "$rebuild_image" || ! "$engine" image inspect "$image" >/dev/null 2>&1; then
+    context_dir=$(mktemp -d)
+    trap 'rm -rf "$context_dir"' EXIT
+    cp script/linux rust-toolchain.toml "$context_dir/"
+    # The toolchain lives in the image under /opt so every build reuses it; it is
+    # world-writable because the build runs as the host user, not as root.
+    "$engine" build --tag "$image" --file - "$context_dir" <<EOF
+FROM docker.io/library/ubuntu:${ubuntu_version}
+ENV DEBIAN_FRONTEND=noninteractive \\
+    RUSTUP_HOME=/opt/rustup \\
+    CARGO_HOME=/opt/cargo \\
+    PATH=/opt/cargo/bin:\$PATH
+RUN apt-get update \\
+    && apt-get install -y --no-install-recommends ca-certificates curl sudo lsb-release \\
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none
+COPY linux rust-toolchain.toml /tmp/wu/
+RUN /tmp/wu/linux \\
+    && apt-get install -y --no-install-recommends dpkg-dev fakeroot file \\
+    && rm -rf /var/lib/apt/lists/*
+RUN cd /tmp/wu && rustup toolchain install \\
+    && chmod -R a+rwX /opt/rustup /opt/cargo
+EOF
+fi
+
+# A separate target dir per release: artifacts built against another glibc must not mix.
+target_dir="target/ubuntu-${ubuntu_version}"
+cache_dir="${target_dir}/container-cache"
+mkdir -p "${cache_dir}/cargo" "${cache_dir}/home"
+
+# The container has no git identity: take the default Maintainer from the host.
+has_maintainer=false
+for argument in ${bundle_deb_args[@]+"${bundle_deb_args[@]}"}; do
+    if [[ "$argument" == "--maintainer" ]]; then
+        has_maintainer=true
+    fi
+done
+if ! "$has_maintainer"; then
+    git_name=$(git config user.name || echo "Wu builder")
+    git_email=$(git config user.email || echo "wu@localhost")
+    bundle_deb_args+=(--maintainer "${git_name} <${git_email}>")
+fi
+
+user_args=(--user "$(id -u):$(id -g)")
+if [[ "$(basename "$engine")" == "podman" ]]; then
+    # Rootless podman maps the host user to root unless asked to keep the id.
+    user_args=(--userns=keep-id)
+fi
+
+tty_args=()
+if [[ -t 0 && -t 1 ]]; then
+    tty_args=(--interactive --tty)
+fi
+
+# CARGO_HOME points at a host directory so the registry and cargo-about survive
+# between runs; the rustup proxies stay reachable through /opt/cargo/bin.
+"$engine" run --rm ${tty_args[@]+"${tty_args[@]}"} "${user_args[@]}" \
+    --volume "${repo_root}:/src" \
+    --workdir /src \
+    --env HOME="/src/${cache_dir}/home" \
+    --env CARGO_HOME="/src/${cache_dir}/cargo" \
+    --env PATH="/src/${cache_dir}/cargo/bin:/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    --env CARGO_TARGET_DIR="${target_dir}" \
+    ${ZED_UPDATE_EXPLANATION:+--env ZED_UPDATE_EXPLANATION} \
+    "$image" \
+    script/bundle-deb ${bundle_deb_args[@]+"${bundle_deb_args[@]}"}
