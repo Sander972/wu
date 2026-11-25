@@ -420,7 +420,7 @@ block2 = "0.6"
 brush-parser = "0.3"
 bytes = "1.0"
 cargo_metadata = "0.23"
-cargo_toml = "0.21"
+cargo_toml = "1.0"
 cbindgen = { version = "0.28.0", default-features = false }
 chardetng = "0.1"
 chrono = { version = "0.4", features = ["serde"] }

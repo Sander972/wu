@@ -1467,12 +1467,13 @@ dependencies = [
 
 [[package]]
 name = "cargo_toml"
-version = "0.21.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fbd1fe9db3ebf71b89060adaf7b0504c2d6a425cf061313099547e382c2e472"
+checksum = "82f4b26e751e711a5302649417f2da046dce6391b2ea30a4820f37462314f0b9"
 dependencies = [
+ "semver",
  "serde",
- "toml 0.8.23",
+ "toml 1.2.3+spec-1.1.0",
 ]
 
 [[package]]
