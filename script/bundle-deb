@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+help_info() {
+  echo "
+Usage: ${0##*/} [options]
+Build a .deb package for Debian/Ubuntu from the Linux release bundle.
+
+The release channel comes from crates/wu/RELEASE_CHANNEL, like script/bundle-linux.
+
+Options:
+  -h, --help            Display this help and exit.
+  --skip-build          Reuse the tarball already produced by script/bundle-linux
+                        instead of rebuilding it.
+  --revision <n>        Debian revision appended to the version (default: 1).
+  --maintainer <text>   Maintainer field (default: git user.name <user.email>).
+  "
+}
+
+skip_build=false
+revision=1
+maintainer=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            help_info
+            exit 0
+            ;;
+        --skip-build)
+            skip_build=true
+            shift
+            ;;
+        --revision)
+            revision="${2:?--revision needs a value}"
+            shift 2
+            ;;
+        --maintainer)
+            maintainer="${2:?--maintainer needs a value}"
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            help_info
+            exit 1
+            ;;
+    esac
+done
+
+for tool in dpkg-deb dpkg-shlibdeps fakeroot; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "Missing '$tool': install it with 'sudo apt install dpkg-dev fakeroot'." >&2
+        exit 1
+    fi
+done
+
+channel=$(<crates/wu/RELEASE_CHANNEL)
+target_dir="${CARGO_TARGET_DIR:-target}"
+arch="$(uname -m)"
+archive="${target_dir}/release/wu-linux-${arch}.tar.gz"
+
+case "$arch" in
+    x86_64) deb_arch=amd64 ;;
+    aarch64) deb_arch=arm64 ;;
+    *)
+        echo "Unsupported architecture: $arch" >&2
+        exit 1
+        ;;
+esac
+
+if ! "$skip_build"; then
+    # Updates of a .deb install go through apt/dpkg: this compiles the explanation
+    # into the binaries so the built-in auto-updater stays off.
+    export ZED_UPDATE_EXPLANATION="${ZED_UPDATE_EXPLANATION:-Wu was installed from a .deb package: install a newer .deb to update.}"
+    script/bundle-linux
+fi
+
+if [[ ! -f "$archive" ]]; then
+    echo "Bundle not found: $archive (run without --skip-build)." >&2
+    exit 1
+fi
+
+version="$(script/get-crate-version wu)"
+if [[ "$channel" == "stable" ]]; then
+    package="wu"
+    suffix=""
+    deb_version="${version}-${revision}"
+else
+    package="wu-${channel}"
+    suffix="-${channel}"
+    # Dev builds keep the same crate version across commits: the commit date makes
+    # every rebuild sort newer for dpkg, and "~" sorts it before the final release.
+    commit_date=$(git log -1 --format=%cd --date=format:%Y%m%d%H%M%S)
+    commit=$(git rev-parse --short=7 HEAD)
+    deb_version="${version}~${channel}.${commit_date}.g${commit}-${revision}"
+fi
+
+if [[ -z "$maintainer" ]]; then
+    git_name=$(git config user.name || echo "Wu builder")
+    git_email=$(git config user.email || echo "wu@localhost")
+    maintainer="${git_name} <${git_email}>"
+fi
+
+install_dir="/opt/${package}"
+work_dir=$(mktemp -d)
+trap 'rm -rf "$work_dir"' EXIT
+root="${work_dir}/root"
+
+mkdir -p "${root}/opt"
+tar -xzf "$archive" -C "${root}/opt"
+mv "${root}/opt/wu${suffix}.app" "${root}${install_dir}"
+app="${root}${install_dir}"
+
+# Desktop file and icons move to the system locations so menus find them;
+# the CLI resolves its own symlink, so /usr/bin/wu still finds ../libexec/wu-editor.
+mkdir -p "${root}/usr/bin" "${root}/usr/share"
+ln -s "${install_dir}/bin/wu" "${root}/usr/bin/wu"
+mv "${app}/share/applications" "${root}/usr/share/applications"
+mv "${app}/share/icons" "${root}/usr/share/icons"
+rmdir "${app}/share"
+chmod 0644 "${root}"/usr/share/applications/*.desktop
+
+mkdir -p "${root}/usr/share/doc/${package}"
+cp "${app}/licenses.md" "${root}/usr/share/doc/${package}/licenses.md"
+
+# dpkg-shlibdeps needs a debian/control in the current directory.
+mkdir -p "${work_dir}/debian"
+printf 'Source: %s\n\nPackage: %s\nArchitecture: any\n' "$package" "$package" > "${work_dir}/debian/control"
+depends=$(
+    cd "$work_dir" &&
+    dpkg-shlibdeps -O --ignore-missing-info -l"root${install_dir}/lib" \
+        "root${install_dir}/libexec/wu-editor" "root${install_dir}/bin/wu" 2>/dev/null |
+    sed -n 's/^shlibs:Depends=//p'
+)
+if [[ -z "$depends" ]]; then
+    echo "dpkg-shlibdeps found no dependencies; refusing to build a package without Depends." >&2
+    exit 1
+fi
+# Loaded at runtime with dlopen, so dpkg-shlibdeps cannot see them.
+depends="${depends}, libvulkan1, libegl1, libwayland-client0, libwayland-egl1"
+
+# The tarball keeps the builder's umask (often 002); packaged files must not be group-writable.
+chmod -R u+rwX,go+rX,go-w "$root"
+
+installed_size=$(du -sk --exclude=DEBIAN "$root" | cut -f1)
+
+if [[ "$channel" == "stable" ]]; then
+    conflicts="wu-dev"
+else
+    conflicts="wu"
+fi
+
+mkdir -p "${root}/DEBIAN"
+cat > "${root}/DEBIAN/control" <<EOF
+Package: ${package}
+Version: ${deb_version}
+Architecture: ${deb_arch}
+Maintainer: ${maintainer}
+Installed-Size: ${installed_size}
+Depends: ${depends}
+Recommends: mesa-vulkan-drivers
+Conflicts: ${conflicts}
+Replaces: ${conflicts}
+Section: editors
+Priority: optional
+Homepage: https://github.com/dstrml/wu
+Description: Wu, a fast native code editor
+ Wu is a fork of the Zed editor. Installed in ${install_dir},
+ with the 'wu' command in /usr/bin.
+EOF
+
+output="${target_dir}/release/${package}_${deb_version}_${deb_arch}.deb"
+rm -f "${target_dir}/release/${package}"_*_"${deb_arch}".deb
+fakeroot dpkg-deb --build --root-owner-group -Zxz "$root" "$output"
+
+echo "Built ${output}"
+echo "Install with: sudo apt install ./${output}"
