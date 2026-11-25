@@ -14,6 +14,7 @@ test-support = []
 github-download = [
     "dep:async-fs",
     "dep:async-tar",
+    "dep:hex",
     "dep:sha2",
     "dep:tempfile",
     "dep:util",
@@ -42,5 +43,6 @@ url.workspace = true
 util = { workspace = true, optional = true }
 async-fs = { workspace = true, optional = true }
 async-tar = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }

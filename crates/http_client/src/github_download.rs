@@ -151,7 +151,7 @@ async fn extract_to_staging(
                 .with_context(|| {
                     format!("saving archive contents into the temporary file for {url}")
                 })?;
-            let asset_sha_256 = format!("{:x}", writer.hasher.finalize());
+            let asset_sha_256 = hex::encode(writer.hasher.finalize());
 
             anyhow::ensure!(
                 sha256_matches(&asset_sha_256, expected_sha_256),
@@ -337,7 +337,7 @@ impl<W: AsyncWrite + Unpin> HashingWriter<W> {
     async fn finish(mut self) -> std::io::Result<String> {
         self.writer.close().await?;
         drop(self.writer);
-        Ok(format!("{:x}", self.hasher.finalize()))
+        Ok(hex::encode(self.hasher.finalize()))
     }
 }
 
@@ -412,7 +412,7 @@ mod tests {
             let temp_dir = tempfile::tempdir().unwrap();
             let destination_path = temp_dir.path().join("v_1");
             let contents = b"#!/bin/sh\necho hello\n".to_vec();
-            let expected_sha_256 = format!("{:X}", Sha256::digest(&contents));
+            let expected_sha_256 = hex::encode_upper(Sha256::digest(&contents));
             let client = StaticResponseClient { body: contents };
 
             download_server_raw_binary(
@@ -482,7 +482,7 @@ mod tests {
                 0x00, 0x01, 0x00, 0x01, 0x00, 0x33, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00,
                 0x00,
             ];
-            let expected_sha_256 = format!("{:X}", Sha256::digest(&archive));
+            let expected_sha_256 = hex::encode_upper(Sha256::digest(&archive));
             let client = StaticResponseClient { body: archive };
             let temp_dir = tempfile::tempdir().unwrap();
             let destination_path = temp_dir.path().join("v_1");
@@ -527,6 +527,21 @@ mod tests {
             assert!(!destination_path.exists());
             let leftover_entries = std::fs::read_dir(temp_dir.path()).unwrap().count();
             assert_eq!(leftover_entries, 0, "staging directory should be removed");
+        });
+    }
+
+    #[test]
+    fn hashing_writer_returns_lowercase_hex_sha256() {
+        futures::executor::block_on(async {
+            let mut writer = HashingWriter {
+                writer: futures::io::Cursor::new(Vec::new()),
+                hasher: Sha256::new(),
+            };
+            writer.write_all(b"abc").await.unwrap();
+            assert_eq!(
+                writer.finish().await.unwrap(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            );
         });
     }
 }

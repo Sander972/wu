@@ -3,12 +3,12 @@ use base64::prelude::*;
 use rand::prelude::*;
 use rsa::pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey};
 use rsa::traits::PaddingScheme;
-use rsa::{Oaep, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use rsa::{Oaep, Pkcs1v15Encrypt, PrivateKey as RsaPrivateKey, PublicKey as RsaPublicKey};
 use sha2::Sha256;
 use std::convert::TryFrom;
 
 fn oaep_sha256_padding() -> impl PaddingScheme {
-    Oaep::new::<Sha256>()
+    Oaep::<Sha256>::new()
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -107,7 +107,7 @@ impl TryFrom<String> for PublicKey {
     }
 }
 
-// TODO: remove once we rsa v0.10 is released.
+// rsa 0.10 uses rand_core 0.10, while the rest of the workspace is on rand 0.9 (rand_core 0.9).
 struct RsaRngCompat(rand::rngs::ThreadRng);
 
 impl RsaRngCompat {
@@ -116,26 +116,24 @@ impl RsaRngCompat {
     }
 }
 
-impl rsa::signature::rand_core::RngCore for RsaRngCompat {
-    fn next_u32(&mut self) -> u32 {
-        self.0.next_u32()
+impl rsa::signature::rand_core::TryRng for RsaRngCompat {
+    type Error = std::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(self.0.next_u32())
     }
 
-    fn next_u64(&mut self) -> u64 {
-        self.0.next_u64()
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(self.0.next_u64())
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         self.0.fill_bytes(dest);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rsa::signature::rand_core::Error> {
-        self.fill_bytes(dest);
         Ok(())
     }
 }
 
-impl rsa::signature::rand_core::CryptoRng for RsaRngCompat {}
+impl rsa::signature::rand_core::TryCryptoRng for RsaRngCompat {}
 
 #[cfg(test)]
 mod tests {

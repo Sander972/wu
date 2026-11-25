@@ -73,7 +73,7 @@ pub(crate) fn context(
         field(&mut hash, value.as_encoded_bytes());
     }
     Ok(ModelContext {
-        hash: format!("{:x}", hash.finalize()),
+        hash: hex::encode(hash.finalize()),
         binary_path: binary,
         binary_version: version,
     })
@@ -183,7 +183,7 @@ mod tests {
         let key = || {
             let mut hash = Sha256::new();
             hash_files(&mut hash, std::iter::once(&file)).unwrap();
-            format!("{:x}", hash.finalize())
+            hex::encode(hash.finalize())
         };
         let missing = key();
         std::fs::write(&file, "account-one").unwrap();
@@ -207,7 +207,7 @@ mod tests {
         let key = || {
             let mut hash = Sha256::new();
             hash_opencode_files(&mut hash, files.iter());
-            format!("{:x}", hash.finalize())
+            hex::encode(hash.finalize())
         };
         let missing = key();
         std::fs::write(&config, r#"{"$schema":"https://opencode.ai/config.json"}"#).unwrap();

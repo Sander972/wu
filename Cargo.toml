@@ -629,7 +629,7 @@ resvg = { version = "0.50", default-features = false, features = [
     "memmap-fonts",
     "raster-images",
 ] }
-rsa = "0.9.6"
+rsa = { version = "0.10.0", features = ["pkcs1v15"] }
 rust-embed = { version = "8.11", features = ["include-exclude"] }
 rustc-hash = "2.1.0"
 rustix = { version = "1.1", features = ["fs"] }
@@ -649,7 +649,7 @@ serde_path_to_error = "0.1.17"
 serde_urlencoded = "0.7"
 serde_yaml = "0.9.34"
 serde_yaml_ng = "0.10"
-sha2 = "0.10"
+sha2 = "0.11"
 shellexpand = "3.1"
 shlex = "2"
 simplelog = "0.12.2"
