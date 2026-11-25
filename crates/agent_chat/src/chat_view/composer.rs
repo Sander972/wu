@@ -764,6 +764,7 @@ impl ChatView {
         &mut self,
         question_id: String,
         prompt: &PermissionPrompt,
+        focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -771,6 +772,7 @@ impl ChatView {
             self.session.clone(),
             question_id,
             prompt,
+            focus,
             self.workspace.clone(),
             window,
             cx,
@@ -1342,7 +1344,13 @@ impl ChatView {
                             .hover(move |style| style.bg(back_hover).text_color(colors.text))
                             .child(t!("Review in editor"))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.review_in_editor(question_id.clone(), &prompt, window, cx)
+                                this.review_in_editor(
+                                    question_id.clone(),
+                                    &prompt,
+                                    true,
+                                    window,
+                                    cx,
+                                )
                             }))
                             .into_any_element()
                     } else {

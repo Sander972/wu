@@ -1364,6 +1364,8 @@
     "bindings": {
       "cmd-enter": "agent_chat::AcceptProposedChanges",
       "cmd-shift-backspace": "agent_chat::RejectProposedChanges",
+      "cmd-alt-y": "agent_chat::AcceptChangeAtCursor",
+      "cmd-alt-z": "agent_chat::RejectChangeAtCursor",
     },
   },
   {

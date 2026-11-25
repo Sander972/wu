@@ -1,6 +1,7 @@
 {
   "/{name} only works in Claude Code in the terminal.": "/{name} 只能在终端里的 Claude Code 中使用。",
   "Accept": "接受",
+  "Accept this change": "接受此处修改",
   "Add to favorites": "加星标",
   "Agent Chats": "智能体对话",
   "Agent chats only work in local projects for now.": "智能体对话目前仅支持本地项目。",
@@ -135,6 +136,7 @@
   "Reasoning": "推理强度",
   "Reckoning": "盘算中",
   "Reject": "拒绝",
+  "Reject this change": "拒绝此处修改",
   "Remove": "移除",
   "Remove comment": "移除评论",
   "Remove from favorites": "取消星标",

@@ -1317,6 +1317,8 @@
     "bindings": {
       "ctrl-enter": "agent_chat::AcceptProposedChanges",
       "ctrl-shift-backspace": "agent_chat::RejectProposedChanges",
+      "ctrl-alt-y": "agent_chat::AcceptChangeAtCursor",
+      "ctrl-alt-z": "agent_chat::RejectChangeAtCursor",
     },
   },
   {

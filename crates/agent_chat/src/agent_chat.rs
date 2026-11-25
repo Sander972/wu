@@ -73,6 +73,10 @@ actions!(
         AcceptProposedChanges,
         /// Rejects the agent's proposed file change shown in the review tab.
         RejectProposedChanges,
+        /// Accepts the single change under the cursor in the review tab.
+        AcceptChangeAtCursor,
+        /// Rejects the single change under the cursor in the review tab, restoring the file's current text there.
+        RejectChangeAtCursor,
     ]
 );
 

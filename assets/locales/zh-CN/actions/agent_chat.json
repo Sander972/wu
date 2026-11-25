@@ -1,4 +1,8 @@
 {
+  "agent_chat::AcceptChangeAtCursor": {
+    "name": "接受光标处的修改",
+    "description": "接受审阅标签页中光标所在的单处修改。"
+  },
   "agent_chat::AcceptCommand": {
     "name": "接受命令",
     "description": "选择斜杠命令菜单中高亮显示的命令。"
@@ -38,6 +42,10 @@
   "agent_chat::NewOpencodeChat": {
     "name": "新建 OpenCode 对话",
     "description": "开始新的 OpenCode 对话。"
+  },
+  "agent_chat::RejectChangeAtCursor": {
+    "name": "拒绝光标处的修改",
+    "description": "拒绝审阅标签页中光标所在的单处修改，并将该处恢复为文件当前的内容。"
   },
   "agent_chat::RejectProposedChanges": {
     "name": "拒绝拟议修改",

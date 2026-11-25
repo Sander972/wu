@@ -661,7 +661,7 @@ impl ChatView {
             );
         }
         for (question_id, prompt) in new_reviews {
-            self.review_in_editor(question_id, &prompt, window, cx);
+            self.review_in_editor(question_id, &prompt, false, window, cx);
         }
         for (question_id, standalone, multi_select) in free_text {
             if self.answer_editors.contains_key(&question_id) {
