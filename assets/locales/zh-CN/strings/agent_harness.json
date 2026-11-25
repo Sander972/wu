@@ -122,6 +122,7 @@
   "Read only": "只读",
   "Read {path}?": "要读取 {path} 吗？",
   "Reads files, asks before changing anything": "可以读取文件，更改任何内容前先询问",
+  "Ready to code?": "准备好开始编码了吗？",
   "Resume agent": "恢复智能体",
   "Review uncommitted changes, or supply review instructions": "审查未提交的更改，或提供审查说明",
   "Run": "运行",

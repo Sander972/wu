@@ -1001,6 +1001,15 @@ impl PendingQuestion {
             })
     }
 
+    pub fn is_plan(&self) -> bool {
+        self.questions.iter().any(|question| {
+            question
+                .permission
+                .as_ref()
+                .is_some_and(|prompt| prompt.tool_name == "ExitPlanMode")
+        })
+    }
+
     pub fn is_permission(&self) -> bool {
         !self.questions.is_empty()
             && self
@@ -1131,6 +1140,7 @@ pub struct AgentSession {
     deleted: bool,
     pending_questions: Vec<PendingQuestion>,
     noticed_auto_unavailable: bool,
+    permission_before_plan: Option<PermissionMode>,
     languages: Arc<LanguageRegistry>,
     save_metadata_task: Task<()>,
     save_entries_task: Task<()>,
@@ -1207,6 +1217,7 @@ impl AgentSession {
             deleted: false,
             pending_questions: Vec::new(),
             noticed_auto_unavailable: false,
+            permission_before_plan: None,
             languages,
             save_metadata_task: Task::ready(()),
             save_entries_task: Task::ready(()),
@@ -1413,6 +1424,9 @@ impl AgentSession {
         }
         let permission = self.metadata.settings.permission;
         if permission != before.permission {
+            if permission == PermissionMode::Plan {
+                self.permission_before_plan = Some(before.permission);
+            }
             self.apply_permission_now(permission, cx);
         }
         let (old, new) = (
@@ -1855,6 +1869,55 @@ impl AgentSession {
             .skips_prompts()
     }
 
+    /// For a mode the CLI switched to by itself: nothing is sent back and nothing restarts.
+    fn adopt_permission(&mut self, permission: PermissionMode, cx: &mut Context<Self>) {
+        let before = self.metadata.settings.permission;
+        if permission == before {
+            return;
+        }
+        if permission == PermissionMode::Plan {
+            self.permission_before_plan = Some(before);
+        }
+        self.metadata.settings.permission = permission;
+        self.save_metadata(cx);
+        cx.notify();
+    }
+
+    /// Whether approving a plan should return to Auto, because that was the mode before planning.
+    pub fn plan_approval_uses_auto(&self) -> bool {
+        let previous = match self.metadata.settings.permission {
+            PermissionMode::Plan => self.permission_before_plan,
+            permission => Some(permission),
+        };
+        previous == Some(PermissionMode::Auto)
+    }
+
+    /// Wu switches to `mode` itself before answering; otherwise a `setMode` in the reply switches the CLI and the session follows.
+    pub fn decide_plan(
+        &mut self,
+        id: &str,
+        mode: Option<PermissionMode>,
+        decision: PermissionDecision,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(mode) = mode {
+            self.update_settings(|settings| settings.permission = mode, cx);
+        } else if let PermissionDecision::Allow {
+            updated_permissions,
+            ..
+        } = &decision
+            && let Some(mode) = updated_permissions
+                .iter()
+                .filter(|update| update["type"] == "setMode")
+                .find_map(|update| {
+                    agent_harness::claude::permission_mode_from_name(update["mode"].as_str()?)
+                })
+        {
+            self.adopt_permission(mode, cx);
+        }
+        self.decide_permission(id, decision, cx);
+    }
+
     pub fn answer_permission(&mut self, id: &str, allow: bool, cx: &mut Context<Self>) {
         let decision = if allow {
             PermissionDecision::Allow {
@@ -2231,6 +2294,9 @@ impl AgentSession {
                         false,
                         cx,
                     );
+                }
+                if let Some(permission) = agent_harness::claude::permission_mode_from_name(&mode) {
+                    self.adopt_permission(permission, cx);
                 }
             }
             AgentEvent::TextDelta { text } => {
@@ -4932,6 +4998,125 @@ pub(crate) mod tests {
                 decision: Some(decision),
             }]
         );
+    }
+
+    fn plan_question(
+        id: &str,
+        responder: tokio::sync::oneshot::Sender<Vec<UserInputAnswer>>,
+    ) -> PendingQuestion {
+        PendingQuestion {
+            questions: vec![UserInputQuestion {
+                id: id.into(),
+                header: agent_harness::claude::PERMISSION_HEADER.into(),
+                question: "Ready to code?".into(),
+                options: vec![
+                    agent_harness::claude::PERMISSION_ALLOW.into(),
+                    agent_harness::claude::PERMISSION_DENY.into(),
+                ],
+                multi_select: false,
+                prefill: None,
+                multiline: false,
+                accepts_typed_answer: false,
+                permission: Some(agent_harness::PermissionPrompt {
+                    tool_name: "ExitPlanMode".into(),
+                    input: serde_json::json!({ "plan": "# Plan" }),
+                    ..Default::default()
+                }),
+            }],
+            responder: Some(responder),
+        }
+    }
+
+    #[gpui::test]
+    async fn approving_a_plan_switches_the_session_mode(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let (agent_tx, agent_rx) = tokio::sync::oneshot::channel();
+        let allow = PermissionDecision::Allow {
+            updated_input: None,
+            updated_permissions: Vec::new(),
+        };
+        session.update(cx, |session, cx| {
+            session.update_settings(|settings| settings.permission = PermissionMode::Plan, cx);
+            session.pending_questions.push(plan_question("q", agent_tx));
+            assert!(session.pending_questions()[0].is_plan());
+            session.decide_plan("q", Some(PermissionMode::AcceptEdits), allow.clone(), cx);
+            assert_eq!(session.settings().permission, PermissionMode::AcceptEdits);
+            assert!(session.pending_questions().is_empty());
+        });
+        let answers = agent_rx.await.expect("the agent gets an answer");
+        assert_eq!(answers[0].decision, Some(allow));
+    }
+
+    #[gpui::test]
+    async fn manual_plan_approval_returns_the_session_to_ask(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let (agent_tx, _agent_rx) = tokio::sync::oneshot::channel();
+        session.update(cx, |session, cx| {
+            session.update_settings(|settings| settings.permission = PermissionMode::Plan, cx);
+            session.pending_questions.push(plan_question("q", agent_tx));
+            let manual = PermissionDecision::Allow {
+                updated_input: None,
+                updated_permissions: vec![serde_json::json!({
+                    "type": "setMode",
+                    "mode": "default",
+                    "destination": "session",
+                })],
+            };
+            session.decide_plan("q", None, manual, cx);
+            assert_eq!(session.settings().permission, PermissionMode::Ask);
+        });
+    }
+
+    #[gpui::test]
+    async fn plan_approval_offers_auto_only_after_auto(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            let mut switch = |from: PermissionMode| {
+                session.update_settings(|settings| settings.permission = from, cx);
+                session.update_settings(|settings| settings.permission = PermissionMode::Plan, cx);
+                session.plan_approval_uses_auto()
+            };
+            assert!(switch(PermissionMode::Auto));
+            assert!(!switch(PermissionMode::AcceptEdits));
+        });
+    }
+
+    #[gpui::test]
+    async fn reported_permission_modes_become_the_session_mode(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        for (name, mode) in [
+            ("plan", PermissionMode::Plan),
+            ("acceptEdits", PermissionMode::AcceptEdits),
+            ("bypassPermissions", PermissionMode::FullAccess),
+            ("auto", PermissionMode::Auto),
+            ("default", PermissionMode::Ask),
+            ("not-a-mode", PermissionMode::Ask),
+        ] {
+            feed_events(
+                &session,
+                vec![AgentEvent::PermissionModeReported { mode: name.into() }],
+                cx,
+            );
+            session.read_with(cx, |session, _| {
+                assert_eq!(session.settings().permission, mode, "reported {name}")
+            });
+        }
     }
 
     #[test]

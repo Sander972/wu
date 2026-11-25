@@ -38,11 +38,13 @@ pub const PERMISSION_HEADER: &str = "Permission";
 pub const QUESTION_HEADER: &str = n!("Question");
 pub const DENY_STOP: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
 pub const DENY_REASON_PREFIX: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). The user provided the following reason for the rejection: ";
+pub const KEEP_PLANNING: &str = "User chose to stay in plan mode and continue planning";
 
 fn permission_question(request: &ControlRequestBody) -> UserInputQuestion {
     let tool_name = request.tool_name.as_str();
     let call = normalize::decode_tool_use(tool_name, &request.input);
     let question = match &call {
+        _ if tool_name == "ExitPlanMode" => t!("Ready to code?"),
         crate::ToolCall::Exec { command } => t!("Run `{command}`?", command = command),
         crate::ToolCall::WriteFile { path, .. } => t!("Write {path}?", path = path),
         crate::ToolCall::EditFile { path, .. } => t!("Edit {path}?", path = path),
@@ -1453,6 +1455,14 @@ fn live_permission_mode_name(permission: PermissionMode, launched_bypass: bool) 
     }
 }
 
+/// The CLI names its mode when it starts, so the session can follow it rather than keep the one it asked for.
+pub fn permission_mode_from_name(name: &str) -> Option<PermissionMode> {
+    PermissionMode::choices(HarnessId::ClaudeCode)
+        .iter()
+        .copied()
+        .find(|mode| permission_mode_name(*mode) == name)
+}
+
 fn permission_mode_name(permission: PermissionMode) -> &'static str {
     match permission.for_harness(HarnessId::ClaudeCode) {
         PermissionMode::Ask => "default",
@@ -2115,6 +2125,32 @@ mod tests {
             ["--permission-mode", "plan"]
         );
         assert_eq!(permission_mode_name(PermissionMode::Plan), "plan");
+    }
+
+    #[test]
+    fn reported_mode_names_map_back_to_modes() {
+        for mode in PermissionMode::choices(HarnessId::ClaudeCode) {
+            assert_eq!(
+                permission_mode_from_name(permission_mode_name(*mode)),
+                Some(*mode)
+            );
+        }
+        assert_eq!(
+            permission_mode_from_name("default"),
+            Some(PermissionMode::Ask)
+        );
+        assert_eq!(permission_mode_from_name("unknown"), None);
+    }
+
+    #[test]
+    fn plan_approval_asks_ready_to_code() {
+        let request: ControlRequestBody = serde_json::from_value(json!({
+            "subtype": "can_use_tool",
+            "tool_name": "ExitPlanMode",
+            "input": {"plan": "# Plan"},
+        }))
+        .expect("a can_use_tool request");
+        assert_eq!(permission_question(&request).question, "Ready to code?");
     }
 
     #[test]

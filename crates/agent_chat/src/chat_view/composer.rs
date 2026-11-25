@@ -4,7 +4,7 @@ use crate::{
     chat_style::{composer_surface, icon, icon_size_px, tracked_upper, working_animation},
     session::AgentUpdateStatus,
 };
-use agent_harness::{PermissionDecision, PermissionPrompt};
+use agent_harness::{PermissionDecision, PermissionMode, PermissionPrompt};
 use i18n::t;
 
 const PERMISSION_DESTINATIONS: [&str; 4] = [
@@ -36,6 +36,13 @@ pub(super) fn bash_command(prompt: &PermissionPrompt) -> Option<&str> {
         return None;
     }
     prompt.input.get("command")?.as_str()
+}
+
+pub(super) fn plan_text(prompt: &PermissionPrompt) -> Option<&str> {
+    if prompt.tool_name != "ExitPlanMode" {
+        return None;
+    }
+    prompt.input.get("plan")?.as_str()
 }
 
 pub(super) fn suggested_destination(suggestions: &[serde_json::Value]) -> String {
@@ -114,6 +121,59 @@ fn permission_decision(
     PermissionDecision::Allow {
         updated_input,
         updated_permissions,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlanComment {
+    pub quote: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PlanChoice {
+    AcceptEdits,
+    Auto,
+    Manual,
+    KeepPlanning {
+        feedback: String,
+        comments: Vec<PlanComment>,
+    },
+}
+
+/// The mode, when present, is switched by wu before answering; manual approval instead lets the CLI leave plan mode through `setMode`.
+pub(crate) fn plan_decision(choice: &PlanChoice) -> (Option<PermissionMode>, PermissionDecision) {
+    let allow = |updated_permissions| PermissionDecision::Allow {
+        updated_input: None,
+        updated_permissions,
+    };
+    match choice {
+        PlanChoice::AcceptEdits => (Some(PermissionMode::AcceptEdits), allow(Vec::new())),
+        PlanChoice::Auto => (Some(PermissionMode::Auto), allow(Vec::new())),
+        PlanChoice::Manual => (
+            None,
+            allow(vec![serde_json::json!({
+                "type": "setMode",
+                "mode": "default",
+                "destination": "session",
+            })]),
+        ),
+        PlanChoice::KeepPlanning { feedback, comments } => {
+            let feedback = feedback.trim();
+            let mut message = if feedback.is_empty() {
+                agent_harness::claude::KEEP_PLANNING.to_string()
+            } else {
+                format!("{}{feedback}", agent_harness::claude::DENY_REASON_PREFIX)
+            };
+            if !comments.is_empty() {
+                message.push_str("\n\nComments on the plan:");
+                for comment in comments {
+                    message.push_str(&format!("\n[Re: \"{}\"] {}", comment.quote, comment.text));
+                }
+            }
+            let interrupt = feedback.is_empty() && comments.is_empty();
+            (None, PermissionDecision::Deny { message, interrupt })
+        }
     }
 }
 
@@ -728,6 +788,15 @@ impl ChatView {
             let Some(editors) = self.permission_editors.get(&question_id) else {
                 return;
             };
+            if pending.is_plan() {
+                if editors.reason.focus_handle(cx).is_focused(window)
+                    && !editors.reason.read(cx).text(cx).trim().is_empty()
+                {
+                    let choice = self.keep_planning(&question_id, cx);
+                    self.decide_plan_card(&pending_id, choice, cx);
+                }
+                return;
+            }
             let choice = if editors.reason.focus_handle(cx).is_focused(window) {
                 if editors.reason.read(cx).text(cx).trim().is_empty() {
                     return;
@@ -1103,15 +1172,9 @@ impl ChatView {
             .map_or(px(QUESTION_EXPANDED_FALLBACK), |bounds| {
                 bounds.size.height * QUESTION_OPTIONS_FRACTION
             });
-        let question_focus = self.question_focus.clone();
-        let mut key_context = KeyContext::default();
-        key_context.add("AgentQuestion");
-        if AgentChatSettings::get_global(cx).send_with == AgentChatSendKey::ModifierEnter {
-            key_context.add("send_with_modifier");
-        }
         v_flex()
             .track_focus(&self.question_focus)
-            .key_context(key_context)
+            .key_context(question_key_context(cx))
             .w_full()
             .rounded(px(COMPOSER_RADIUS))
             .border_1()
@@ -1245,24 +1308,7 @@ impl ChatView {
                     .child(
                         h_flex()
                             .gap(px(8.))
-                            .child(
-                                div()
-                                    .id("agent-question-stop")
-                                    .px(px(12.))
-                                    .py(px(6.))
-                                    .rounded(px(8.))
-                                    .cursor_pointer()
-                                    .text_size(ui(13.))
-                                    .text_color(colors.text_muted)
-                                    .hover(move |style| style.bg(back_hover).text_color(colors.text))
-                                    .tooltip(move |_, cx| {
-                                        Tooltip::for_action_in(t!("Stop"), &Stop, &question_focus, cx)
-                                    })
-                                    .child(t!("Stop"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.stop(&Stop, window, cx)
-                                    })),
-                            )
+                            .child(self.render_question_stop(cx))
                             .when(!is_permission, |this| {
                                 let pending_id = pending_id.clone();
                                 this.child(
@@ -1294,6 +1340,183 @@ impl ChatView {
             )
             .into_any_element()
     }
+
+    fn render_question_stop(&self, cx: &Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let hover = ink(0.06, cx);
+        let question_focus = self.question_focus.clone();
+        div()
+            .id("agent-question-stop")
+            .px(px(12.))
+            .py(px(6.))
+            .rounded(px(8.))
+            .cursor_pointer()
+            .text_size(ui(13.))
+            .text_color(colors.text_muted)
+            .hover(move |style| style.bg(hover).text_color(colors.text))
+            .tooltip(move |_, cx| Tooltip::for_action_in(t!("Stop"), &Stop, &question_focus, cx))
+            .child(t!("Stop"))
+            .on_click(cx.listener(|this, _, window, cx| this.stop(&Stop, window, cx)))
+    }
+
+    fn keep_planning(&self, question_id: &str, cx: &App) -> PlanChoice {
+        let editors = self.permission_editors.get(question_id);
+        PlanChoice::KeepPlanning {
+            feedback: editors.map_or_else(String::new, |editors| editors.reason.read(cx).text(cx)),
+            comments: editors.map_or_else(Vec::new, |editors| editors.plan_comments.clone()),
+        }
+    }
+
+    fn decide_plan_card(&mut self, pending_id: &str, choice: PlanChoice, cx: &mut Context<Self>) {
+        let (mode, decision) = plan_decision(&choice);
+        self.session.update(cx, |session, cx| {
+            session.decide_plan(pending_id, mode, decision, cx)
+        });
+    }
+
+    pub(super) fn render_plan_panel(
+        &self,
+        pending: &PendingQuestion,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors();
+        let pending_id: SharedString = pending.id().to_string().into();
+        let Some(question) = pending.questions.first() else {
+            return div().into_any_element();
+        };
+        let editors = self.permission_editors.get(&question.id);
+        let has_comments = editors.is_some_and(|editors| !editors.plan_comments.is_empty());
+        let mut choices = Vec::new();
+        // Comments only reach Claude with "keep planning", so approving would drop them.
+        if !has_comments {
+            choices.push(if self.session.read(cx).plan_approval_uses_auto() {
+                (t!("Yes, and use auto mode"), Some(PlanChoice::Auto))
+            } else {
+                (
+                    t!("Yes, and auto-accept edits"),
+                    Some(PlanChoice::AcceptEdits),
+                )
+            });
+            choices.push((
+                t!("Yes, and manually approve edits"),
+                Some(PlanChoice::Manual),
+            ));
+        }
+        choices.push((t!("No, keep planning"), None));
+        let options: Vec<AnyElement> = choices
+            .into_iter()
+            .enumerate()
+            .map(|(position, (label, choice))| {
+                let pending_id = pending_id.clone();
+                let question_id = question.id.clone();
+                self.render_option_row(
+                    format!("plan-{pending_id}-{position}").into(),
+                    position + 1,
+                    label.into_any_element(),
+                    false,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let choice = choice
+                        .clone()
+                        .unwrap_or_else(|| this.keep_planning(&question_id, cx));
+                    this.decide_plan_card(&pending_id, choice, cx)
+                }))
+                .into_any_element()
+            })
+            .collect();
+        let plan_max_height = self
+            .root_bounds
+            .get()
+            .map_or(px(QUESTION_EXPANDED_FALLBACK), |bounds| {
+                bounds.size.height * QUESTION_EXPANDED_FRACTION
+            });
+        v_flex()
+            .track_focus(&self.question_focus)
+            .key_context(question_key_context(cx))
+            .w_full()
+            .rounded(px(COMPOSER_RADIUS))
+            .border_1()
+            .border_color(colors.border)
+            .bg(composer_surface(cx))
+            .shadow_lg()
+            .child(
+                v_flex()
+                    .px(px(16.))
+                    .pt(px(16.))
+                    .child(
+                        div()
+                            .text_size(ui(10.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.text_muted.opacity(0.6))
+                            .child(tracked_upper(&t!("Plan"))),
+                    )
+                    .child(self.render_question_text(&question.id, &question.question, cx))
+                    .when_some(
+                        editors.and_then(|editors| editors.plan.clone()),
+                        |this, plan| {
+                            this.child(
+                                div()
+                                    .id(SharedString::from(format!("agent-plan-{}", question.id)))
+                                    .mt(px(8.))
+                                    .px(px(12.))
+                                    .py(px(8.))
+                                    .max_h(plan_max_height)
+                                    .overflow_y_scroll()
+                                    .rounded(px(8.))
+                                    .border_1()
+                                    .border_color(hairline(0.06, cx))
+                                    .bg(ink(0.025, cx))
+                                    .child(MarkdownElement::new(
+                                        plan,
+                                        Self::message_style(window, cx),
+                                    )),
+                            )
+                        },
+                    )
+                    .child(
+                        v_flex()
+                            .id("agent-plan-options")
+                            .mt(px(12.))
+                            .gap(px(4.))
+                            .children(options),
+                    )
+                    .when_some(
+                        editors.map(|editors| editors.reason.clone()),
+                        |this, editor| {
+                            this.child(
+                                div()
+                                    .mt(px(12.))
+                                    .border_t_1()
+                                    .border_color(hairline(0.06, cx))
+                                    .pt(px(12.))
+                                    .pb(px(4.))
+                                    .px(px(4.))
+                                    .child(editor),
+                            )
+                        },
+                    ),
+            )
+            .child(
+                h_flex()
+                    .px(px(16.))
+                    .pt(px(4.))
+                    .pb(px(16.))
+                    .justify_end()
+                    .child(self.render_question_stop(cx)),
+            )
+            .into_any_element()
+    }
+}
+
+fn question_key_context(cx: &App) -> KeyContext {
+    let mut key_context = KeyContext::default();
+    key_context.add("AgentQuestion");
+    if AgentChatSettings::get_global(cx).send_with == AgentChatSendKey::ModifierEnter {
+        key_context.add("send_with_modifier");
+    }
+    key_context
 }
 
 #[cfg(test)]
@@ -1436,6 +1659,115 @@ mod tests {
                 updated_input: None,
                 updated_permissions: Vec::new(),
             }
+        );
+    }
+
+    fn allow() -> PermissionDecision {
+        PermissionDecision::Allow {
+            updated_input: None,
+            updated_permissions: Vec::new(),
+        }
+    }
+
+    fn keep_planning(feedback: &str, comments: &[(&str, &str)]) -> PlanChoice {
+        PlanChoice::KeepPlanning {
+            feedback: feedback.into(),
+            comments: comments
+                .iter()
+                .map(|(quote, text)| PlanComment {
+                    quote: quote.to_string(),
+                    text: text.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn accepting_edits_switches_the_mode_and_allows() {
+        assert_eq!(
+            plan_decision(&PlanChoice::AcceptEdits),
+            (Some(PermissionMode::AcceptEdits), allow())
+        );
+    }
+
+    #[test]
+    fn auto_switches_the_mode_and_allows() {
+        assert_eq!(
+            plan_decision(&PlanChoice::Auto),
+            (Some(PermissionMode::Auto), allow())
+        );
+    }
+
+    #[test]
+    fn manual_approval_asks_the_cli_for_default_mode() {
+        assert_eq!(
+            plan_decision(&PlanChoice::Manual),
+            (
+                None,
+                PermissionDecision::Allow {
+                    updated_input: None,
+                    updated_permissions: vec![
+                        json!({"type": "setMode", "mode": "default", "destination": "session"})
+                    ],
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn keep_planning_without_feedback_stops() {
+        assert_eq!(
+            plan_decision(&keep_planning("  ", &[])),
+            (
+                None,
+                PermissionDecision::Deny {
+                    message: "User chose to stay in plan mode and continue planning".into(),
+                    interrupt: true,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn keep_planning_with_feedback_sends_the_reason() {
+        assert_eq!(
+            plan_decision(&keep_planning(" also update the help text ", &[])),
+            (
+                None,
+                PermissionDecision::Deny {
+                    message: format!(
+                        "{}also update the help text",
+                        agent_harness::claude::DENY_REASON_PREFIX
+                    ),
+                    interrupt: false,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn plan_comments_are_appended_one_per_line() {
+        let comments = [("step 2", "skip this"), ("tests", "add one for Windows")];
+        let list = "\n\nComments on the plan:\n[Re: \"step 2\"] skip this\n[Re: \"tests\"] add one for Windows";
+        assert_eq!(
+            plan_decision(&keep_planning("", &comments)),
+            (
+                None,
+                PermissionDecision::Deny {
+                    message: format!("User chose to stay in plan mode and continue planning{list}"),
+                    interrupt: false,
+                }
+            )
+        );
+        assert_eq!(
+            plan_decision(&keep_planning("shorter", &comments)),
+            (
+                None,
+                PermissionDecision::Deny {
+                    message: format!("{}shorter{list}", agent_harness::claude::DENY_REASON_PREFIX),
+                    interrupt: false,
+                }
+            )
         );
     }
 }

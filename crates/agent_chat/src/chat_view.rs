@@ -140,6 +140,8 @@ struct PermissionEditors {
     reason: Entity<Editor>,
     command: Option<Entity<Editor>>,
     destination: String,
+    plan: Option<Entity<Markdown>>,
+    plan_comments: Vec<composer::PlanComment>,
     _command_subscription: Option<Subscription>,
 }
 
@@ -544,7 +546,7 @@ impl ChatView {
             .list_prefs()
             .permission_destination
             .clone();
-        let permissions: Vec<(String, Option<String>, String)> = self
+        let permissions: Vec<(String, Option<String>, String, Option<String>)> = self
             .session
             .read(cx)
             .pending_questions()
@@ -558,11 +560,12 @@ impl ChatView {
                     default_destination
                         .clone()
                         .unwrap_or_else(|| composer::suggested_destination(&prompt.suggestions)),
+                    composer::plan_text(prompt).map(str::to_owned),
                 ))
             })
             .collect();
         self.permission_editors
-            .retain(|question_id, _| permissions.iter().any(|(id, _, _)| id == question_id));
+            .retain(|question_id, _| permissions.iter().any(|(id, _, _, _)| id == question_id));
         self.answer_editors.retain(|question_id, _| {
             free_text.iter().any(|(id, _, _)| id == question_id)
         });
@@ -571,7 +574,8 @@ impl ChatView {
         } else if !has_question && focus_was_in_question {
             window.focus(&self.composer.focus_handle(cx), cx);
         }
-        for (question_id, command, destination) in permissions {
+        let languages = self.project.read(cx).languages().clone();
+        for (question_id, command, destination, plan) in permissions {
             if self.permission_editors.contains_key(&question_id) {
                 continue;
             }
@@ -604,12 +608,17 @@ impl ChatView {
                     }
                 })
             });
+            let plan = plan.map(|plan| {
+                cx.new(|cx| Markdown::new(plan.into(), Some(languages.clone()), None, cx))
+            });
             self.permission_editors.insert(
                 question_id,
                 PermissionEditors {
                     reason,
                     command,
                     destination,
+                    plan,
+                    plan_comments: Vec::new(),
                     _command_subscription: command_subscription,
                 },
             );
@@ -4128,7 +4137,13 @@ impl Render for ChatView {
                 .pending_questions()
                 .iter()
                 .find(|pending| pending.id() == id)
-                .map(|pending| self.render_question_panel(pending, cx))
+                .map(|pending| {
+                    if pending.is_plan() {
+                        self.render_plan_panel(pending, window, cx)
+                    } else {
+                        self.render_question_panel(pending, cx)
+                    }
+                })
         }) {
             Some(panel) => panel,
             None => self.render_pill(DOCKED_COMPOSER_RADIUS, window, cx),
