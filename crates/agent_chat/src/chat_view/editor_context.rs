@@ -83,8 +83,8 @@ pub(super) struct EditorContextState {
     sent: Option<ShownContext>,
     dismissed: Option<ShownContext>,
     hidden: bool,
-    /// Blocks "Fix with Claude" added, sent with the next message whatever the chip shows.
-    fixes: Vec<String>,
+    /// What "Fix with Claude" put in the composer: its mention and the block that goes with it if the next message still mentions it.
+    fixes: Vec<(String, String)>,
     _active_editor: Option<Subscription>,
 }
 
@@ -179,7 +179,10 @@ pub(crate) fn applied_line_suffix(relative_path: &str, lines: Option<(u32, u32)>
 
 /// Quoting and the line suffix follow Claude Code: a path with whitespace or `:` is quoted with the suffix inside, and one containing `"` or `#` gets no suffix since the suffix could not be told apart.
 pub(crate) fn mention_text_with_lines(relative_path: &str, lines: Option<(u32, u32)>) -> String {
-    let suffix = applied_line_suffix(relative_path, lines);
+    quoted_mention(relative_path, &applied_line_suffix(relative_path, lines))
+}
+
+fn quoted_mention(relative_path: &str, suffix: &str) -> String {
     if relative_path.contains(char::is_whitespace) || relative_path.contains(':') {
         format!("@\"{relative_path}{suffix}\"")
     } else {
@@ -196,20 +199,20 @@ fn selected_lines(editor: &Editor, cx: &App) -> Option<(Range<Anchor>, u32, u32)
     }
     // A selection spanning several files has no single location.
     let (_, range) = snapshot.range_to_buffer_range(range)?;
-    // A selection of whole lines ends at the start of the next line, which isn't selected.
-    let end = if range.end.column == 0 && range.end.row > range.start.row {
+    Some((anchors, range.start.row + 1, last_line(&range)))
+}
+
+/// The 1-based last line of `range`. A range of whole lines ends at the start of the next line, which it doesn't cover.
+fn last_line(range: &Range<Point>) -> u32 {
+    if range.end.column == 0 && range.end.row > range.start.row {
         range.end.row
     } else {
         range.end.row + 1
-    };
-    Some((anchors, range.start.row + 1, end))
+    }
 }
 
-/// Each diagnostic is (start line, end line, severity, message), lines 1-based. Returns the composer text and the context block.
-pub(crate) fn fix_prompt(
-    relative_path: &str,
-    diagnostics: &[(u32, u32, String, String)],
-) -> (String, String) {
+/// The mention `fix_prompt` writes, with the `#L` suffix Claude Code uses for problems.
+fn fix_mention(relative_path: &str, diagnostics: &[(u32, u32, String, String)]) -> String {
     let start = diagnostics
         .iter()
         .map(|problem| problem.0)
@@ -220,6 +223,19 @@ pub(crate) fn fix_prompt(
         .map(|problem| problem.1)
         .max()
         .unwrap_or(start);
+    let suffix = if relative_path.contains(['"', '#']) {
+        String::new()
+    } else {
+        format!("#L{start}-{end}")
+    };
+    quoted_mention(relative_path, &suffix)
+}
+
+/// Each diagnostic is (start line, end line, severity, message), lines 1-based. Returns the composer text and the context block.
+pub(crate) fn fix_prompt(
+    relative_path: &str,
+    diagnostics: &[(u32, u32, String, String)],
+) -> (String, String) {
     let what = if diagnostics.len() == 1 {
         "this problem"
     } else {
@@ -231,7 +247,7 @@ pub(crate) fn fix_prompt(
         .collect::<Vec<_>>()
         .join("\n");
     (
-        format!("Fix {what} in @{relative_path}#L{start}-{end} "),
+        format!("Fix {what} in {} ", fix_mention(relative_path, diagnostics)),
         attachment,
     )
 }
@@ -253,7 +269,7 @@ fn fixable_problems(
             };
             Some((
                 entry.range.start.row + 1,
-                entry.range.end.row + 1,
+                last_line(&entry.range),
                 severity.to_string(),
                 entry.diagnostic.message.to_string(),
             ))
@@ -277,9 +293,13 @@ impl CodeActionProvider for FixWithClaude {
         cx: &mut App,
     ) -> Task<anyhow::Result<Vec<CodeAction>>> {
         let settings = AgentChatSettings::get_global(cx);
+        let buffer = buffer.read(cx);
         let offered = settings.enabled
             && settings.show_fix_actions
-            && !fixable_problems(buffer.read(cx), range.clone()).is_empty();
+            && project::File::from_dyn(buffer.file())
+                .and_then(|file| file.as_local())
+                .is_some()
+            && !fixable_problems(buffer, range.clone()).is_empty();
         let action = offered.then(|| CodeAction {
             server_id: LanguageServerId(0),
             range,
@@ -380,12 +400,11 @@ impl ChatView {
         if self.editing_queued.is_some() || agent_harness::leading_command(text).is_some() {
             return Vec::new();
         }
-        let mut blocks = std::mem::take(&mut self.editor_context.fixes);
         let on_chip = self.editor_context.shown().cloned();
         self.refresh_editor_context(cx);
         let state = &mut self.editor_context;
         if state.hidden {
-            return blocks;
+            return Vec::new();
         }
         // A context that changed since the chip last showed it waits for the next message, once the chip shows it.
         let Some(shown) = state
@@ -393,15 +412,27 @@ impl ChatView {
             .filter(|shown| Some(*shown) == on_chip.as_ref())
             .cloned()
         else {
-            return blocks;
+            return Vec::new();
         };
         let Some(context) = shown.full(cx) else {
-            return blocks;
+            return Vec::new();
         };
         state.sent = Some(shown);
         cx.notify();
-        blocks.push(context_block(&context));
-        blocks
+        vec![context_block(&context)]
+    }
+
+    /// The "Fix with Claude" blocks whose mention the message still has. Every send clears them, commands included, so none outlives the message it was made for.
+    pub(super) fn take_fix_context(&mut self, text: &str) -> Vec<String> {
+        let fixes = std::mem::take(&mut self.editor_context.fixes);
+        if self.editing_queued.is_some() || agent_harness::leading_command(text).is_some() {
+            return Vec::new();
+        }
+        fixes
+            .into_iter()
+            .filter(|(mention, _)| text.contains(mention.as_str()))
+            .map(|(_, block)| block)
+            .collect()
     }
 
     /// Fills the composer with a request to fix `problems` in `path`, never sending it.
@@ -413,9 +444,12 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) {
         let cwd = self.session.read(cx).metadata().cwd.clone();
-        let (text, block) = fix_prompt(&relative_mention_path(path, false, &cwd), problems);
+        let relative_path = relative_mention_path(path, false, &cwd);
+        let (text, block) = fix_prompt(&relative_path, problems);
         self.insert_text_at_cursor(text.trim_end(), window, cx);
-        self.editor_context.fixes.push(block);
+        self.editor_context
+            .fixes
+            .push((fix_mention(&relative_path, problems), block));
     }
 
     /// The agent forgets an edited message, so its context goes out again.
@@ -539,12 +573,19 @@ mod tests {
             )
         );
         assert_eq!(
-            fix_prompt("src/a.rs", &[warning, error]),
+            fix_prompt("src/a.rs", &[warning, error.clone()]),
             (
                 "Fix these problems in @src/a.rs#L3-8 ".to_string(),
                 "warning: unused variable (line 7)\nerror: mismatched types (line 3)".to_string()
             )
         );
+        for (path, expected) in [
+            ("my file.rs", "Fix this problem in @\"my file.rs#L3-3\" "),
+            ("C:/x/a.rs", "Fix this problem in @\"C:/x/a.rs#L3-3\" "),
+            ("a#b.rs", "Fix this problem in @a#b.rs "),
+        ] {
+            assert_eq!(fix_prompt(path, std::slice::from_ref(&error)).0, expected);
+        }
     }
 
     #[test]

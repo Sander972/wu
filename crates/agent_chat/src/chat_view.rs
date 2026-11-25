@@ -1019,6 +1019,7 @@ impl ChatView {
         }
         self.composer
             .update(cx, |editor, cx| editor.clear(window, cx));
+        let fix_context = self.take_fix_context(&text);
         if self.attachments.is_empty()
             && self.editing_queued.is_none()
             && let Some(command) = app_command_for_text(&text, &self.command_items(cx))
@@ -1036,7 +1037,8 @@ impl ChatView {
             .into_iter()
             .filter(|skill| text.contains(&format!("${}", skill.name)))
             .collect();
-        let context = self.take_editor_context(&text, cx);
+        let mut context = fix_context;
+        context.extend(self.take_editor_context(&text, cx));
         let prompt = Prompt {
             text,
             attachments: std::mem::take(&mut self.attachments),
@@ -6319,6 +6321,15 @@ mod tests {
         };
         assert!(offered(0, cx), "the editor lists the action on the error");
         assert!(!offered(2, cx));
+
+        cx.update(|_, cx| {
+            <settings::SettingsStore as gpui::UpdateGlobal>::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.agent_chat.get_or_insert_default().show_fix_actions = Some(false);
+                })
+            })
+        });
+        assert!(fix_actions(&buffer, 0, cx).await.is_empty());
     }
 
     #[gpui::test]
@@ -6326,15 +6337,18 @@ mod tests {
         let files = serde_json::json!({ "main.rs": FOUR_LINES });
         let (view, editor, directory, cx) = editor_context_chat(files, "/proj/main.rs", cx).await;
         let buffer = add_error_on_first_line(&editor, cx);
-        let action = fix_actions(&buffer, 0, cx)
-            .await
-            .pop()
-            .expect("a fix action");
-        let apply = editor.update_in(cx, |_, window, cx| {
-            FixWithClaude.apply_code_action(buffer.clone(), action, true, window, cx)
-        });
-        apply.await.expect("applied");
-        cx.run_until_parked();
+        let apply_fix = async |cx: &mut VisualTestContext| {
+            let action = fix_actions(&buffer, 0, cx)
+                .await
+                .pop()
+                .expect("a fix action");
+            let apply = editor.update_in(cx, |_, window, cx| {
+                FixWithClaude.apply_code_action(buffer.clone(), action, true, window, cx)
+            });
+            apply.await.expect("applied");
+            cx.run_until_parked();
+        };
+        apply_fix(cx).await;
 
         let composer = view.read_with(cx, |view, cx| view.composer_text_for_test(cx));
         assert!(
@@ -6350,5 +6364,13 @@ mod tests {
         assert!(sent.contains("main.rs#L1-1 scenario:record"), "{sent}");
         let next = send_and_record(&view, directory.path(), "and again", cx);
         assert!(!next.contains("mismatched types"), "{next}");
+
+        apply_fix(cx).await;
+        view.update_in(cx, |view, window, cx| {
+            view.composer
+                .update(cx, |composer, cx| composer.clear(window, cx))
+        });
+        let unrelated = send_and_record(&view, directory.path(), "something else", cx);
+        assert!(!unrelated.contains("mismatched types"), "{unrelated}");
     }
 }
