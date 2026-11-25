@@ -89,10 +89,12 @@ pub(crate) enum AppCommand {
     Terminal,
     Stop,
     Plan { task: Option<String>, open: bool },
+    Fork { text: Option<String> },
+    Rewind,
 }
 
 impl AppCommand {
-    const ALL: [AppCommand; 9] = [
+    const ALL: [AppCommand; 11] = [
         AppCommand::Model,
         AppCommand::New,
         AppCommand::Resume,
@@ -105,6 +107,8 @@ impl AppCommand {
             task: None,
             open: false,
         },
+        AppCommand::Fork { text: None },
+        AppCommand::Rewind,
     ];
 
     fn name(&self) -> &'static str {
@@ -118,6 +122,8 @@ impl AppCommand {
             AppCommand::Terminal => "terminal",
             AppCommand::Stop => "stop",
             AppCommand::Plan { .. } => "plan",
+            AppCommand::Fork { .. } => "fork",
+            AppCommand::Rewind => "rewind",
         }
     }
 
@@ -132,6 +138,8 @@ impl AppCommand {
             AppCommand::Terminal => t!("Wu: open a terminal"),
             AppCommand::Stop => t!("Wu: stop the agent"),
             AppCommand::Plan { .. } => t!("Wu: plan before making changes"),
+            AppCommand::Fork { .. } => t!("Wu: fork this chat"),
+            AppCommand::Rewind => t!("Wu: rewind code or fork from a message"),
         }
     }
 
@@ -146,7 +154,9 @@ impl AppCommand {
             | AppCommand::New
             | AppCommand::Resume
             | AppCommand::Stop
-            | AppCommand::Plan { .. } => None,
+            | AppCommand::Plan { .. }
+            | AppCommand::Fork { .. }
+            | AppCommand::Rewind => None,
         }
     }
 }
@@ -224,6 +234,11 @@ pub(crate) fn app_command_for_text(text: &str, items: &[CommandItem]) -> Option<
             Some(AppCommand::Plan {
                 task: (!argument.is_empty() && argument != "open").then(|| argument.to_string()),
                 open: argument == "open",
+            })
+        }
+        CommandTarget::App(AppCommand::Fork { .. }) if item.name == name => {
+            Some(AppCommand::Fork {
+                text: (!argument.is_empty()).then(|| argument.to_string()),
             })
         }
         CommandTarget::App(command) if item.name == name && argument.is_empty() => {
@@ -318,6 +333,25 @@ mod tests {
         assert_eq!(
             app_command_for_text("/plan fix the build", &items),
             Some(plan(Some("fix the build"), false))
+        );
+    }
+
+    #[test]
+    fn fork_takes_text_for_the_new_composer() {
+        let items = command_items(&[]);
+        assert_eq!(
+            app_command_for_text("/fork", &items),
+            Some(AppCommand::Fork { text: None })
+        );
+        assert_eq!(
+            app_command_for_text("/fork try again", &items),
+            Some(AppCommand::Fork {
+                text: Some("try again".into())
+            })
+        );
+        assert_eq!(
+            app_command_for_text("/rewind", &items),
+            Some(AppCommand::Rewind)
         );
     }
 

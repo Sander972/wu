@@ -52,6 +52,11 @@ const REWOUND_NOTICE: &str = n!("Rewound {count} files to this point.");
 const NO_CHECKPOINT_NOTICE: &str = n!("This message has no checkpoint to rewind to.");
 const STILL_WORKING_NOTICE: &str = n!("The agent is still working, so nothing was rewound.");
 const REWIND_REFUSED_NOTICE: &str = n!("Claude can't rewind the code to this message.");
+const NOTHING_TO_REWIND_NOTICE: &str =
+    n!("No files changed since this message, so there is nothing to rewind.");
+const REWIND_STALE_NOTICE: &str =
+    n!("The files to rewind changed since you confirmed, so nothing was rewound.");
+const ALREADY_REWINDING_NOTICE: &str = n!("A rewind is already running.");
 
 pub(crate) fn display_title(title: &str) -> SharedString {
     if title.is_empty() {
@@ -1068,6 +1073,13 @@ pub struct RewindPreview {
     pub error: Option<String>,
 }
 
+impl RewindPreview {
+    /// Claude can report an error even while saying it can rewind.
+    pub fn succeeded(&self) -> bool {
+        self.can_rewind && self.error.is_none()
+    }
+}
+
 /// The agent answered a control request with an error, unlike a stop or a timeout.
 #[derive(Debug)]
 struct ControlRefused(String);
@@ -1199,6 +1211,9 @@ pub struct AgentSession {
     turn_prompts: usize,
     turn_prompt_id: Option<String>,
     editable_prompt: Option<String>,
+    rewinding: bool,
+    /// Text for the next chat view to put in its composer, unsent.
+    draft: Option<Prompt>,
     queue: Vec<QueuedMessage>,
     next_queue_id: u64,
     editing_queued: Option<u64>,
@@ -1272,6 +1287,8 @@ impl AgentSession {
             turn_prompts: 0,
             turn_prompt_id: None,
             editable_prompt: None,
+            rewinding: false,
+            draft: None,
             queue: saved_queue
                 .into_iter()
                 .enumerate()
@@ -1755,7 +1772,15 @@ impl AgentSession {
         Some(prompt)
     }
 
-    fn last_user_index(&self) -> Option<usize> {
+    pub fn take_draft(&mut self) -> Option<Prompt> {
+        self.draft.take()
+    }
+
+    pub fn set_draft(&mut self, draft: Prompt) {
+        self.draft = Some(draft);
+    }
+
+    pub fn last_user_index(&self) -> Option<usize> {
         self.transcript
             .entries
             .iter()
@@ -2209,81 +2234,112 @@ impl AgentSession {
         entry_index: usize,
         cx: &mut Context<Self>,
     ) -> Task<Result<RewindPreview>> {
-        let preview = self.rewind_files(entry_index, true, cx);
+        let preview = match self.checkpoint_at(entry_index) {
+            Ok(prompt_id) => self.rewind_files(prompt_id, true, cx),
+            Err(error) => Task::ready(Err(error)),
+        };
         cx.spawn(async move |this, cx| {
             let preview = preview.await;
-            this.update(cx, |session, cx| {
-                session.report_rewind_refusal(&preview, cx)
+            this.update(cx, |session, cx| match &preview {
+                Ok(preview) if preview.succeeded() && preview.files_changed.is_empty() => {
+                    session.push_notice(NOTHING_TO_REWIND_NOTICE.to_string(), false, cx)
+                }
+                _ => session.report_rewind_refusal(&preview, cx),
             })?;
             preview
         })
     }
 
-    /// Restores the files to how they were at this user message, after a dry run confirms Claude can.
+    /// Restores the files to how they were at this user message, once a fresh dry run still lists the `confirmed` files.
     pub fn rewind_code(
         &mut self,
         entry_index: usize,
+        confirmed: Vec<String>,
         cx: &mut Context<Self>,
     ) -> Task<Result<RewindPreview>> {
+        // Resolved now, as edits and retries while the turn stops can shift the entries.
+        let prompt_id = if self.rewinding {
+            Err(anyhow::anyhow!(ALREADY_REWINDING_NOTICE))
+        } else {
+            self.checkpoint_at(entry_index)
+        };
+        let prompt_id = match prompt_id {
+            Ok(prompt_id) => prompt_id,
+            Err(error) => {
+                let refused = Err(error);
+                self.report_rewind_refusal(&refused, cx);
+                return Task::ready(refused);
+            }
+        };
+        self.rewinding = true;
         // A running turn could keep editing the files being restored.
         if self.working {
             self.stop(cx);
         }
         cx.spawn(async move |this, cx| {
-            let deadline = Instant::now() + STOP_IN_PLACE_TIMEOUT + REWIND_STOP_GRACE;
-            while this.read_with(cx, |session, _| session.working)? {
-                if Instant::now() >= deadline {
-                    let refused: Result<RewindPreview> =
-                        Err(anyhow::anyhow!(STILL_WORKING_NOTICE));
-                    this.update(cx, |session, cx| {
-                        session.report_rewind_refusal(&refused, cx)
-                    })?;
-                    return refused;
+            let rewound: Result<RewindPreview> = async {
+                let deadline = Instant::now() + STOP_IN_PLACE_TIMEOUT + REWIND_STOP_GRACE;
+                while this.read_with(cx, |session, _| session.working)? {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!(STILL_WORKING_NOTICE);
+                    }
+                    cx.background_executor().timer(REWIND_IDLE_POLL).await;
                 }
-                cx.background_executor().timer(REWIND_IDLE_POLL).await;
-            }
-            let preview = this
-                .update(cx, |session, cx| session.rewind_preview(entry_index, cx))?
-                .await?;
-            if !preview.can_rewind {
-                return Ok(preview);
-            }
-            let rewound = this
-                .update(cx, |session, cx| {
+                // The user may have confirmed a preview taken while the turn was still editing.
+                let preview = this
+                    .update(cx, |session, cx| {
+                        session.rewind_files(prompt_id.clone(), true, cx)
+                    })?
+                    .await?;
+                if !preview.succeeded() {
+                    return Ok(preview);
+                }
+                if preview.files_changed != confirmed {
+                    anyhow::bail!(REWIND_STALE_NOTICE);
+                }
+                this.update(cx, |session, cx| {
                     if session.working {
                         Task::ready(Err(anyhow::anyhow!(STILL_WORKING_NOTICE)))
                     } else {
-                        session.rewind_files(entry_index, false, cx)
+                        session.rewind_files(prompt_id, false, cx)
                     }
                 })?
-                .await;
-            this.update(cx, |session, cx| match &rewound {
-                Ok(rewound) if rewound.can_rewind => {
-                    let notice = i18n::format(
-                        SharedString::new_static(REWOUND_NOTICE),
-                        &[("count", &rewound.files_changed.len())],
-                    );
-                    session.push_notice(notice.to_string(), false, cx);
+                .await
+            }
+            .await;
+            this.update(cx, |session, cx| {
+                session.rewinding = false;
+                match &rewound {
+                    Ok(rewound) if rewound.succeeded() => {
+                        let notice = i18n::format(
+                            SharedString::new_static(REWOUND_NOTICE),
+                            &[("count", &rewound.files_changed.len())],
+                        );
+                        session.push_notice(notice.to_string(), false, cx);
+                    }
+                    _ => session.report_rewind_refusal(&rewound, cx),
                 }
-                _ => session.report_rewind_refusal(&rewound, cx),
             })?;
             rewound
         })
     }
 
+    fn checkpoint_at(&self, entry_index: usize) -> Result<String> {
+        match self.entries().get(entry_index) {
+            Some(Entry::User {
+                prompt_id: Some(prompt_id),
+                ..
+            }) => Ok(prompt_id.clone()),
+            _ => Err(anyhow::anyhow!(NO_CHECKPOINT_NOTICE)),
+        }
+    }
+
     fn rewind_files(
         &mut self,
-        entry_index: usize,
+        prompt_id: String,
         dry_run: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<RewindPreview>> {
-        let Some(Entry::User {
-            prompt_id: Some(prompt_id),
-            ..
-        }) = self.entries().get(entry_index)
-        else {
-            return Task::ready(Err(anyhow::anyhow!(NO_CHECKPOINT_NOTICE)));
-        };
         let request = serde_json::json!({
             "subtype": "rewind_files",
             "user_message_id": prompt_id,
@@ -2295,7 +2351,7 @@ impl AgentSession {
 
     fn report_rewind_refusal(&mut self, result: &Result<RewindPreview>, cx: &mut Context<Self>) {
         let reason = match result {
-            Ok(preview) if preview.can_rewind => return,
+            Ok(preview) if preview.succeeded() => return,
             Ok(preview) => preview
                 .error
                 .clone()
@@ -4431,22 +4487,72 @@ impl AgentStore {
         side_chat: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<AgentSession>>> {
+        self.fork(id, side_chat, None, cx)
+    }
+
+    /// Forks the chat just before the user message at `entry_index`, with that message waiting unsent in the fork's composer.
+    pub fn fork_session_at(
+        &mut self,
+        id: &str,
+        entry_index: usize,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<AgentSession>>> {
+        self.fork(id, false, Some(entry_index), cx)
+    }
+
+    fn fork(
+        &mut self,
+        id: &str,
+        side_chat: bool,
+        entry_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<AgentSession>>> {
         let opening = self.open_session(id, cx);
         cx.spawn(async move |this, cx| {
             let parent = opening.await?;
             this.update(cx, |this, cx| {
-                let (parent_metadata, mut entries, parent_working) =
+                let (parent_metadata, mut entries, parent_working, resent) =
                     parent.read_with(cx, |parent, cx| {
                         let mut entries = parent.transcript.serialize(cx);
-                        if parent.is_working()
-                            && let Some(last_user) = entries
-                                .iter()
-                                .rposition(|entry| matches!(entry, SerializedEntry::User { .. }))
-                        {
-                            entries.truncate(last_user);
-                        }
-                        (parent.metadata.clone(), entries, parent.is_working())
-                    });
+                        let resent = match entry_index {
+                            Some(index) => {
+                                let Some(SerializedEntry::User {
+                                    text,
+                                    attachments,
+                                    skills,
+                                    prompt_id,
+                                    ..
+                                }) = entries.get(index)
+                                else {
+                                    anyhow::bail!("entry {index} is not a user message");
+                                };
+                                let prompt = Prompt {
+                                    text: text.clone(),
+                                    attachments: attachments.clone(),
+                                    skills: skills.clone(),
+                                };
+                                let prompt_id = prompt_id.clone();
+                                entries.truncate(index);
+                                Some((prompt, prompt_id))
+                            }
+                            None => {
+                                if parent.is_working()
+                                    && let Some(last_user) = entries.iter().rposition(|entry| {
+                                        matches!(entry, SerializedEntry::User { .. })
+                                    })
+                                {
+                                    entries.truncate(last_user);
+                                }
+                                None
+                            }
+                        };
+                        Ok((
+                            parent.metadata.clone(),
+                            entries,
+                            parent.is_working(),
+                            resent,
+                        ))
+                    })?;
                 let mut metadata = SessionMetadata::new(
                     parent_metadata.kind,
                     parent_metadata.cwd.clone(),
@@ -4458,8 +4564,11 @@ impl AgentStore {
                 metadata.project_root = parent_metadata.project_root.clone();
                 metadata.branch = parent_metadata.branch.clone();
                 metadata.fork_context = fork_context(&entries);
-                if !parent_working {
+                let dropped_prompt = resent.as_ref().map(|(_, prompt_id)| prompt_id.clone());
+                // Without the message's id the agent would copy the whole chat, so the fork sends its history instead.
+                if !parent_working && dropped_prompt != Some(None) {
                     metadata.fork_source = parent_metadata.native_session_id.clone();
+                    metadata.dropped_prompt = dropped_prompt.flatten();
                 }
                 let parent_title = if parent_metadata.title.is_empty() {
                     NEW_CHAT_TITLE.to_string()
@@ -4481,7 +4590,11 @@ impl AgentStore {
                     text: notice.to_string(),
                     is_error: false,
                 });
-                Ok(this.insert_session(metadata, SavedTranscript::EntriesOnly(entries), cx))
+                let fork = this.insert_session(metadata, SavedTranscript::EntriesOnly(entries), cx);
+                if let Some((prompt, _)) = resent {
+                    fork.update(cx, |fork, _| fork.set_draft(prompt));
+                }
+                Ok(fork)
             })?
         })
     }
@@ -5022,6 +5135,10 @@ pub(crate) mod tests {
             .collect()
     }
 
+    fn confirmed_files() -> Vec<String> {
+        vec!["/repo/src/a.rs".into(), "/repo/b.rs".into()]
+    }
+
     #[gpui::test]
     async fn rewind_preview_parses_counts(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -5045,7 +5162,9 @@ pub(crate) mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let session = session_with_message(directory.path(), Some("no-checkpoint"), cx);
         let result = session
-            .update(cx, |session, cx| session.rewind_code(0, cx))
+            .update(cx, |session, cx| {
+                session.rewind_code(0, confirmed_files(), cx)
+            })
             .await
             .expect("the CLI answered");
         assert!(!result.can_rewind);
@@ -5066,7 +5185,9 @@ pub(crate) mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let session = session_with_message(directory.path(), None, cx);
         let error = session
-            .update(cx, |session, cx| session.rewind_code(0, cx))
+            .update(cx, |session, cx| {
+                session.rewind_code(0, confirmed_files(), cx)
+            })
             .await
             .expect_err("no checkpoint to rewind to");
         assert_eq!(
@@ -5090,7 +5211,9 @@ pub(crate) mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let session = session_with_message(directory.path(), Some("p1"), cx);
         let result = session
-            .update(cx, |session, cx| session.rewind_code(0, cx))
+            .update(cx, |session, cx| {
+                session.rewind_code(0, confirmed_files(), cx)
+            })
             .await
             .expect("the CLI answered");
         assert!(result.can_rewind);
@@ -5122,7 +5245,7 @@ pub(crate) mod tests {
             if let Some(Entry::User { prompt_id, .. }) = session.transcript.entries.first_mut() {
                 *prompt_id = Some("p1".into());
             }
-            session.rewind_code(0, cx)
+            session.rewind_code(0, confirmed_files(), cx)
         });
         run_until(cx, |cx| {
             cx.executor().advance_clock(REWIND_IDLE_POLL);
@@ -5135,6 +5258,217 @@ pub(crate) mod tests {
             "no rewind reached a running turn: {requests:?}"
         );
         assert!(!session.read_with(cx, |session, _| session.is_working()));
+    }
+
+    #[gpui::test]
+    async fn rewind_code_keeps_the_message_it_was_given(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let session = session_with_message(directory.path(), Some("p1"), cx);
+        let rewound = session.update(cx, |session, cx| {
+            let rewound = session.rewind_code(0, confirmed_files(), cx);
+            session.transcript.push_notice("shifted".into(), false);
+            session.transcript.entries.rotate_right(1);
+            rewound
+        });
+        assert!(rewound.await.expect("the CLI answered").can_rewind);
+        let requests = rewind_requests(directory.path());
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.contains(r#""user_message_id":"p1""#))
+        );
+    }
+
+    #[gpui::test]
+    async fn rewind_refused_when_the_files_changed_since_confirming(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let session = session_with_message(directory.path(), Some("p1"), cx);
+        session
+            .update(cx, |session, cx| {
+                session.rewind_code(0, vec!["/repo/src/a.rs".into()], cx)
+            })
+            .await
+            .expect_err("the confirmation is stale");
+        session.read_with(cx, |session, cx| {
+            assert_eq!(
+                summarize(session.entries(), cx),
+                [
+                    "user: edit a file",
+                    "notice: The files to rewind changed since you confirmed, so nothing was rewound."
+                ]
+            );
+        });
+        let requests = rewind_requests(directory.path());
+        assert_eq!(requests.len(), 1, "only the dry run was sent: {requests:?}");
+    }
+
+    #[gpui::test]
+    async fn a_rewind_reply_with_an_error_is_a_failure(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let session = session_with_message(directory.path(), Some("rewind-error"), cx);
+        let result = session
+            .update(cx, |session, cx| {
+                session.rewind_code(0, vec!["/repo/b.rs".into()], cx)
+            })
+            .await
+            .expect("the CLI answered");
+        assert!(!result.succeeded());
+        session.read_with(cx, |session, cx| {
+            assert_eq!(
+                summarize(session.entries(), cx),
+                ["user: edit a file", "notice: Disk full"]
+            );
+        });
+        assert_eq!(rewind_requests(directory.path()).len(), 1);
+    }
+
+    #[gpui::test]
+    async fn a_preview_with_no_changed_files_says_so(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let session = session_with_message(directory.path(), Some("no-changes"), cx);
+        let preview = session
+            .update(cx, |session, cx| session.rewind_preview(0, cx))
+            .await
+            .expect("the CLI answered");
+        assert!(preview.succeeded() && preview.files_changed.is_empty());
+        session.read_with(cx, |session, cx| {
+            assert_eq!(
+                summarize(session.entries(), cx),
+                [
+                    "user: edit a file",
+                    "notice: No files changed since this message, so there is nothing to rewind."
+                ]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_second_rewind_is_refused_while_one_runs(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let session = session_with_message(directory.path(), Some("p1"), cx);
+        let (first, second) = session.update(cx, |session, cx| {
+            (
+                session.rewind_code(0, confirmed_files(), cx),
+                session.rewind_code(0, confirmed_files(), cx),
+            )
+        });
+        let refused = second.await.expect_err("already rewinding");
+        assert_eq!(refused.to_string(), "A rewind is already running.");
+        assert!(first.await.expect("the CLI answered").can_rewind);
+        assert_eq!(rewind_requests(directory.path()).len(), 2);
+        session
+            .update(cx, |session, cx| {
+                session.rewind_code(0, confirmed_files(), cx)
+            })
+            .await
+            .expect("a later rewind runs");
+        assert_eq!(rewind_requests(directory.path()).len(), 4);
+    }
+
+    fn parent_with_three_prompts(
+        directory: &Path,
+        cx: &mut TestAppContext,
+    ) -> (Entity<AgentStore>, String) {
+        let store = new_store(directory, cx);
+        let parent = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.to_path_buf(), cx)
+        });
+        for (text, id) in [("first", "p1"), ("second", "p2"), ("third", "p3")] {
+            feed_user(&parent, text, cx);
+            parent.update(cx, |session, _| {
+                if let Some(Entry::User { prompt_id, .. }) = session.transcript.entries.last_mut() {
+                    *prompt_id = Some(id.into());
+                }
+                session
+                    .transcript
+                    .push_notice(format!("reply to {text}"), false);
+            });
+        }
+        parent.update(cx, |session, cx| {
+            session.metadata.title = "Three prompts".into();
+            session.metadata.native_session_id = Some("sess-parent".into());
+            session.save_metadata(cx);
+        });
+        let parent_id = session_id(&parent, cx);
+        (store, parent_id)
+    }
+
+    #[gpui::test]
+    async fn fork_at_truncates_and_prefills(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (store, parent_id) = parent_with_three_prompts(directory.path(), cx);
+        let fork = store
+            .update(cx, |store, cx| store.fork_session_at(&parent_id, 2, cx))
+            .await
+            .expect("fork");
+        fork.update(cx, |fork, cx| {
+            assert_eq!(
+                summarize(fork.entries(), cx),
+                [
+                    "user: first",
+                    "notice: reply to first",
+                    "notice: Forked from \"Three prompts\""
+                ]
+            );
+            assert!(!fork.is_working());
+            assert_eq!(fork.metadata().title, "Three prompts (2)");
+            assert_eq!(
+                fork.metadata().parent_id.as_deref(),
+                Some(parent_id.as_str())
+            );
+            assert_eq!(fork.metadata().fork_source.as_deref(), Some("sess-parent"));
+            assert_eq!(fork.metadata().dropped_prompt.as_deref(), Some("p2"));
+            let context = fork.metadata().fork_context.clone().expect("history");
+            assert!(context.contains("first") && !context.contains("second"));
+            assert_eq!(fork.take_draft(), Some(Prompt::text("second")));
+            assert_eq!(fork.take_draft(), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn fork_at_first_message_starts_empty_with_prefill(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (store, parent_id) = parent_with_three_prompts(directory.path(), cx);
+        let fork = store
+            .update(cx, |store, cx| store.fork_session_at(&parent_id, 0, cx))
+            .await
+            .expect("fork");
+        fork.update(cx, |fork, cx| {
+            assert_eq!(
+                summarize(fork.entries(), cx),
+                ["notice: Forked from \"Three prompts\""]
+            );
+            assert_eq!(fork.metadata().fork_context, None);
+            assert_eq!(fork.metadata().dropped_prompt.as_deref(), Some("p1"));
+            assert_eq!(fork.take_draft(), Some(Prompt::text("first")));
+        });
+    }
+
+    #[gpui::test]
+    async fn fork_at_a_message_without_id_sends_the_history_instead(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (store, parent_id) = parent_with_three_prompts(directory.path(), cx);
+        let parent = store
+            .update(cx, |store, cx| store.open_session(&parent_id, cx))
+            .await
+            .expect("parent");
+        parent.update(cx, |session, _| {
+            if let Some(Entry::User { prompt_id, .. }) = session.transcript.entries.get_mut(2) {
+                *prompt_id = None;
+            }
+        });
+        let fork = store
+            .update(cx, |store, cx| store.fork_session_at(&parent_id, 2, cx))
+            .await
+            .expect("fork");
+        fork.read_with(cx, |fork, _| {
+            assert_eq!(fork.metadata().fork_source, None);
+            assert_eq!(fork.metadata().dropped_prompt, None);
+            assert!(fork.metadata().fork_context.is_some());
+        });
+        let not_a_message = store.update(cx, |store, cx| store.fork_session_at(&parent_id, 1, cx));
+        assert!(not_a_message.await.is_err());
     }
 
     #[gpui::test]

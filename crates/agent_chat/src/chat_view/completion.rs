@@ -180,10 +180,14 @@ impl ChatView {
         let (kind, cwd) = self.session_kind_and_cwd(cx);
         let catalog = self.store.read(cx).commands(kind, &cwd);
         let mut items = command_items(catalog.map_or(&[], |catalog| catalog.commands.as_slice()));
-        // Other agents have no plan mode: theirs would quietly fall back to Auto.
+        // Other agents have no plan mode, which would quietly fall back to Auto, and no file checkpoints.
         if kind != AgentKind::Claude {
-            items
-                .retain(|item| !matches!(item.target, CommandTarget::App(AppCommand::Plan { .. })));
+            items.retain(|item| {
+                !matches!(
+                    item.target,
+                    CommandTarget::App(AppCommand::Plan { .. } | AppCommand::Rewind)
+                )
+            });
         }
         items
     }
@@ -656,6 +660,24 @@ impl ChatView {
                         .update(cx, |session, cx| session.send_message(task, cx));
                     self.glide_to_bottom(cx);
                 }
+            }
+            AppCommand::Fork { text } => {
+                let id = self.session.read(cx).metadata().id.clone();
+                let fork = self
+                    .store
+                    .update(cx, |store, cx| store.fork_session(&id, false, cx));
+                self.open_fork(fork, text, window, cx);
+            }
+            AppCommand::Rewind => {
+                let Some(index) = self.session.read(cx).last_user_index() else {
+                    return;
+                };
+                let position = self
+                    .composer
+                    .read(cx)
+                    .last_bounds()
+                    .map_or_else(|| window.mouse_position(), |bounds| bounds.origin);
+                self.show_rewind_menu(index, position, window, cx);
             }
             AppCommand::Settings | AppCommand::Diff | AppCommand::Files | AppCommand::Terminal => {
                 let Some(name) = command.action_name() else {

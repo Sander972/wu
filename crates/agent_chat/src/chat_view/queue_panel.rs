@@ -136,7 +136,12 @@ impl ChatView {
         cx.notify();
     }
 
-    fn set_composer_prompt(&mut self, prompt: Prompt, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_composer_prompt(
+        &mut self,
+        prompt: Prompt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.composer
             .update(cx, |editor, cx| editor.set_text(prompt.text, window, cx));
         self.attachments = prompt.attachments;

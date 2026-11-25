@@ -99,8 +99,7 @@ async fn run_to_end(
     .expect("run finished in time")
 }
 
-#[tokio::test]
-async fn a_dropped_prompt_resumes_the_chat_just_before_it() {
+fn harness_with_saved_chat() -> (tempfile::TempDir, ClaudeHarness) {
     let config = tempfile::tempdir().expect("temporary directory");
     let project = config.path().join("projects").join("-tmp");
     std::fs::create_dir_all(&project).expect("project dir");
@@ -114,6 +113,12 @@ async fn a_dropped_prompt_resumes_the_chat_just_before_it() {
     let harness = ClaudeHarness::new()
         .with_executable(fixture_path())
         .with_config_dir(config.path());
+    (config, harness)
+}
+
+#[tokio::test]
+async fn a_dropped_prompt_resumes_the_chat_just_before_it() {
+    let (_config, harness) = harness_with_saved_chat();
     let reply = |events: &[AgentEvent]| -> String {
         events
             .iter()
@@ -158,6 +163,27 @@ async fn a_dropped_prompt_resumes_the_chat_just_before_it() {
         event,
         AgentEvent::Error { message } if message.contains("couldn't find your earlier message")
     )));
+}
+
+#[tokio::test]
+async fn fork_with_drop_prompt_resumes_at_the_earlier_message() {
+    let (_config, harness) = harness_with_saved_chat();
+
+    let mut fork = request("scenario:drop");
+    fork.fork = Some("sess-drop".into());
+    fork.drop_prompt = Some("typo".into());
+    let events = run_to_end(&harness, fork, controls("Allow").0).await;
+    assert_eq!(reply_text(&events), "at answer, forked from sess-drop");
+
+    let mut fork_at_first = request("scenario:drop");
+    fork_at_first.fork = Some("sess-drop".into());
+    fork_at_first.drop_prompt = Some("ask".into());
+    let events = run_to_end(&harness, fork_at_first, controls("Allow").0).await;
+    assert_eq!(
+        reply_text(&events),
+        "fresh",
+        "forking at the first prompt starts over"
+    );
 }
 
 #[tokio::test]

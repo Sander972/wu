@@ -33,6 +33,12 @@ answer_rewind() {
   *'"user_message_id":"no-checkpoint"'*)
     emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$(request_id "$1")\",\"response\":{\"canRewind\":false,\"error\":\"No checkpoint\"}}}"
     ;;
+  *'"user_message_id":"rewind-error"'*)
+    emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$(request_id "$1")\",\"response\":{\"canRewind\":true,\"error\":\"Disk full\",\"filesChanged\":[\"/repo/b.rs\"]}}}"
+    ;;
+  *'"user_message_id":"no-changes"'*)
+    emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$(request_id "$1")\",\"response\":{\"canRewind\":true,\"filesChanged\":[],\"insertions\":0,\"deletions\":0}}}"
+    ;;
   *)
     emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$(request_id "$1")\",\"response\":{\"canRewind\":true,\"filesChanged\":[\"/repo/src/a.rs\",\"/repo/b.rs\"],\"insertions\":3,\"deletions\":1}}}"
     ;;
@@ -328,9 +334,11 @@ case "$first" in
   for arg in "$@"; do
     case "$arg" in
       --resume-session-at=*) resumed="at ${arg#--resume-session-at=}" ;;
-      --resume=*) [ "$resumed" = fresh ] && resumed="whole" ;;
+      --resume=*) [ "$resumed" = fresh ] && resumed="whole"; source=${arg#--resume=} ;;
+      --fork-session) forked=true ;;
     esac
   done
+  [ -n "$forked" ] && resumed="$resumed, forked from $source"
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-drop"}'
   emit "{\"type\":\"user\",\"uuid\":\"$uuid\",\"parent_tool_use_id\":null,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"scenario:drop\"}]}}"
   emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"$resumed\"}}}"

@@ -445,6 +445,11 @@ impl ChatView {
             _subscriptions: subscriptions,
         };
         view.pin_default_settings(cx);
+        if view.subagent.is_none()
+            && let Some(draft) = view.session.update(cx, |session, _| session.take_draft())
+        {
+            view.set_composer_prompt(draft, window, cx);
+        }
         view.sync_answer_editors(window, cx);
         view.sync_transcript(cx);
         view.tab_state = Some(view.current_tab_state(cx));
@@ -2135,7 +2140,7 @@ impl ChatView {
             .into_any_element()
     }
 
-    fn show_rewind_menu(
+    pub(crate) fn show_rewind_menu(
         &mut self,
         index: usize,
         position: Point<Pixels>,
@@ -2144,25 +2149,82 @@ impl ChatView {
     ) {
         let view = cx.entity().downgrade();
         let menu = ContextMenu::build(window, cx, move |menu, _, _| {
-            menu.entry(t!("Rewind code to here"), None, move |window, cx| {
-                view.update(cx, |this, cx| this.rewind_code_to(index, window, cx))
-                    .log_err();
+            menu.entry(t!("Fork conversation from here"), None, {
+                let view = view.clone();
+                move |window, cx| {
+                    view.update(cx, |this, cx| this.fork_from(index, window, cx))
+                        .log_err();
+                }
             })
+            .entry(t!("Rewind code to here"), None, {
+                let view = view.clone();
+                move |window, cx| {
+                    view.update(cx, |this, cx| this.rewind_code_to(index, false, window, cx))
+                        .log_err();
+                }
+            })
+            .entry(
+                t!("Fork conversation and rewind code"),
+                None,
+                move |window, cx| {
+                    view.update(cx, |this, cx| this.rewind_code_to(index, true, window, cx))
+                        .log_err();
+                },
+            )
         });
         self.show_context_menu(menu, position, window, cx);
     }
 
-    fn rewind_code_to(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = self.session.read(cx).metadata().cwd.clone();
+    fn fork_from(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.session.read(cx).metadata().id.clone();
+        let fork = self
+            .store
+            .update(cx, |store, cx| store.fork_session_at(&id, index, cx));
+        self.open_fork(fork, None, window, cx);
+    }
+
+    pub(crate) fn open_fork(
+        &mut self,
+        fork: Task<anyhow::Result<Entity<AgentSession>>>,
+        draft: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let session = fork.await?;
+            workspace.update_in(cx, |workspace, window, cx| {
+                if let Some(draft) = draft {
+                    session.update(cx, |session, _| session.set_draft(Prompt::text(draft)));
+                }
+                crate::agent_panel::open_chat(workspace, session, window, cx)
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn rewind_code_to(
+        &mut self,
+        index: usize,
+        then_fork: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session = self.session.read(cx);
+        let cwd = session.metadata().cwd.clone();
+        let prompt_id = match session.entries().get(index) {
+            Some(Entry::User { prompt_id, .. }) => prompt_id.clone(),
+            _ => None,
+        };
         let preview = self
             .session
             .update(cx, |session, cx| session.rewind_preview(index, cx));
         cx.spawn_in(window, async move |this, cx| {
-            // A refused preview has already told the user why in the transcript.
+            // A refused or empty preview has already told the user why in the transcript.
             let Ok(preview) = preview.await else {
                 return anyhow::Ok(());
             };
-            if !preview.can_rewind {
+            if !preview.succeeded() || preview.files_changed.is_empty() {
                 return Ok(());
             }
             let answer = this.update_in(cx, |_, window, cx| {
@@ -2180,10 +2242,26 @@ impl ChatView {
             if answer.await.ok() != Some(0) {
                 return Ok(());
             }
-            this.update(cx, |this, cx| {
-                this.session
-                    .update(cx, |session, cx| session.rewind_code(index, cx))
-                    .detach_and_log_err(cx)
+            let rewound = this.update(cx, |this, cx| {
+                this.session.update(cx, |session, cx| {
+                    session.rewind_code(index, preview.files_changed, cx)
+                })
+            })?;
+            let rewound = rewound.await.is_ok_and(|rewound| rewound.succeeded());
+            if !rewound || !then_fork {
+                return Ok(());
+            }
+            this.update_in(cx, |this, window, cx| {
+                // The rewind waited for the turn to stop, which can move the message.
+                let index = this.session.read(cx).entries().iter().position(|entry| {
+                    matches!(
+                        entry,
+                        Entry::User { prompt_id: Some(id), .. } if Some(id) == prompt_id.as_ref()
+                    )
+                });
+                if let Some(index) = index {
+                    this.fork_from(index, window, cx);
+                }
             })
         })
         .detach_and_log_err(cx);
@@ -5764,8 +5842,8 @@ mod tests {
                     .is_some_and(|catalog| catalog.loaded)
             })
         });
-        assert_eq!(matches(&view, cx), ["review", "resume"]);
-        cx.simulate_keystrokes("down down enter");
+        assert_eq!(matches(&view, cx), ["review", "resume", "rewind"]);
+        cx.simulate_keystrokes("down down down enter");
         assert_eq!(composer_text(&view, cx), "/review ");
         let shown = view.update(cx, |view, cx| {
             view.composer.update(cx, |editor, cx| editor.display_text(cx))

@@ -398,7 +398,6 @@ const HIDDEN_COMMANDS: &[&str] = &[
     "reload-skills",
     "rename",
     "resume",
-    "rewind",
     "sandbox",
     "skill-doctor",
     "stats",
@@ -789,9 +788,10 @@ impl ClaudeHarness {
         let exe = self.resolve_executable()?;
         let mut resume_at = None;
         let mut drop_problem = None;
-        if let (Some(session_id), Some(prompt)) =
-            (request.resume.clone(), request.drop_prompt.take())
-        {
+        if let (Some(session_id), Some(prompt)) = (
+            request.resume.clone().or_else(|| request.fork.clone()),
+            request.drop_prompt.take(),
+        ) {
             let config_dir = self.config_dir();
             let point = tokio::task::spawn_blocking(move || {
                 history::resume_point(&config_dir, &session_id, &prompt)
@@ -800,7 +800,10 @@ impl ClaudeHarness {
             .unwrap_or(history::ResumePoint::NotFound);
             match point {
                 history::ResumePoint::At(id) => resume_at = Some(id),
-                history::ResumePoint::Empty => request.resume = None,
+                history::ResumePoint::Empty => {
+                    request.resume = None;
+                    request.fork = None;
+                }
                 history::ResumePoint::NotFound => drop_problem = Some(
                     t!("Claude Code couldn't find your earlier message, so it may still see it.")
                         .to_string(),
