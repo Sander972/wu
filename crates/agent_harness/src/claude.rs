@@ -1456,6 +1456,7 @@ fn live_permission_mode_name(permission: PermissionMode, launched_bypass: bool) 
 fn permission_mode_name(permission: PermissionMode) -> &'static str {
     match permission.for_harness(HarnessId::ClaudeCode) {
         PermissionMode::Ask => "default",
+        PermissionMode::Plan => "plan",
         PermissionMode::AcceptEdits => "acceptEdits",
         PermissionMode::DontAsk => "dontAsk",
         PermissionMode::FullAccess => "bypassPermissions",
@@ -1466,6 +1467,7 @@ fn permission_mode_name(permission: PermissionMode) -> &'static str {
 fn permission_args(permission: PermissionMode) -> &'static [&'static str] {
     match permission.for_harness(HarnessId::ClaudeCode) {
         PermissionMode::Ask => &["--permission-mode", "default"],
+        PermissionMode::Plan => &["--permission-mode", "plan"],
         PermissionMode::AcceptEdits => &["--permission-mode", "acceptEdits"],
         PermissionMode::DontAsk => &["--permission-mode", "dontAsk"],
         PermissionMode::FullAccess => &[
@@ -2107,10 +2109,20 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_uses_the_plan_flag() {
+        assert_eq!(
+            permission_args(PermissionMode::Plan),
+            ["--permission-mode", "plan"]
+        );
+        assert_eq!(permission_mode_name(PermissionMode::Plan), "plan");
+    }
+
+    #[test]
     fn live_mode_changes_match_the_launch_flags() {
         for mode in [
             PermissionMode::Auto,
             PermissionMode::Ask,
+            PermissionMode::Plan,
             PermissionMode::AcceptEdits,
             PermissionMode::DontAsk,
             PermissionMode::FullAccess,

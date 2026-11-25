@@ -37,6 +37,7 @@ pub enum SandboxLevel {
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
     Ask,
+    Plan,
     AcceptEdits,
     #[default]
     Auto,
@@ -51,6 +52,7 @@ impl PermissionMode {
         match harness {
             HarnessId::ClaudeCode => &[
                 Self::Ask,
+                Self::Plan,
                 Self::AcceptEdits,
                 Self::Auto,
                 Self::DontAsk,
@@ -574,6 +576,26 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_is_claude_only() {
+        for harness in [
+            HarnessId::Codex,
+            HarnessId::Opencode,
+            HarnessId::Antigravity,
+        ] {
+            assert!(!PermissionMode::choices(harness).contains(&PermissionMode::Plan));
+            assert_eq!(
+                PermissionMode::Plan.for_harness(harness),
+                PermissionMode::Auto
+            );
+        }
+        assert!(PermissionMode::choices(HarnessId::ClaudeCode).contains(&PermissionMode::Plan));
+        assert_eq!(
+            PermissionMode::Plan.for_harness(HarnessId::ClaudeCode),
+            PermissionMode::Plan
+        );
+    }
 
     #[test]
     fn agent_event_round_trips() {

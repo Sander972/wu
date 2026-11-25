@@ -178,6 +178,10 @@ case "$first" in
   read -r change || exit 1
   case "$change" in
   *'"subtype":"set_permission_mode"'*'"mode":"default"'*) ;;
+  *'"subtype":"set_permission_mode"'*'"mode":"plan"'*)
+    emit '{"type":"result","subtype":"success","result":"planning","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-mode"}'
+    exit 0
+    ;;
   *)
     emit '{"type":"result","subtype":"error_during_execution","errors":["no mode change"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-mode"}'
     exit 0

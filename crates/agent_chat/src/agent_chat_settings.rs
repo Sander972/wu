@@ -154,6 +154,7 @@ fn effort(effort: AgentChatDefaultEffort) -> Option<ReasoningLevel> {
 fn claude_permission(mode: ClaudeCodePermissionDefault) -> PermissionMode {
     match mode {
         ClaudeCodePermissionDefault::Ask => PermissionMode::Ask,
+        ClaudeCodePermissionDefault::Plan => PermissionMode::Plan,
         ClaudeCodePermissionDefault::AcceptEdits => PermissionMode::AcceptEdits,
         ClaudeCodePermissionDefault::Auto => PermissionMode::Auto,
         ClaudeCodePermissionDefault::DontAsk => PermissionMode::DontAsk,

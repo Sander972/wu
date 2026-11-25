@@ -1297,6 +1297,7 @@ pub enum AgentChatDefaultEffort {
 #[serde(rename_all = "snake_case")]
 pub enum ClaudeCodePermissionDefault {
     Ask,
+    Plan,
     #[strum(serialize = "Accept Edits")]
     AcceptEdits,
     #[default]

@@ -187,6 +187,28 @@ async fn permission_changes_reach_a_running_turn() {
 }
 
 #[tokio::test]
+async fn a_live_switch_to_plan_writes_the_plan_mode() {
+    let (mut controls, _steer, _token) = controls("Deny");
+    let (permission_tx, permission_rx) = tokio::sync::watch::channel(PermissionMode::Ask);
+    controls.permission = permission_rx;
+    let mut req = request("scenario:mode-change");
+    req.permission = PermissionMode::Ask;
+    let stream = harness().run(req, controls).await.expect("run starts");
+    permission_tx.send_replace(PermissionMode::Plan);
+    let events = tokio::time::timeout(
+        Duration::from_secs(10),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time");
+    assert_eq!(
+        done_statuses(&events),
+        [DoneStatus::Completed],
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn happy_path_normalizes_events_and_tags_subagents() {
     let (controls, _steer, _token) = controls("A");
     let events = run_to_end(&harness(), request("scenario:happy"), controls).await;

@@ -268,6 +268,7 @@ pub(crate) fn translated_setting_value(label: &str) -> Option<SharedString> {
         "Open a New Window" => tc!("setting value", "Open a New Window"),
         "Path" => tc!("setting value", "Path"),
         "Picker" => tc!("setting value", "Picker"),
+        "Plan" => tc!("setting value", "Plan"),
         "PlatformDefault" => tc!("setting value", "Platform Default"),
         "Prefer CRLF" => tc!("setting value", "Prefer CRLF"),
         "Prefer LF" => tc!("setting value", "Prefer LF"),

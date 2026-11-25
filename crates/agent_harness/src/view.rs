@@ -267,6 +267,7 @@ pub fn permission_label(mode: crate::PermissionMode, harness: crate::HarnessId) 
     use crate::PermissionMode;
     match mode {
         PermissionMode::Ask => t!("Ask"),
+        PermissionMode::Plan => t!("Plan"),
         PermissionMode::AcceptEdits => t!("Accept edits"),
         PermissionMode::Auto => t!("Auto"),
         PermissionMode::DontAsk => t!("Don't ask"),
@@ -288,6 +289,9 @@ pub fn permission_description(
     use crate::{HarnessId, PermissionMode};
     match (mode, harness) {
         (PermissionMode::Ask, _) => t!("Asks before commands and file edits"),
+        (PermissionMode::Plan, _) => {
+            t!("Claude explores and writes a plan; nothing is changed until you approve it.")
+        }
         (PermissionMode::AcceptEdits, _) => t!("Edits files freely, asks before commands"),
         (PermissionMode::Auto, HarnessId::ClaudeCode) => {
             t!("Approves routine actions, asks about risky ones")
