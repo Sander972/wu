@@ -170,7 +170,10 @@ Description: Wu, a fast native code editor
  with the 'wu' command in /usr/bin.
 EOF
 
-output="${target_dir}/release/${package}_${deb_version}_${deb_arch}.deb"
+# The package needs the glibc of the build system: the file name says which distro that is.
+# It is only in the file name, so it does not change how dpkg orders versions.
+distro=$(. /etc/os-release && echo "${ID:-linux}${VERSION_ID:-}")
+output="${target_dir}/release/${package}_${deb_version}_${distro}_${deb_arch}.deb"
 rm -f "${target_dir}/release/${package}"_*_"${deb_arch}".deb
 fakeroot dpkg-deb --build --root-owner-group -Zxz "$root" "$output"
 

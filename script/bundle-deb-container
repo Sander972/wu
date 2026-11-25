@@ -15,7 +15,7 @@ Options:
 
 Options after '--' go to script/bundle-deb (e.g. -- --revision 2).
 The engine is docker, or podman when docker is missing; set CONTAINER_ENGINE to choose.
-Output: target/ubuntu-<version>/release/<package>_<version>_<arch>.deb
+Output: target/ubuntu-<version>/release/<package>_<version>_ubuntu<version>_<arch>.deb
   "
 }
 
