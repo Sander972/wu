@@ -4,6 +4,7 @@ mod completion;
 mod composer;
 mod dictation;
 mod diff_view;
+mod edit_review;
 mod image_viewer;
 mod links;
 mod mermaid;
