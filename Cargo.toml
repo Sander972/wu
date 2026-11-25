@@ -466,7 +466,7 @@ ec4rs = { version = "1.2", features = ["allow-empty-values"] }
 emojis = "0.9"
 encoding_rs = "0.8"
 env_logger = "0.11"
-etagere = "0.2"
+etagere = "0.3"
 exec = "0.3.1"
 fancy-regex = "0.19"
 flume = "0.12"
