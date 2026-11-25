@@ -678,7 +678,7 @@ time = { version = "0.3", features = [
 ] }
 tokio = { version = "1" }
 tokio-util = "0.7"
-toml = "0.8"
+toml = "1"
 toml_edit = { version = "0.25", default-features = false, features = [
     "display",
     "parse",
