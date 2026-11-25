@@ -145,10 +145,39 @@ fn shown_context(workspace: &Workspace, cx: &App) -> Option<ShownContext> {
     })
 }
 
-// Part of the editor-context interface the next editor-context features build on; sending goes through the chip's `ShownContext` instead.
-#[allow(dead_code)]
-pub(crate) fn current_editor_context(workspace: &Workspace, cx: &App) -> Option<EditorContext> {
-    shown_context(workspace, cx)?.full(cx)
+/// The file and 1-based inclusive lines Alt+K mentions: the active editor's, or the one before it when the composer has focus.
+pub(crate) fn mention_target(
+    workspace: &Workspace,
+    cx: &App,
+) -> Option<(PathBuf, Option<(u32, u32)>)> {
+    let editor_entity = context_editor(workspace, cx)?;
+    let editor = editor_entity.read(cx);
+    let buffer = editor.active_buffer(cx)?;
+    let file = project::File::from_dyn(buffer.read(cx).file())?;
+    let absolute_path = file.as_local()?.abs_path(cx);
+    let lines = selected_lines(editor, cx).map(|(_, start, end)| (start, end));
+    Some((absolute_path, lines))
+}
+
+pub(crate) fn line_suffix((start, end): (u32, u32)) -> String {
+    if start == end {
+        format!("#{start}")
+    } else {
+        format!("#{start}-{end}")
+    }
+}
+
+/// Quoting and the line suffix follow Claude Code: a path with whitespace or `:` is quoted with the suffix inside, and one containing `"` or `#` gets no suffix since the suffix could not be told apart.
+pub(crate) fn mention_text_with_lines(relative_path: &str, lines: Option<(u32, u32)>) -> String {
+    let suffix = lines
+        .filter(|_| !relative_path.contains(['"', '#']))
+        .map(line_suffix)
+        .unwrap_or_default();
+    if relative_path.contains(char::is_whitespace) || relative_path.contains(':') {
+        format!("@\"{relative_path}{suffix}\"")
+    } else {
+        format!("@{relative_path}{suffix}")
+    }
 }
 
 fn selected_lines(editor: &Editor, cx: &App) -> Option<(Range<Anchor>, u32, u32)> {
@@ -334,6 +363,24 @@ impl ChatView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mention_formats() {
+        for (path, lines, expected) in [
+            ("src/a.rs", Some((5, 10)), "@src/a.rs#5-10"),
+            ("src/a.rs", Some((5, 5)), "@src/a.rs#5"),
+            ("src/a.rs", None, "@src/a.rs"),
+            ("my file.ts", Some((5, 10)), "@\"my file.ts#5-10\""),
+            ("C:/x/a.rs", None, "@\"C:/x/a.rs\""),
+            ("a#b.rs", Some((1, 2)), "@a#b.rs"),
+        ] {
+            assert_eq!(
+                mention_text_with_lines(path, lines),
+                expected,
+                "{path} {lines:?}"
+            );
+        }
+    }
 
     #[test]
     fn selection_block_matches_the_ide_format() {

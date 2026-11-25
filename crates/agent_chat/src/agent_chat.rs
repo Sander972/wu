@@ -22,13 +22,15 @@ pub use commit_message::{
 use command_palette_hooks::CommandPaletteFilter;
 use futures::FutureExt as _;
 use gpui::{
-    App, AppContext as _, EntityId, PromptButton, PromptLevel, TaskExt as _, WindowHandle, actions,
+    App, AppContext as _, Context, Entity, EntityId, PromptButton, PromptLevel, TaskExt as _,
+    Window, WindowHandle, actions,
 };
 use i18n::t;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use settings::{Settings as _, SettingsStore};
 use util::ResultExt as _;
-use workspace::{MultiWorkspace, SaveIntent};
+use workspace::{MultiWorkspace, SaveIntent, Workspace};
 
 actions!(
     agent_chat,
@@ -127,7 +129,83 @@ pub fn init(shell_env_loaded: Option<futures::channel::oneshot::Receiver<()>>, c
     });
     agent_panel::init(cx);
     chat_panel::init(cx);
+    cx.observe_new(|workspace: &mut Workspace, _, _| {
+        workspace.register_action(
+            |workspace, _: &wu_actions::agent::InsertMention, window, cx| {
+                insert_mention(workspace, window, cx)
+            },
+        );
+    })
+    .detach();
     watch_enabled(cx);
+}
+
+fn insert_mention(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    if !agent_panel::agent_chat_enabled(cx) {
+        return;
+    }
+    // Where a mention goes besides the chat composer (a terminal running `claude`) branches here, on what is focused.
+    let Some((path, lines)) = chat_view::mention_target(workspace, cx) else {
+        return;
+    };
+    mention_in_last_chat(workspace, &path, lines, window, cx);
+}
+
+/// The chat you last used, whether open as a tab or docked in the chat panel.
+fn last_focused_chat(workspace: &Workspace, cx: &App) -> Option<Entity<ChatView>> {
+    let panel_pane = workspace
+        .panel::<ChatPanel>(cx)
+        .map(|panel| panel.read(cx).pane().clone());
+    workspace
+        .panes()
+        .iter()
+        .cloned()
+        .chain(panel_pane)
+        .flat_map(|pane| {
+            let pane = pane.read(cx);
+            pane.activation_history()
+                .iter()
+                .filter_map(|entry| {
+                    let chat = pane
+                        .items()
+                        .find(|item| item.item_id() == entry.entity_id)?
+                        .downcast::<ChatView>()?;
+                    Some((entry.timestamp, chat))
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|(_, chat)| !chat.read(cx).is_subagent())
+        .max_by_key(|(timestamp, _)| *timestamp)
+        .map(|(_, chat)| chat)
+}
+
+fn mention_in_last_chat(
+    workspace: &mut Workspace,
+    path: &Path,
+    lines: Option<(u32, u32)>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let chat = match last_focused_chat(workspace, cx) {
+        Some(chat) => chat,
+        None => {
+            let Some(session) = agent_panel::create_session(workspace, AgentKind::Claude, cx)
+            else {
+                return;
+            };
+            agent_panel::open_chat(workspace, session.clone(), window, cx);
+            let Some(chat) = agent_panel::chat_view_for(workspace, &session, cx) else {
+                return;
+            };
+            chat
+        }
+    };
+    if chat.read(cx).is_docked() {
+        chat_panel::reveal_chat(workspace, &chat, window, cx);
+    } else {
+        workspace.activate_item(&chat, true, true, window, cx);
+    }
+    chat.update(cx, |chat, cx| chat.insert_file_mention(path, lines, window, cx));
 }
 
 fn watch_enabled(cx: &mut App) {
@@ -326,5 +404,61 @@ mod tests {
 
         set_enabled(true, cx);
         assert!(!hidden(cx));
+    }
+
+    #[gpui::test]
+    async fn insert_mention_targets_the_last_focused_chat_and_opens_the_panel_when_none(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        let none = workspace.read_with(cx, |workspace, cx| last_focused_chat(workspace, cx));
+        assert!(none.is_none(), "no chat yet, so a new one is opened");
+
+        let mut chats = Vec::new();
+        for _ in 0..2 {
+            let session = store.update(cx, |store, cx| {
+                store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+            });
+            let chat = workspace.update_in(cx, |workspace, window, cx| {
+                let weak = cx.entity().downgrade();
+                let chat = cx.new(|cx| {
+                    ChatView::new(session, store.clone(), project.clone(), weak, window, cx)
+                });
+                workspace.add_item_to_active_pane(Box::new(chat.clone()), None, true, window, cx);
+                chat
+            });
+            chats.push(chat);
+        }
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_item(&chats[0], true, true, window, cx);
+        });
+        let path = directory.path().join("src").join("a.rs");
+        let mention = |cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                mention_in_last_chat(workspace, &path, Some((5, 10)), window, cx)
+            });
+        };
+        let composer_text = |chat: &Entity<ChatView>, cx: &mut gpui::VisualTestContext| {
+            chat.read_with(cx, |chat, cx| chat.composer_text_for_test(cx))
+        };
+        mention(cx);
+        assert_eq!(composer_text(&chats[0], cx), "@src/a.rs#5-10 ");
+        assert_eq!(composer_text(&chats[1], cx), "");
+        mention(cx);
+        assert_eq!(
+            composer_text(&chats[0], cx),
+            "@src/a.rs#5-10 @src/a.rs#5-10 "
+        );
     }
 }

@@ -16,6 +16,8 @@ mod search;
 mod side_pane;
 mod todo_panel;
 
+pub(crate) use editor_context::mention_target;
+
 use crate::{
     AgentChatSettings, AgentKind, MoveChatToPanel, MoveChatToTab, RenameChat, Send, Stop,
     SubmitAnswer,
@@ -5624,6 +5626,17 @@ mod tests {
             })
         });
         assert_eq!(composer_text(&view, cx), "look at ");
+        cx.simulate_input("@mai");
+        cx.run_until_parked();
+        cx.simulate_input("n.rs#5-10");
+        cx.run_until_parked();
+        assert_eq!(matches(&view, cx), ["main.rs"]);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(composer_text(&view, cx), "look at @src/main.rs#5-10 ");
+        let shown = view.update(cx, |view, cx| {
+            view.composer.update(cx, |editor, cx| editor.display_text(cx))
+        });
+        assert_eq!(shown, "look at ⋯ ");
     }
 
     #[gpui::test]

@@ -56,6 +56,7 @@ util.workspace = true
 usvg.workspace = true
 uuid.workspace = true
 workspace.workspace = true
+wu_actions.workspace = true
 
 [dev-dependencies]
 editor = { workspace = true, features = ["test-support"] }

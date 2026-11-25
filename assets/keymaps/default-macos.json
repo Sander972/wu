@@ -160,6 +160,7 @@
       "cmd-e": "buffer_search::UseSelectionForFind",
       "cmd-alt-e": "editor::SelectEnclosingSymbol",
       "alt-enter": "editor::OpenSelectionsInMultibuffer",
+      "alt-k": "agent::InsertMention",
       "alt-cmd-f": "text_finder::Toggle",
     },
   },

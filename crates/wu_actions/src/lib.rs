@@ -213,6 +213,18 @@ pub mod editor {
     );
 }
 
+pub mod agent {
+    use gpui::actions;
+
+    actions!(
+        agent,
+        [
+            /// Inserts an @-mention of the current file and selected lines into the agent chat.
+            InsertMention
+        ]
+    );
+}
+
 pub mod dev {
     use gpui::actions;
 

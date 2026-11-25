@@ -1,4 +1,5 @@
 use super::{ChatView, ui};
+use super::editor_context::{line_suffix, mention_text_with_lines};
 use crate::{
     AcceptCommand, AgentKind, DismissCommands, NewAntigravityChat, NewClaudeChat, NewCodexChat,
     NewOpencodeChat, SelectNextCommand, SelectPreviousCommand, Send, ToggleFocus,
@@ -100,13 +101,31 @@ fn skill_display_name(name: &str) -> String {
         .join(" ")
 }
 
-fn mention_text(path: &Path, is_dir: bool, cwd: &Path) -> String {
-    let shown = path.strip_prefix(cwd).unwrap_or(path).to_string_lossy();
-    let mut text = format!("@{shown}");
-    if is_dir && !text.ends_with('/') {
-        text.push('/');
+fn mention_text(path: &Path, is_dir: bool, cwd: &Path, lines: Option<(u32, u32)>) -> String {
+    let mut shown = path
+        .strip_prefix(cwd)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned();
+    if cfg!(windows) {
+        shown = shown.replace('\\', "/");
     }
-    text
+    if is_dir && !shown.ends_with('/') {
+        shown.push('/');
+    }
+    mention_text_with_lines(&shown, lines)
+}
+
+/// Splits a typed `#5` or `#5-10` off the end of a mention query.
+fn split_line_suffix(query: &str) -> (&str, Option<(u32, u32)>) {
+    let Some((path, range)) = query.rsplit_once('#') else {
+        return (query, None);
+    };
+    let (start, end) = range.split_once('-').unwrap_or((range, range));
+    match (start.parse::<u32>(), end.parse::<u32>()) {
+        (Ok(start), Ok(end)) if start >= 1 && end >= start => (path, Some((start, end))),
+        _ => (query, None),
+    }
 }
 
 fn file_icon(path: &Path, is_dir: bool, cx: &App) -> Icon {
@@ -267,6 +286,11 @@ impl ChatView {
             .collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn composer_text_for_test(&self, cx: &App) -> String {
+        self.composer.read(cx).text(cx)
+    }
+
     pub(super) fn completion_count(&self, cx: &App) -> usize {
         self.rows(cx).len()
     }
@@ -322,7 +346,7 @@ impl ChatView {
         if query_changed {
             self.command_scroll.scroll_to_item(0);
             if kind == TokenKind::Mention {
-                self.search_mentions(token.query, cx);
+                self.search_mentions(split_line_suffix(&token.query).0.to_string(), cx);
             }
         }
         cx.notify();
@@ -536,12 +560,13 @@ impl ChatView {
     }
 
     pub(super) fn pick_command(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(row) = self.rows(cx).into_iter().nth(index) else {
+        let Some(mut row) = self.rows(cx).into_iter().nth(index) else {
             return;
         };
         let Some(menu) = self.command_menu.take() else {
             return;
         };
+        let lines = split_line_suffix(&menu.token.query).1;
         let range = menu.token.range;
         let cwd = self.session.read(cx).metadata().cwd.clone();
         let text = match &row {
@@ -568,8 +593,11 @@ impl ChatView {
                 }
                 format!("${}", skill.name)
             }
-            Row::Mention(item) => mention_text(&item.path, item.is_dir, &cwd),
+            Row::Mention(item) => mention_text(&item.path, item.is_dir, &cwd, lines),
         };
+        if let (Row::Mention(item), Some(lines)) = (&mut row, lines) {
+            item.label.push_str(&line_suffix(lines));
+        }
         let badge_range = range.start..range.start + text.len();
         self.insert_at_token(range, text, window, cx);
         self.show_badge(badge_range, row, window, cx);
@@ -590,7 +618,7 @@ impl ChatView {
             .into_iter()
             .map(|path| {
                 let is_dir = path.is_dir();
-                let text = mention_text(&path, is_dir, &cwd);
+                let text = mention_text(&path, is_dir, &cwd, None);
                 (path, is_dir, text)
             })
             .collect();
@@ -614,6 +642,38 @@ impl ChatView {
             self.show_badge(start..start + text.len(), row, window, cx);
             start += text.len() + 1;
         }
+        window.focus(&self.composer.focus_handle(cx), cx);
+    }
+
+    pub(crate) fn insert_file_mention(
+        &mut self,
+        path: &Path,
+        lines: Option<(u32, u32)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = self.session.read(cx).metadata().cwd.clone();
+        let text = mention_text(path, false, &cwd, lines);
+        self.insert_text_at_cursor(&text, window, cx);
+    }
+
+    pub(crate) fn insert_text_at_cursor(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composer.update(cx, |editor, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            let start = editor.selections.newest::<MultiBufferOffset>(&snapshot).start.0;
+            let after_word = editor
+                .text(cx)
+                .get(..start)
+                .and_then(|before| before.chars().next_back())
+                .is_some_and(|character| !character.is_whitespace());
+            let separator = if after_word { " " } else { "" };
+            editor.insert(&format!("{separator}{text} "), window, cx);
+        });
         window.focus(&self.composer.focus_handle(cx), cx);
     }
 
