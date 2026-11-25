@@ -24,7 +24,7 @@ rustup target add x86_64-unknown-linux-musl   # bundle-linux also does this; nee
 script/bundle-deb
 ```
 
-- Output: `target/release/<package>_<version>_<arch>.deb` (e.g. `wu-dev_1.5.0~dev.20261125103000.g53764b7-1_amd64.deb`).
+- Output: `target/release/<package>_<version>_<distro>_<arch>.deb` (e.g. `wu-dev_1.5.0~dev.20261125103000.g53764b7-1_ubuntu26.04_amd64.deb`). `<distro>` is `ID` + `VERSION_ID` from the build system's `/etc/os-release`: the oldest release the package installs on. It is only in the file name, not in the package version.
 - Runs a full release build (`bundle-linux`), so the first run is long.
 - `--skip-build` repackages the existing `target/release/wu-linux-<arch>.tar.gz` without recompiling. Only use it when that tarball was built by `bundle-deb` (see auto-update below).
 - `--revision <n>` bumps the Debian revision; `--maintainer "Name <mail>"` overrides the default taken from `git config`.
