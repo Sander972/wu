@@ -6444,12 +6444,12 @@ mod tests {
         assert!(!paused(cx));
     }
 
-    async fn focus_chat<'a>(
-        cx: &'a mut TestAppContext,
+    async fn focus_chat(
+        cx: &mut TestAppContext,
     ) -> (
         Entity<AgentSession>,
         Entity<ChatView>,
-        &'a mut VisualTestContext,
+        &mut VisualTestContext,
     ) {
         cx.update(|cx| {
             workspace::AppState::test(cx);
