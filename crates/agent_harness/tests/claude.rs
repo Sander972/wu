@@ -1751,6 +1751,13 @@ async fn cloud_sessions_are_filtered_to_the_repository() {
         cloud_requests(project.path()),
         [serde_json::json!({"subtype": "list_cloud_sessions", "user_initiated": true})]
     );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join(".cloud-env"))
+            .expect("reader environment")
+            .trim(),
+        "safe=1 probe=1 cron=1",
+        "the reader starts without project MCP servers, hooks or scheduled tasks"
+    );
 }
 
 #[tokio::test]

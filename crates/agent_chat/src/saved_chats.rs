@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use agent_harness::ExternalSession;
+use agent_harness::{ExternalSession, HarnessError};
 use gpui::{
     AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, Task, WeakEntity, Window,
@@ -54,16 +54,22 @@ impl SavedChatPicker {
         cx: &mut Context<Self>,
     ) -> Self {
         let agents = AgentChatSettings::get_global(cx).agents().to_vec();
+        let shows_web = agents.contains(&AgentKind::Claude)
+            && store.update(cx, |store, _| {
+                store.harness(AgentKind::Claude).shows_cloud_sessions()
+            });
         let delegate = SavedChatDelegate {
             modal: cx.entity().downgrade(),
             workspace,
             store: store.clone(),
             shows_folders: roots.len() > 1,
+            roots: roots.clone(),
             chats: Vec::new(),
             web_chats: Vec::new(),
             tab: Tab::Local,
-            shows_web: false,
-            web_error: None,
+            shows_web,
+            web_requested: false,
+            web_message: None,
             matches: Vec::new(),
             selected_index: 0,
             query: String::new(),
@@ -112,54 +118,82 @@ impl SavedChatPicker {
                     });
                     picker.delegate._loads.push(load);
                 }
-                if agents.contains(&AgentKind::Claude) {
-                    picker.delegate.web_pending += 1;
-                    let listing = store.update(cx, |store, cx| {
-                        store.cloud_sessions(AgentKind::Claude, root.clone(), cx)
-                    });
-                    let load = cx.spawn_in(window, async move |picker, cx| {
-                        let result = listing.await;
-                        picker
-                            .update_in(cx, |picker, window, cx| {
-                                let delegate = &mut picker.delegate;
-                                delegate.web_pending = delegate.web_pending.saturating_sub(1);
-                                match result {
-                                    Ok(None) => {}
-                                    Ok(Some(sessions)) => {
-                                        delegate.shows_web = true;
-                                        for session in sessions {
-                                            if !delegate
-                                                .web_chats
-                                                .iter()
-                                                .any(|chat| chat.session.id == session.id)
-                                            {
-                                                delegate.web_chats.push(SavedChat {
-                                                    kind: AgentKind::Claude,
-                                                    root: root.clone(),
-                                                    session,
-                                                });
-                                            }
-                                        }
-                                        delegate.web_chats.sort_by_key(|chat| {
-                                            std::cmp::Reverse(chat.session.updated_at)
-                                        });
-                                    }
-                                    Err(error) => {
-                                        log::info!("Claude cloud chats unavailable: {error:#}");
-                                        delegate.shows_web = true;
-                                        delegate.web_error = Some(format!("{error:#}"));
-                                    }
-                                }
-                                picker.refresh(window, cx);
-                            })
-                            .log_err();
-                    });
-                    picker.delegate._loads.push(load);
-                }
             }
             picker
         });
         Self { picker }
+    }
+}
+
+/// Like the VS Code extension, cloud chats are only read when the user asks for them by choosing the Web tab.
+fn select_tab(
+    picker: &mut Picker<SavedChatDelegate>,
+    tab: Tab,
+    window: &mut Window,
+    cx: &mut Context<Picker<SavedChatDelegate>>,
+) {
+    let delegate = &mut picker.delegate;
+    delegate.tab = tab;
+    delegate.selected_index = 0;
+    if tab == Tab::Web && !delegate.web_requested {
+        delegate.web_requested = true;
+        for root in delegate.roots.clone() {
+            delegate.web_pending += 1;
+            let listing = delegate.store.update(cx, |store, cx| {
+                store.cloud_sessions(AgentKind::Claude, root.clone(), cx)
+            });
+            let load = cx.spawn_in(window, async move |picker, cx| {
+                let result = listing.await;
+                picker
+                    .update_in(cx, |picker, window, cx| {
+                        let delegate = &mut picker.delegate;
+                        delegate.web_pending = delegate.web_pending.saturating_sub(1);
+                        match result {
+                            Ok(None) => {
+                                delegate.web_message = Some(t!(
+                                    "Web chats need a recent Claude Code signed in with a Claude account."
+                                ))
+                            }
+                            Ok(Some(sessions)) => {
+                                for session in sessions {
+                                    if !delegate
+                                        .web_chats
+                                        .iter()
+                                        .any(|chat| chat.session.id == session.id)
+                                    {
+                                        delegate.web_chats.push(SavedChat {
+                                            kind: AgentKind::Claude,
+                                            root: root.clone(),
+                                            session,
+                                        });
+                                    }
+                                }
+                                delegate
+                                    .web_chats
+                                    .sort_by_key(|chat| std::cmp::Reverse(chat.session.updated_at));
+                            }
+                            Err(error) => {
+                                log::info!("Claude cloud chats unavailable: {error:#}");
+                                delegate.web_message = Some(cloud_error_message(&error));
+                            }
+                        }
+                        picker.refresh(window, cx);
+                    })
+                    .log_err();
+            });
+            delegate._loads.push(load);
+        }
+    }
+    picker.refresh(window, cx);
+}
+
+/// Claude Code's refusals are sentences written for people, so they are shown without the protocol error prefix.
+fn cloud_error_message(error: &anyhow::Error) -> SharedString {
+    match error.downcast_ref::<HarnessError>() {
+        Some(HarnessError::Protocol(detail)) => {
+            i18n::lookup(detail).unwrap_or_else(|| detail.clone().into())
+        }
+        _ => format!("{error:#}").into(),
     }
 }
 
@@ -196,12 +230,15 @@ pub(crate) struct SavedChatDelegate {
     workspace: WeakEntity<Workspace>,
     store: Entity<AgentStore>,
     shows_folders: bool,
+    roots: Vec<PathBuf>,
     chats: Vec<SavedChat>,
     web_chats: Vec<SavedChat>,
     tab: Tab,
-    /// Stays false for a sign-in without cloud chats, which hides the Web tab.
+    /// False when Wu knows the sign-in has no cloud chats, which hides the Web tab.
     shows_web: bool,
-    web_error: Option<String>,
+    web_requested: bool,
+    /// Why no cloud chats are listed: an error, or a sign-in or Claude Code that can't read them.
+    web_message: Option<SharedString>,
     matches: Vec<usize>,
     selected_index: usize,
     query: String,
@@ -259,8 +296,8 @@ impl PickerDelegate for SavedChatDelegate {
         };
         Some(if pending > 0 {
             t!("Loading chats…")
-        } else if let Some(error) = self.web_error.as_ref().filter(|_| self.tab == Tab::Web) {
-            error.clone().into()
+        } else if let Some(message) = self.web_message.clone().filter(|_| self.tab == Tab::Web) {
+            message
         } else if self.query.trim().is_empty() {
             empty
         } else {
@@ -350,11 +387,7 @@ impl PickerDelegate for SavedChatDelegate {
         let tab_button = |label: SharedString, tab: Tab, cx: &mut Context<Picker<Self>>| {
             ToggleButtonSimple::new(
                 label,
-                cx.listener(move |picker, _, window, cx| {
-                    picker.delegate.tab = tab;
-                    picker.delegate.selected_index = 0;
-                    picker.refresh(window, cx);
-                }),
+                cx.listener(move |picker, _, window, cx| select_tab(picker, tab, window, cx)),
             )
             .selected(self.tab == tab)
         };
@@ -413,5 +446,61 @@ impl PickerDelegate for SavedChatDelegate {
                         .color(Color::Muted),
                 ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::tests::{new_store, run_until};
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    async fn web_chats_are_listed_only_once_the_web_tab_is_chosen(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        // The fake CLI logs each control request it gets into this file once it exists.
+        let requests = directory.path().join(".cloud-requests");
+        std::fs::write(&requests, "").expect("request log");
+        let roots = vec![directory.path().to_path_buf()];
+        let (modal, cx) = cx.add_window_view(|window, cx| {
+            SavedChatPicker::new(store, roots, WeakEntity::new_invalid(), window, cx)
+        });
+        cx.run_until_parked();
+        let picker = modal.read_with(cx, |modal, _| modal.picker.clone());
+        picker.read_with(cx, |picker, _| assert!(picker.delegate.shows_web));
+        assert_eq!(
+            std::fs::read_to_string(&requests).expect("request log"),
+            "",
+            "opening the picker reads no cloud chats"
+        );
+
+        picker.update_in(cx, |picker, window, cx| {
+            select_tab(picker, Tab::Web, window, cx)
+        });
+        run_until(cx, |cx| {
+            picker.read_with(cx, |picker, _| picker.delegate.web_pending == 0)
+        });
+
+        picker.read_with(cx, |picker, _| {
+            assert_eq!(picker.delegate.web_message, None);
+            assert_eq!(picker.delegate.matches.len(), 3);
+        });
+        let sent: Vec<serde_json::Value> = std::fs::read_to_string(&requests)
+            .expect("request log")
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).expect("json line")["request"]
+                    .clone()
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            [serde_json::json!({"subtype": "list_cloud_sessions", "user_initiated": true})]
+        );
     }
 }

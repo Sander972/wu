@@ -410,6 +410,7 @@ case "$first" in
     case "$1" in
     # Cloud reads answer from the anonymized fixtures; the second transcript page ends the transcript.
     *'"subtype":"list_cloud_sessions"'*)
+      printf 'safe=%s probe=%s cron=%s\n' "$CLAUDE_CODE_SAFE_MODE" "$CLAUDE_CODE_CONFIG_PROBE" "$CLAUDE_CODE_DISABLE_CRON" > .cloud-env
       emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":$(tr -d '\r\n' < "${0%fake-claude.sh}claude/cloud-sessions.json")}}"
       ;;
     *'"subtype":"get_cloud_session_transcript"'*'"cursor":"cursor-page-2"'* | *'"cursor":"cursor-page-2"'*'"subtype":"get_cloud_session_transcript"'*)

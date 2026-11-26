@@ -5,13 +5,68 @@ use i18n::n;
 use serde_json::Value;
 
 use crate::process::Stdio;
-use crate::{ExternalSession, HarnessError};
+use crate::{ClaudeLaunch, ExternalSession, HarnessError};
 
 /// Bounds starting the CLI and each cloud read, so a stalled network ends in an error instead of loading forever.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The VS Code extension's limit: a longer transcript is refused rather than read without end.
 pub(super) const MAX_TRANSCRIPT_PAGES: usize = 500;
+/// What the VS Code extension starts its cloud reader with, so no project MCP server, hook or scheduled task runs for a read.
+pub(super) const READER_ENVIRONMENT: [(&str, &str); 3] = [
+    ("CLAUDE_CODE_SAFE_MODE", "1"),
+    ("CLAUDE_CODE_CONFIG_PROBE", "1"),
+    ("CLAUDE_CODE_DISABLE_CRON", "1"),
+];
+/// The VS Code extension's list of variables that send Claude Code to another provider.
+const PROVIDER_VARIABLES: [&str; 7] = [
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "CLAUDE_CODE_USE_MANTLE",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_GATEWAY",
+];
+
+/// A variable as Claude Code gets it: the user's launch settings win over Wu's own environment.
+pub(super) fn launch_variable(name: &str) -> Option<String> {
+    ClaudeLaunch::current()
+        .environment
+        .into_iter()
+        .rev()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value)
+        .or_else(|| std::env::var(name).ok())
+}
+
+fn is_on(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Another provider means no claude.ai sign-in, so there are no cloud chats to show.
+pub(super) fn signs_in_elsewhere(variable: impl Fn(&str) -> Option<String>) -> bool {
+    PROVIDER_VARIABLES
+        .iter()
+        .any(|name| variable(name).is_some_and(|value| is_on(&value)))
+}
+
+/// Like the VS Code extension, any value turns cloud reads off.
+pub(super) fn nonessential_traffic_off(variable: impl Fn(&str) -> Option<String>) -> bool {
+    variable("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_some_and(|value| !value.is_empty())
+}
+
+pub(super) fn reads_allowed() -> Result<(), HarnessError> {
+    if nonessential_traffic_off(launch_variable) {
+        return Err(HarnessError::Protocol(
+            n!("Web chats are off because CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set.").into(),
+        ));
+    }
+    Ok(())
+}
 
 pub(super) async fn bounded<T>(
     work: impl Future<Output = Result<T, HarnessError>>,
@@ -73,11 +128,21 @@ fn refusal(response: &Value) -> Option<HarnessError> {
     Some(HarnessError::Protocol(message.to_owned()))
 }
 
-/// `None` for a sign-in that cannot have cloud chats (an API provider or a Console key), so no Web tab is shown for it.
+/// `None` when this sign-in (an API provider or a Console key) or this Claude Code cannot read cloud chats.
 pub(super) fn listed_sessions(
-    response: &Value,
+    answer: Result<Value, HarnessError>,
     repository: Option<&str>,
 ) -> Result<Option<Vec<ExternalSession>>, HarnessError> {
+    let response = match answer {
+        Err(HarnessError::Protocol(message))
+            if message.starts_with("Unsupported control request subtype")
+                || message.ends_with("is not available on this connection") =>
+        {
+            return Ok(None);
+        }
+        answer => answer?,
+    };
+    let response = &response;
     if matches!(
         response.get("reason").and_then(Value::as_str),
         Some("provider" | "not_signed_in")
@@ -176,23 +241,63 @@ mod tests {
     #[test]
     fn sign_ins_without_cloud_chats_hide_them_and_other_refusals_explain() {
         let sessions: Value = serde_json::from_str(SESSIONS).expect("fixture");
-        let listed = listed_sessions(&sessions, None)
+        let listed = listed_sessions(Ok(sessions), None)
             .expect("listed")
             .expect("a claude.ai sign-in");
         assert_eq!(listed.len(), 3, "no repository lists every chat");
 
         for reason in ["provider", "not_signed_in"] {
             let refused = json!({"status": "unavailable", "reason": reason, "message": "Sign in."});
-            assert!(matches!(listed_sessions(&refused, None), Ok(None)));
+            assert!(matches!(listed_sessions(Ok(refused), None), Ok(None)));
         }
+        let older_cli = HarnessError::Protocol(
+            "Unsupported control request subtype: list_cloud_sessions".into(),
+        );
+        assert!(matches!(listed_sessions(Err(older_cli), None), Ok(None)));
+        let stopped = HarnessError::Protocol("claude exited before answering".into());
+        assert!(listed_sessions(Err(stopped), None).is_err());
         let busy = json!({"status": "unavailable", "reason": "temporarily_unavailable", "message": "Try again in a moment."});
         assert!(
-            matches!(listed_sessions(&busy, None), Err(HarnessError::Protocol(message)) if message == "Try again in a moment.")
+            matches!(listed_sessions(Ok(busy.clone()), None), Err(HarnessError::Protocol(message)) if message == "Try again in a moment.")
         );
         assert!(transcript_page(busy).is_err());
         assert!(matches!(
             transcript_page(json!({"status": "ok", "entries": [], "next_cursor": ""})),
             Ok((entries, None)) if entries.is_empty()
         ));
+    }
+
+    #[test]
+    fn cloud_reads_follow_the_launch_environment() {
+        let environment = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            }
+        };
+        assert!(!signs_in_elsewhere(environment(&[])));
+        assert!(signs_in_elsewhere(environment(&[(
+            "CLAUDE_CODE_USE_BEDROCK",
+            "1"
+        )])));
+        assert!(signs_in_elsewhere(environment(&[(
+            "CLAUDE_CODE_USE_GATEWAY",
+            "true"
+        )])));
+        assert!(!signs_in_elsewhere(environment(&[(
+            "CLAUDE_CODE_USE_VERTEX",
+            "0"
+        )])));
+        assert!(nonessential_traffic_off(environment(&[(
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "1"
+        )])));
+        assert!(!nonessential_traffic_off(environment(&[(
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            ""
+        )])));
+        assert!(!nonessential_traffic_off(environment(&[])));
     }
 }

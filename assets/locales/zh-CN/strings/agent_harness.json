@@ -179,6 +179,7 @@
   "Use {tool}?": "要使用 {tool} 吗？",
   "Wait for agents": "等待智能体",
   "Web": "网页",
+  "Web chats are off because CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set.": "由于设置了 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC，网页对话已关闭。",
   "Week": "每周",
   "Works freely in the project, asks to go beyond": "在项目内自由操作，超出项目范围时先询问",
   "Write": "写入",

@@ -204,9 +204,35 @@ fn assistant_events(content: &Value) -> Vec<AgentEvent> {
     events
 }
 
-pub(super) fn history_events(records: &[Value]) -> Vec<AgentEvent> {
+fn history_events(records: &[Value]) -> Vec<AgentEvent> {
+    branch_events(active_branch(records))
+}
+
+/// Cloud pages can leave the `parentUuid` chain unlinked, so when following it back from the newest message does not reach the first one, every entry is kept in file order.
+pub(super) fn cloud_history_events(records: &[Value]) -> Vec<AgentEvent> {
+    let branch = active_branch(records);
+    let first = records
+        .iter()
+        .find(|record| is_conversation(record) && record.get("uuid").is_some());
+    let reaches_start = match (branch.first(), first) {
+        (Some(start), Some(first)) => std::ptr::eq(*start, first),
+        _ => true,
+    };
+    if reaches_start {
+        branch_events(branch)
+    } else {
+        branch_events(
+            records
+                .iter()
+                .filter(|record| is_conversation(record))
+                .collect(),
+        )
+    }
+}
+
+fn branch_events(branch: Vec<&Value>) -> Vec<AgentEvent> {
     let mut events = Vec::new();
-    for record in active_branch(records) {
+    for record in branch {
         let content = record.pointer("/message/content").unwrap_or(&Value::Null);
         match record.get("type").and_then(Value::as_str) {
             Some("user") => {
@@ -580,6 +606,39 @@ mod tests {
                 "end",
                 "user:/model sonnet",
             ]
+        );
+    }
+
+    #[test]
+    fn cloud_entries_without_a_linked_chain_are_kept_in_file_order() {
+        let texts = |events: Vec<AgentEvent>| -> Vec<String> {
+            events
+                .into_iter()
+                .filter_map(|event| match event {
+                    AgentEvent::UserMessage { text } => Some(format!("user:{text}")),
+                    AgentEvent::TextDelta { text } => Some(format!("text:{text}")),
+                    _ => None,
+                })
+                .collect()
+        };
+        let unlinked = vec![
+            json!({"type": "user", "uuid": "u1", "message": {"role": "user", "content": "First"}}),
+            json!({"type": "assistant", "uuid": "a1", "message": {"role": "assistant", "content": [{"type": "text", "text": "Answer"}]}}),
+            json!({"type": "user", "uuid": "u2", "parentUuid": "not-served", "message": {"role": "user", "content": "Second"}}),
+        ];
+        assert_eq!(
+            texts(cloud_history_events(&unlinked)),
+            ["user:First", "text:Answer", "user:Second"]
+        );
+
+        let rewound = vec![
+            user("u1", None, json!("Fix it")),
+            assistant("old", "u1", json!([{"type": "text", "text": "Abandoned"}])),
+            assistant("a2", "u1", json!([{"type": "text", "text": "Fixed"}])),
+        ];
+        assert_eq!(
+            texts(cloud_history_events(&rewound)),
+            ["user:Fix it", "text:Fixed"]
         );
     }
 

@@ -219,7 +219,12 @@ pub trait Harness: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// The account's cloud chats for the GitHub repository of `cwd`, newest first; `None` when the sign-in has no cloud chats.
+    /// False when the agent is known to have no cloud chats, such as a sign-in with another provider.
+    fn shows_cloud_sessions(&self) -> bool {
+        false
+    }
+
+    /// The account's cloud chats for the GitHub repository of `cwd`, newest first; `None` when the sign-in or the CLI cannot read them.
     async fn cloud_sessions(
         &self,
         _cwd: &std::path::Path,

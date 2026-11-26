@@ -755,24 +755,26 @@ impl Harness for ClaudeHarness {
             .map_err(|error| HarnessError::Protocol(error.to_string()))?
     }
 
+    fn shows_cloud_sessions(&self) -> bool {
+        self.installed() && !cloud::signs_in_elsewhere(cloud::launch_variable)
+    }
+
     async fn cloud_sessions(
         &self,
         cwd: &std::path::Path,
     ) -> Result<Option<Vec<ExternalSession>>, HarnessError> {
-        if self.resolve_executable().is_err() {
-            return Ok(None);
-        }
+        cloud::reads_allowed()?;
         let repository = cloud::origin_repository(cwd).await;
-        let response = cloud::bounded(async {
-            self.control_session(cwd)
+        let answer = cloud::bounded(async {
+            self.cloud_reader(cwd)
                 .await?
                 .call(
                     serde_json::json!({ "subtype": "list_cloud_sessions", "user_initiated": true }),
                 )
                 .await
         })
-        .await?;
-        cloud::listed_sessions(&response, repository.as_deref())
+        .await;
+        cloud::listed_sessions(answer, repository.as_deref())
     }
 
     async fn cloud_history(
@@ -780,7 +782,8 @@ impl Harness for ClaudeHarness {
         cwd: &std::path::Path,
         session_id: &str,
     ) -> Result<Vec<AgentEvent>, HarnessError> {
-        let mut session = cloud::bounded(self.control_session(cwd)).await?;
+        cloud::reads_allowed()?;
+        let mut session = cloud::bounded(self.cloud_reader(cwd)).await?;
         let mut entries = Vec::new();
         let mut cursor = None;
         for _ in 0..cloud::MAX_TRANSCRIPT_PAGES {
@@ -796,7 +799,7 @@ impl Harness for ClaudeHarness {
             entries.extend(page);
             match next_cursor {
                 Some(next_cursor) => cursor = Some(next_cursor),
-                None => return Ok(history::history_events(&entries)),
+                None => return Ok(history::cloud_history_events(&entries)),
             }
         }
         Err(HarnessError::Protocol(
@@ -839,7 +842,7 @@ impl Harness for ClaudeHarness {
         resume: Option<&str>,
         request: Value,
     ) -> Result<Value, HarnessError> {
-        self.open_control_session(cwd, resume)
+        self.open_control_session(cwd, resume, &[])
             .await?
             .call(request)
             .await
@@ -960,17 +963,24 @@ impl ClaudeHarness {
         &self,
         cwd: &std::path::Path,
     ) -> Result<ControlSession, HarnessError> {
-        self.open_control_session(cwd, None).await
+        self.open_control_session(cwd, None, &[]).await
+    }
+
+    async fn cloud_reader(&self, cwd: &std::path::Path) -> Result<ControlSession, HarnessError> {
+        self.open_control_session(cwd, None, &cloud::READER_ENVIRONMENT)
+            .await
     }
 
     async fn open_control_session(
         &self,
         cwd: &std::path::Path,
         resume: Option<&str>,
+        environment: &[(&str, &str)],
     ) -> Result<ControlSession, HarnessError> {
         let exe = self.resolve_executable()?;
         let launch = control_request(cwd, resume);
         let mut cmd = self.build_command(&exe, &launch, None);
+        cmd.envs(environment.iter().copied());
         cmd.stderr(Stdio::null());
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
