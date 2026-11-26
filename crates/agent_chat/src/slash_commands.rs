@@ -106,11 +106,37 @@ pub(crate) enum AppCommand {
     Btw { question: Option<String> },
     Login,
     Logout,
+    Bookmarks,
+    Bug,
+    Config,
+    Tasks,
+}
+
+/// Where Wu opens its issue tracker for `/bug` and `/feedback`.
+pub(crate) const ISSUE_URL: &str = "https://github.com/dstrml/wu/issues/new";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandSection {
+    Customize,
+    Context,
+    Settings,
+    Model,
+}
+
+impl CommandSection {
+    pub fn title(self) -> SharedString {
+        match self {
+            CommandSection::Customize => t!("Customize"),
+            CommandSection::Context => t!("Context"),
+            CommandSection::Settings => t!("Settings"),
+            CommandSection::Model => t!("Model"),
+        }
+    }
 }
 
 impl AppCommand {
-    const ALL: [AppCommand; 26] = [
-        AppCommand::Model,
+    // Sectioned commands come last and grouped, in the order the menu shows them, so the menu needs no sorting.
+    const ALL: [AppCommand; 30] = [
         AppCommand::New,
         AppCommand::Resume,
         AppCommand::Settings,
@@ -124,22 +150,61 @@ impl AppCommand {
         },
         AppCommand::Fork { text: None },
         AppCommand::Rewind,
-        AppCommand::Status,
-        AppCommand::Hooks,
-        AppCommand::Memory,
-        AppCommand::Skills,
-        AppCommand::Sandbox,
-        AppCommand::OutputStyle,
-        AppCommand::Mcp,
-        AppCommand::Permissions,
-        AppCommand::Plugins,
-        AppCommand::Usage,
-        AppCommand::Export { file: None },
         AppCommand::Copy { nth: None },
         AppCommand::Btw { question: None },
         AppCommand::Login,
+        AppCommand::Usage,
+        AppCommand::Tasks,
+        AppCommand::Mcp,
+        AppCommand::Skills,
+        AppCommand::OutputStyle,
+        AppCommand::Hooks,
+        AppCommand::Permissions,
+        AppCommand::Memory,
+        AppCommand::Status,
+        AppCommand::Sandbox,
+        AppCommand::Plugins,
+        AppCommand::Export { file: None },
+        AppCommand::Bookmarks,
         AppCommand::Logout,
+        AppCommand::Bug,
+        AppCommand::Config,
+        AppCommand::Model,
     ];
+
+    fn section(&self) -> Option<CommandSection> {
+        match self {
+            AppCommand::Mcp
+            | AppCommand::Skills
+            | AppCommand::OutputStyle
+            | AppCommand::Hooks
+            | AppCommand::Permissions
+            | AppCommand::Memory
+            | AppCommand::Status
+            | AppCommand::Sandbox
+            | AppCommand::Plugins => Some(CommandSection::Customize),
+            AppCommand::Export { .. } | AppCommand::Bookmarks => Some(CommandSection::Context),
+            AppCommand::Logout | AppCommand::Bug | AppCommand::Config => {
+                Some(CommandSection::Settings)
+            }
+            AppCommand::Model => Some(CommandSection::Model),
+            AppCommand::New
+            | AppCommand::Resume
+            | AppCommand::Settings
+            | AppCommand::Diff
+            | AppCommand::Files
+            | AppCommand::Terminal
+            | AppCommand::Stop
+            | AppCommand::Plan { .. }
+            | AppCommand::Fork { .. }
+            | AppCommand::Rewind
+            | AppCommand::Usage
+            | AppCommand::Copy { .. }
+            | AppCommand::Btw { .. }
+            | AppCommand::Login
+            | AppCommand::Tasks => None,
+        }
+    }
 
     fn name(&self) -> &'static str {
         match self {
@@ -169,6 +234,10 @@ impl AppCommand {
             AppCommand::Btw { .. } => "btw",
             AppCommand::Login => "login",
             AppCommand::Logout => "logout",
+            AppCommand::Bookmarks => "bookmarks",
+            AppCommand::Bug => "bug",
+            AppCommand::Config => "config",
+            AppCommand::Tasks => "tasks",
         }
     }
 
@@ -200,6 +269,10 @@ impl AppCommand {
             AppCommand::Btw { .. } => t!("Wu: ask a side question without interrupting the agent"),
             AppCommand::Login => t!("Wu: sign in to Claude"),
             AppCommand::Logout => t!("Wu: sign out of Claude"),
+            AppCommand::Bookmarks => t!("Wu: show saved messages"),
+            AppCommand::Bug => t!("Wu: report a problem"),
+            AppCommand::Config => t!("Wu: open agent chat settings"),
+            AppCommand::Tasks => t!("Wu: show running background tasks"),
         }
     }
 
@@ -231,8 +304,25 @@ impl AppCommand {
             | AppCommand::Copy { .. }
             | AppCommand::Btw { .. }
             | AppCommand::Login
-            | AppCommand::Logout => None,
+            | AppCommand::Logout
+            | AppCommand::Bookmarks
+            | AppCommand::Bug
+            | AppCommand::Config
+            | AppCommand::Tasks => None,
         }
+    }
+}
+
+/// The Wu command that stands in for a CLI built-in Wu handles natively or redirects.
+pub(crate) fn hidden_command_target(name: &str) -> Option<AppCommand> {
+    match name {
+        "clear" => Some(AppCommand::New),
+        "model" | "effort" | "fast" => Some(AppCommand::Model),
+        "resume" => Some(AppCommand::Resume),
+        "bug" | "feedback" => Some(AppCommand::Bug),
+        "chrome" => Some(AppCommand::Config),
+        "bashes" => Some(AppCommand::Tasks),
+        _ => None,
     }
 }
 
@@ -248,6 +338,7 @@ pub(crate) struct CommandItem {
     pub detail: String,
     pub target: CommandTarget,
     pub is_skill: bool,
+    pub section: Option<CommandSection>,
 }
 
 pub(crate) fn command_items(agent_commands: &[SlashCommand]) -> Vec<CommandItem> {
@@ -262,6 +353,7 @@ pub(crate) fn command_items(agent_commands: &[SlashCommand]) -> Vec<CommandItem>
             },
             target: CommandTarget::Agent,
             is_skill: command.is_skill,
+            section: None,
         })
         .collect();
     for command in AppCommand::ALL {
@@ -272,6 +364,7 @@ pub(crate) fn command_items(agent_commands: &[SlashCommand]) -> Vec<CommandItem>
         items.push(CommandItem {
             name,
             detail: command.description().to_string(),
+            section: command.section(),
             target: CommandTarget::App(command),
             is_skill: false,
         });
@@ -333,6 +426,21 @@ pub(crate) fn app_command_for_text(text: &str, items: &[CommandItem]) -> Option<
         }),
         CommandTarget::App(command) if item.name == name && argument.is_empty() => {
             Some(command.clone())
+        }
+        _ => None,
+    })
+}
+
+/// What to tell the user when `text` names a Wu command but its arguments don't fit.
+pub(crate) fn argument_error(text: &str, items: &[CommandItem]) -> Option<SharedString> {
+    let text = text.trim().strip_prefix('/')?;
+    let (name, _) = text.split_once(char::is_whitespace)?;
+    items.iter().find_map(|item| match &item.target {
+        CommandTarget::App(AppCommand::Copy { .. }) if item.name == name => {
+            Some(t!("/copy takes a reply number, like /copy 2."))
+        }
+        CommandTarget::App(_) if item.name == name => {
+            Some(t!("/{name} takes no arguments.", name = name))
         }
         _ => None,
     })
@@ -403,7 +511,8 @@ mod tests {
     fn wu_commands_step_aside_for_agent_commands() {
         let items = command_items(&[agent("review"), agent("model")]);
         let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
-        assert_eq!(&names[..3], ["review", "model", "wu:model"]);
+        assert_eq!(&names[..2], ["review", "model"]);
+        assert!(names.contains(&"wu:model"));
         assert_eq!(
             app_command_for_text(" /wu:model ", &items),
             Some(AppCommand::Model)
@@ -485,6 +594,87 @@ mod tests {
             .filter(|name| !agent_harness::claude::is_hidden_command(name))
             .collect();
         assert_eq!(shadowed, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn menu_groups_commands_into_sections() {
+        let items = command_items(&[agent("review")]);
+        let names_in = |section: CommandSection| -> Vec<&str> {
+            items
+                .iter()
+                .filter(|item| item.section == Some(section))
+                .map(|item| item.name.as_str())
+                .collect()
+        };
+        assert_eq!(
+            names_in(CommandSection::Customize),
+            [
+                "mcp",
+                "skills",
+                "output-style",
+                "hooks",
+                "permissions",
+                "memory",
+                "status",
+                "sandbox",
+                "plugins"
+            ]
+        );
+        assert_eq!(names_in(CommandSection::Context), ["export", "bookmarks"]);
+        assert_eq!(
+            names_in(CommandSection::Settings),
+            ["logout", "bug", "config"]
+        );
+        assert_eq!(names_in(CommandSection::Model), ["model"]);
+        let mut order: Vec<CommandSection> = items.iter().filter_map(|item| item.section).collect();
+        order.dedup();
+        assert_eq!(
+            order,
+            [
+                CommandSection::Customize,
+                CommandSection::Context,
+                CommandSection::Settings,
+                CommandSection::Model
+            ]
+        );
+        let first_sectioned = items.iter().position(|item| item.section.is_some());
+        assert_eq!(
+            items.iter().rposition(|item| item.section.is_none()),
+            first_sectioned.map(|index| index - 1)
+        );
+    }
+
+    #[test]
+    fn bug_and_feedback_open_the_issue_page() {
+        assert_eq!(hidden_command_target("bug"), Some(AppCommand::Bug));
+        assert_eq!(hidden_command_target("feedback"), Some(AppCommand::Bug));
+        assert_eq!(ISSUE_URL, "https://github.com/dstrml/wu/issues/new");
+        assert_eq!(hidden_command_target("chrome"), Some(AppCommand::Config));
+        assert_eq!(hidden_command_target("bashes"), Some(AppCommand::Tasks));
+        assert_eq!(hidden_command_target("vim"), None);
+        assert_eq!(hidden_command_target("config"), None);
+        assert_eq!(hidden_command_target("remote-control"), None);
+    }
+
+    #[test]
+    fn extra_text_after_a_wu_command_gets_an_accurate_message() {
+        let items = command_items(&[agent("review")]);
+        let message = |text| argument_error(text, &items).map(|message| message.to_string());
+        assert_eq!(
+            message("/new chat"),
+            Some("/new takes no arguments.".into())
+        );
+        assert_eq!(
+            message("/stop now"),
+            Some("/stop takes no arguments.".into())
+        );
+        assert_eq!(
+            message("/copy abc"),
+            Some("/copy takes a reply number, like /copy 2.".into())
+        );
+        assert_eq!(message("/new"), None);
+        assert_eq!(message("/review now"), None);
+        assert_eq!(message("/vim now"), None);
     }
 
     #[test]

@@ -613,7 +613,7 @@ impl AgentPanel {
             .into_any_element()
     }
 
-    fn toggle_saved_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_saved_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.showing_saved = !self.showing_saved;
         let placeholder = if self.showing_saved {
             t!("Search saved messages…")

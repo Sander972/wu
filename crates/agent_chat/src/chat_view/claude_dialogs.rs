@@ -302,34 +302,65 @@ fn duration_text(milliseconds: u64) -> String {
     }
 }
 
+fn scope_name(scope: &Value) -> Option<&str> {
+    scope["model"]["display_name"]
+        .as_str()
+        .or_else(|| scope["surface"].as_str())
+}
+
 pub(crate) fn usage_sections(response: &Value) -> Vec<DialogSection> {
     usage_sections_at(response, chrono::Utc::now())
 }
 
 fn usage_sections_at(response: &Value, now: chrono::DateTime<chrono::Utc>) -> Vec<DialogSection> {
-    let windows = [
-        ("five_hour", t!("Session (5 hours)")),
-        ("seven_day", t!("Weekly")),
-        ("seven_day_opus", t!("Weekly (Opus)")),
-        ("seven_day_sonnet", t!("Weekly (Sonnet)")),
-        ("seven_day_oauth_apps", t!("Weekly (OAuth apps)")),
-    ];
-    let mut limits: Vec<DialogRow> = windows
+    let reset_detail = |resets_at: &Value| {
+        resets_at
+            .as_str()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .and_then(|at| resets_in(at.into(), now))
+            .map(SharedString::from)
+    };
+    // `limits[]` is the CLI's newer list and also carries the model-scoped windows, so it replaces the fixed windows when present.
+    let mut limits: Vec<DialogRow> = response["rate_limits"]["limits"]
+        .as_array()
         .into_iter()
-        .filter_map(|(key, label)| {
-            let window = &response["rate_limits"][key];
-            let used = window["utilization"].as_f64()?;
+        .flatten()
+        .filter_map(|limit| {
+            let used = limit["percent"].as_f64()?;
+            let label = match (limit["kind"].as_str()?, scope_name(&limit["scope"])) {
+                ("session", _) => t!("Session (5 hours)"),
+                ("weekly_scoped", Some(scope)) => t!("Weekly ({scope})", scope = scope),
+                (kind, _) if kind.starts_with("weekly") => t!("Weekly"),
+                (kind, _) => kind.replace('_', " ").into(),
+            };
             Some(DialogRow {
                 badge: Some(format!("{used:.0}%").into()),
-                detail: window["resets_at"]
-                    .as_str()
-                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-                    .and_then(|at| resets_in(at.into(), now))
-                    .map(SharedString::from),
+                detail: reset_detail(&limit["resets_at"]),
                 ..DialogRow::new(label)
             })
         })
         .collect();
+    if limits.is_empty() {
+        let windows = [
+            ("five_hour", t!("Session (5 hours)")),
+            ("seven_day", t!("Weekly")),
+            ("seven_day_opus", t!("Weekly (Opus)")),
+            ("seven_day_sonnet", t!("Weekly (Sonnet)")),
+            ("seven_day_oauth_apps", t!("Weekly (OAuth apps)")),
+        ];
+        limits = windows
+            .into_iter()
+            .filter_map(|(key, label)| {
+                let window = &response["rate_limits"][key];
+                let used = window["utilization"].as_f64()?;
+                Some(DialogRow {
+                    badge: Some(format!("{used:.0}%").into()),
+                    detail: reset_detail(&window["resets_at"]),
+                    ..DialogRow::new(label)
+                })
+            })
+            .collect();
+    }
     if limits.is_empty() {
         limits.push(DialogRow::new(t!(
             "Plan limits are not available for this login method."
@@ -1932,7 +1963,7 @@ impl Render for LoginDialog {
     }
 }
 
-fn show_toast<C: gpui::AppContext>(
+pub(super) fn show_toast<C: gpui::AppContext>(
     workspace: &WeakEntity<Workspace>,
     message: impl Into<String>,
     cx: &mut C,
@@ -2209,7 +2240,11 @@ impl ChatView {
             | AppCommand::Copy { .. }
             | AppCommand::Btw { .. }
             | AppCommand::Login
-            | AppCommand::Logout => return,
+            | AppCommand::Logout
+            | AppCommand::Bookmarks
+            | AppCommand::Bug
+            | AppCommand::Config
+            | AppCommand::Tasks => return,
         };
         let session = self.session.clone();
         let weak_workspace = self.workspace.clone();
@@ -2891,6 +2926,44 @@ mod tests {
         let unavailable = usage_sections_at(&json!({ "rate_limits": null }), now);
         assert_eq!(unavailable.len(), 1);
         assert_eq!(unavailable[0].rows.len(), 1);
+    }
+
+    #[test]
+    fn usage_rows_come_from_limits_including_model_scoped_ones() {
+        let response = json!({
+            "rate_limits": {
+                "five_hour": null,
+                "limits": [
+                    { "kind": "session", "percent": 19, "resets_at": "2026-11-26T11:39:59+00:00", "scope": null },
+                    { "kind": "weekly_all", "percent": 47, "resets_at": "2026-12-01T00:59:59+00:00", "scope": null },
+                    {
+                        "kind": "weekly_scoped", "percent": 19, "resets_at": "2026-12-01T00:59:59+00:00",
+                        "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null }
+                    }
+                ]
+            }
+        });
+        let now = "2026-11-26T09:30:00+00:00"
+            .parse()
+            .expect("a valid timestamp");
+        let sections = usage_sections_at(&response, now);
+        let rows: Vec<(&str, &str)> = sections[0]
+            .rows
+            .iter()
+            .map(|row| (row.label.as_ref(), row.badge.as_deref().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Session (5 hours)", "19%"),
+                ("Weekly", "47%"),
+                ("Weekly (Fable)", "19%")
+            ]
+        );
+        assert_eq!(
+            sections[0].rows[0].detail.as_deref(),
+            Some("Resets in 2h 9m")
+        );
     }
 
     #[test]

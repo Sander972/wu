@@ -1,4 +1,4 @@
-use super::{ChatView, icon, links::FileTarget};
+use super::{ChatView, claude_dialogs::show_toast, icon, links::FileTarget};
 use crate::chat_style::{Chip, format_elapsed, ink, popover_card, text_faint, ui};
 use crate::session::AgentSession;
 use crate::usage_rings::menu_heading;
@@ -79,6 +79,14 @@ impl ChatView {
         });
     }
 
+    pub(super) fn show_background_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.read(cx).background_tasks().is_empty() {
+            show_toast(&self.workspace, t!("No background tasks are running."), cx);
+            return;
+        }
+        self.background_card.show(window, cx);
+    }
+
     pub(super) fn render_background_indicator(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let tasks = self.session.read(cx).background_tasks();
         let oldest = tasks.iter().map(|task| task.started_at).min()?;
@@ -136,6 +144,7 @@ impl ChatView {
                 let chat = chat.clone();
                 Some(cx.new(|cx| BackgroundTasksCard::new(session, chat, cx)))
             })
+            .with_handle(self.background_card.clone())
             .anchor(Anchor::BottomLeft)
             .attach(Anchor::TopLeft)
             .offset(point(px(0.), px(-6.)))
@@ -182,7 +191,7 @@ fn background_rows(session: &AgentSession) -> Vec<TaskRow> {
         .collect()
 }
 
-struct BackgroundTasksCard {
+pub(super) struct BackgroundTasksCard {
     session: Entity<AgentSession>,
     chat: WeakEntity<ChatView>,
     focus_handle: FocusHandle,

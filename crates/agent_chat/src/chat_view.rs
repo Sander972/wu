@@ -235,6 +235,7 @@ pub struct ChatView {
     _rename_subscription: Option<Subscription>,
     background_ticking: bool,
     _background_tick: Task<()>,
+    background_card: ui::PopoverMenuHandle<background_tasks::BackgroundTasksCard>,
     search: search::SearchState,
     outline_hover: Option<usize>,
     expanded_work: HashSet<usize>,
@@ -446,6 +447,7 @@ impl ChatView {
             _rename_subscription: None,
             background_ticking: false,
             _background_tick: Task::ready(()),
+            background_card: Default::default(),
             search: Default::default(),
             outline_hover: None,
             expanded_work: HashSet::default(),
@@ -6031,7 +6033,8 @@ mod tests {
 
         cx.simulate_input("/");
         let names = matches(&view, cx);
-        assert!(!names.contains(&"usage".to_string()));
+        assert_eq!(names.iter().filter(|name| *name == "usage").count(), 1);
+        assert!(!names.contains(&"wu:usage".to_string()));
         assert_eq!(names.iter().filter(|name| *name == "model").count(), 1);
         cx.simulate_keystrokes("escape");
         cx.simulate_input("usage now");
@@ -6049,6 +6052,46 @@ mod tests {
                 Some(Entry::User { text, .. }) if text.as_ref() == "/nothing-like-this"
             ))
         });
+    }
+
+    #[gpui::test]
+    async fn bug_and_feedback_open_the_issue_page(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        bind_composer_keys(cx);
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                session.clone(),
+                store.clone(),
+                project,
+                WeakEntity::new_invalid(),
+                window,
+                cx,
+            )
+        });
+        view.update_in(cx, |view, window, cx| {
+            window.focus(&view.composer.focus_handle(cx), cx)
+        });
+
+        for command in ["/bug", "/feedback"] {
+            cx.simulate_input(command);
+            cx.simulate_keystrokes("escape enter");
+            assert_eq!(composer_text(&view, cx), "");
+            assert_eq!(
+                cx.opened_url().as_deref(),
+                Some("https://github.com/dstrml/wu/issues/new")
+            );
+            session.read_with(cx, |session, _| assert!(session.entries().is_empty()));
+        }
     }
 
     #[gpui::test]

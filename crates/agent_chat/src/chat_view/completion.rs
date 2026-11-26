@@ -1,13 +1,15 @@
-use super::{ChatView, ui};
 use super::editor_context::{applied_line_suffix, mention_text_with_lines, open_terminals};
+use super::{ChatView, claude_dialogs::show_toast, ui};
 use crate::{
     AcceptCommand, AgentKind, DismissCommands, NewAntigravityChat, NewClaudeChat, NewCodexChat,
     NewOpencodeChat, SelectNextCommand, SelectPreviousCommand, Send, ToggleFocus,
+    agent_panel::AgentPanel,
     chat_style::{MENU_ITEM_RADIUS, icon, ink, popover_card, selected_row, working_animation},
     slash_commands::{
-        AppCommand, CommandItem, CommandTarget, CommandToken, TokenKind, command_items,
-        completion_token, filter_commands,
+        AppCommand, CommandItem, CommandSection, CommandTarget, CommandToken, ISSUE_URL, TokenKind,
+        argument_error, command_items, completion_token, filter_commands, hidden_command_target,
     },
+    usage_rings::menu_heading,
 };
 use agent_harness::{PermissionMode, SkillRef};
 use editor::{FoldPlaceholder, MultiBufferOffset, SelectionEffects, display_map::Crease};
@@ -27,7 +29,6 @@ use std::{
 };
 use ui::{IconName, prelude::*};
 use util::{ResultExt as _, paths::compare_rel_paths, rel_path::RelPath};
-use workspace::{Toast, notifications::NotificationId};
 
 const MAX_MENTION_RESULTS: usize = 50;
 
@@ -68,6 +69,13 @@ impl Row {
             }
         };
         icon(name, px(size), cx.theme().colors().text_muted).into_any_element()
+    }
+
+    fn section(&self) -> Option<CommandSection> {
+        match self {
+            Row::Command(item) => item.section,
+            Row::Skill(_) | Row::Mention(_) | Row::Terminal(_) => None,
+        }
     }
 
     fn label(&self) -> String {
@@ -244,6 +252,7 @@ impl ChatView {
                             | AppCommand::Btw { .. }
                             | AppCommand::Login
                             | AppCommand::Logout
+                            | AppCommand::Tasks
                     )
                 )
             });
@@ -822,6 +831,25 @@ impl ChatView {
             AppCommand::Btw { question } => self.ask_side_question(question, window, cx),
             AppCommand::Login => self.show_login_dialog(window, cx),
             AppCommand::Logout => self.sign_out(window, cx),
+            AppCommand::Bug => cx.open_url(ISSUE_URL),
+            AppCommand::Config => match cx.build_action(
+                "wu::OpenSettingsPage",
+                Some(serde_json::json!({ "page": "Agent Chat" })),
+            ) {
+                Ok(action) => window.dispatch_action(action, cx),
+                Err(error) => log::error!("cannot open the agent chat settings: {error}"),
+            },
+            AppCommand::Bookmarks => {
+                self.workspace
+                    .update(cx, |workspace, cx| {
+                        workspace.open_panel::<AgentPanel>(window, cx);
+                        if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                            panel.update(cx, |panel, cx| panel.toggle_saved_messages(window, cx));
+                        }
+                    })
+                    .log_err();
+            }
+            AppCommand::Tasks => self.show_background_tasks(window, cx),
             AppCommand::Settings | AppCommand::Diff | AppCommand::Files | AppCommand::Terminal => {
                 let Some(name) = command.action_name() else {
                     return;
@@ -843,33 +871,26 @@ impl ChatView {
         let Some((name, _)) = agent_harness::leading_command(text) else {
             return false;
         };
+        let items = self.command_items(cx);
+        let argument_error = argument_error(text, &items);
         if self.session.read(cx).kind() != AgentKind::Claude
-            || !agent_harness::claude::is_hidden_command(name)
-            || self
-                .command_items(cx)
+            || !(agent_harness::claude::is_hidden_command(name) || argument_error.is_some())
+            || items
                 .iter()
                 .any(|item| item.target == CommandTarget::Agent && item.name == name)
         {
             return false;
         }
-        match name {
-            "clear" => self.run_app_command(AppCommand::New, window, cx),
-            "model" | "effort" | "fast" => self.run_app_command(AppCommand::Model, window, cx),
-            "resume" => self.run_app_command(AppCommand::Resume, window, cx),
-            _ => {
-                let message = t!(
-                    "/{name} only works in Claude Code in the terminal.",
-                    name = name
-                )
-                .to_string();
-                self.workspace
-                    .update(cx, |workspace, cx| {
-                        workspace.show_toast(
-                            Toast::new(NotificationId::unique::<ChatView>(), message).autohide(),
-                            cx,
-                        )
-                    })
-                    .log_err();
+        match hidden_command_target(name) {
+            Some(command) => self.run_app_command(command, window, cx),
+            None => {
+                let message = argument_error.unwrap_or_else(|| {
+                    t!(
+                        "/{name} only works in Claude Code in the terminal.",
+                        name = name
+                    )
+                });
+                show_toast(&self.workspace, message.to_string(), cx);
             }
         }
         true
@@ -911,6 +932,18 @@ impl ChatView {
                 .text_color(color)
                 .child(text)
         };
+        let show_sections = menu.kind == TokenKind::Command && menu.token.query.is_empty();
+        let mut previous_section = None;
+        let headings: Vec<Option<CommandSection>> = rows
+            .iter()
+            .map(|row| {
+                let section = row.section();
+                let heading =
+                    section.filter(|section| show_sections && previous_section != Some(*section));
+                previous_section = section;
+                heading
+            })
+            .collect();
         let row_elements: Vec<AnyElement> = rows
             .into_iter()
             .enumerate()
@@ -965,6 +998,20 @@ impl ChatView {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.pick_command(index, window, cx)
                     }))
+                    .into_any_element()
+            })
+            .collect();
+        // One child per row keeps `scroll_to_item` indexes aligned with the rows.
+        let row_elements: Vec<AnyElement> = row_elements
+            .into_iter()
+            .zip(headings)
+            .map(|(element, heading)| {
+                v_flex()
+                    .flex_none()
+                    .when_some(heading, |this, section| {
+                        this.child(menu_heading(&section.title(), cx))
+                    })
+                    .child(element)
                     .into_any_element()
             })
             .collect();
