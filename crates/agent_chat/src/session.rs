@@ -8,8 +8,8 @@ use anyhow::{Context as _, Result};
 use collections::{HashMap, HashSet};
 use futures::{FutureExt as _, StreamExt as _, future::Shared};
 use gpui::{
-    App, AppContext as _, Context, Entity, EntityId, EventEmitter, FutureExt as _, Global,
-    SharedString, Task, TaskExt as _, WeakEntity,
+    App, AppContext as _, ClipboardItem, Context, Entity, EntityId, EventEmitter, FutureExt as _,
+    Global, SharedString, Task, TaskExt as _, WeakEntity,
 };
 use i18n::{n, t};
 use language::LanguageRegistry;
@@ -1173,6 +1173,10 @@ enum RunInput {
         message: serde_json::Value,
         reply: tokio::sync::oneshot::Sender<serde_json::Value>,
     },
+    UiHost {
+        request: serde_json::Value,
+        reply: tokio::sync::oneshot::Sender<serde_json::Value>,
+    },
     Ended,
 }
 
@@ -1233,6 +1237,7 @@ pub enum SessionEvent {
     Finished { errored: bool },
     NeedsInput,
     CommandsReported(Vec<SlashCommand>),
+    PluginUi(serde_json::Value),
 }
 
 pub struct AgentSession {
@@ -1251,6 +1256,13 @@ pub struct AgentSession {
     remote_control_available: bool,
     /// The link of this run's Remote Control session, which ends with the run.
     remote_control_url: Option<String>,
+    /// What the live run's agent announced it supports; empty between runs.
+    capabilities: Vec<String>,
+    /// The agent's `ui_prompt_read` and `ui_prompt_fill` requests, which a chat view answers from its composer.
+    prompt_requests: Vec<(
+        serde_json::Value,
+        tokio::sync::oneshot::Sender<serde_json::Value>,
+    )>,
     run_failed: bool,
     harness: Arc<dyn Harness>,
     restart_on_next_send: bool,
@@ -1339,6 +1351,8 @@ impl AgentSession {
             prompt_cache_ticker: Task::ready(()),
             run_suggests_prompts: false,
             remote_control_available: false,
+            capabilities: Vec::new(),
+            prompt_requests: Vec::new(),
             remote_control_url: None,
             run_failed: false,
             harness,
@@ -1569,6 +1583,24 @@ impl AgentSession {
     /// Without a live run, a control request goes to a one-off process, so session-scoped changes are lost.
     pub fn has_live_run(&self) -> bool {
         self.run.is_some()
+    }
+
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
+    /// Counts the runs started so far, so a view can tell whether it already set up the live run.
+    pub fn runs_started(&self) -> u64 {
+        self.runs_started
+    }
+
+    pub fn take_prompt_requests(
+        &mut self,
+    ) -> Vec<(
+        serde_json::Value,
+        tokio::sync::oneshot::Sender<serde_json::Value>,
+    )> {
+        std::mem::take(&mut self.prompt_requests)
     }
 
     pub fn remote_control_available(&self) -> bool {
@@ -2755,6 +2787,10 @@ impl AgentSession {
             serde_json::Value,
             tokio::sync::oneshot::Sender<serde_json::Value>,
         )>();
+        let (ui_host_tx, ui_host_rx) = futures::channel::mpsc::unbounded::<(
+            serde_json::Value,
+            tokio::sync::oneshot::Sender<serde_json::Value>,
+        )>();
         let controls = RunControls {
             request_input: Box::new(move |questions| {
                 let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
@@ -2777,6 +2813,13 @@ impl AgentSession {
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 if mcp_tx.unbounded_send((message, reply_tx)).is_err() {
                     log::debug!("agent sent an MCP message after its chat closed");
+                }
+                reply_rx
+            }),
+            ui_host: Arc::new(move |request| {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if ui_host_tx.unbounded_send((request, reply_tx)).is_err() {
+                    log::debug!("agent sent a drawing request after its chat closed");
                 }
                 reply_rx
             }),
@@ -2806,11 +2849,16 @@ impl AgentSession {
             });
             let file_tools = file_tool_rx.map(|(path, saved)| RunInput::FileTool { path, saved });
             let mcp_messages = mcp_rx.map(|(message, reply)| RunInput::Mcp { message, reply });
+            let ui_host_requests =
+                ui_host_rx.map(|(request, reply)| RunInput::UiHost { request, reply });
             let mut inputs = futures::stream::select(
                 events,
                 futures::stream::select(
                     questions,
-                    futures::stream::select(file_tools, mcp_messages),
+                    futures::stream::select(
+                        file_tools,
+                        futures::stream::select(mcp_messages, ui_host_requests),
+                    ),
                 ),
             )
             .ready_chunks(RUN_INPUT_BATCH);
@@ -2882,10 +2930,41 @@ impl AgentSession {
                     })
                     .detach();
                 }
+                RunInput::UiHost { request, reply } => self.answer_ui_host(request, reply, cx),
                 RunInput::Ended => return ControlFlow::Break(()),
             }
         }
         ControlFlow::Continue(())
+    }
+
+    fn answer_ui_host(
+        &mut self,
+        request: serde_json::Value,
+        reply: tokio::sync::oneshot::Sender<serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) {
+        let answer = match request["subtype"].as_str() {
+            // Only plain text reaches the clipboard, whatever else the request carries.
+            Some("ui_copy") => match request["text"].as_str() {
+                Some(text) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+                    serde_json::json!({ "copied": true })
+                }
+                None => serde_json::json!({ "copied": false }),
+            },
+            Some("ui_prompt_read" | "ui_prompt_fill") => {
+                // Requests nobody answered were already given up on by the agent.
+                self.prompt_requests.retain(|(_, reply)| !reply.is_closed());
+                self.prompt_requests.push((request, reply));
+                cx.notify();
+                return;
+            }
+            // The extension (2.1.332) declines suggestions too.
+            _ => serde_json::json!({ "shown": false }),
+        };
+        if reply.send(answer).is_err() {
+            log::debug!("the agent stopped waiting for a drawing request answer");
+        }
     }
 
     fn fail_run(&mut self, message: String, cx: &mut Context<Self>) {
@@ -2910,6 +2989,8 @@ impl AgentSession {
     fn run_ended(&mut self, cx: &mut Context<Self>) {
         self.run = None;
         self.remote_control_url = None;
+        self.capabilities.clear();
+        self.prompt_requests.clear();
         self.background_tasks.clear();
         self.known_tasks.clear();
         self.pending_questions.clear();
@@ -3002,7 +3083,12 @@ impl AgentSession {
     fn apply_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
         self.active_at = Instant::now();
         match event {
-            AgentEvent::SessionStarted { session_id, .. } => {
+            AgentEvent::SessionStarted {
+                session_id,
+                capabilities,
+                ..
+            } => {
+                self.capabilities = capabilities;
                 if !session_id.is_empty() {
                     self.set_native_session_id(session_id, cx);
                 }
@@ -3269,6 +3355,7 @@ impl AgentSession {
             AgentEvent::RemoteControlAvailable { available } => {
                 self.remote_control_available = available;
             }
+            AgentEvent::PluginUi { event } => cx.emit(SessionEvent::PluginUi(event)),
             AgentEvent::Usage { .. }
             | AgentEvent::InputRequested { .. }
             | AgentEvent::InputResolved { .. }
@@ -5804,6 +5891,7 @@ impl AgentStore {
                 catalog.fetched_at = Some(Instant::now());
                 cx.notify();
             }
+            SessionEvent::PluginUi(_) => {}
         })
         .detach();
         self.released.remove(&id);
@@ -8553,6 +8641,17 @@ done
                 session.apply_event(event, cx);
             }
         });
+    }
+
+    /// Hands the session a drawing request as the agent's `ui_host` callback would.
+    pub(crate) fn ui_host_request(
+        session: &Entity<AgentSession>,
+        request: serde_json::Value,
+        cx: &mut gpui::VisualTestContext,
+    ) -> tokio::sync::oneshot::Receiver<serde_json::Value> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        session.update(cx, |session, cx| session.answer_ui_host(request, reply, cx));
+        answer
     }
 
     /// Gives the session a live run whose control requests land in the returned receiver.

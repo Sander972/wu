@@ -123,6 +123,8 @@ pub struct RunControls {
     pub before_file_tool: BeforeFileToolFn,
     /// Answers a JSON-RPC message the agent sends to wu's in-process `ide` MCP server.
     pub mcp: McpMessageFn,
+    /// Answers the plugin drawing requests the agent sends its host (`ui_copy`, `ui_prompt_read`, `ui_prompt_fill`, `ui_prompt_suggest`), given as the request body with its `subtype`.
+    pub ui_host: UiHostFn,
 }
 
 pub type BeforeFileToolFn = std::sync::Arc<dyn Fn(String) -> oneshot::Receiver<()> + Send + Sync>;
@@ -138,6 +140,14 @@ pub type McpMessageFn =
 
 /// An `mcp` for runs that serve no MCP tools: every message gets an error reply.
 pub fn no_mcp_servers() -> McpMessageFn {
+    std::sync::Arc::new(|_| oneshot::channel().1)
+}
+
+pub type UiHostFn =
+    std::sync::Arc<dyn Fn(serde_json::Value) -> oneshot::Receiver<serde_json::Value> + Send + Sync>;
+
+/// A `ui_host` for runs that draw no plugin panels: every request gets an empty answer.
+pub fn no_ui_host() -> UiHostFn {
     std::sync::Arc::new(|_| oneshot::channel().1)
 }
 

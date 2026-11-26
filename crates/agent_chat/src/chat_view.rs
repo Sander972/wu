@@ -12,6 +12,7 @@ mod links;
 mod mermaid;
 mod outline;
 mod persistence;
+mod plugin_ui;
 mod queue_panel;
 mod search;
 mod side_pane;
@@ -35,8 +36,8 @@ use crate::{
     },
     model_picker::{ModelPicker, Selection, agent_icon},
     session::{
-        AgentSession, AgentStore, Entry, PendingQuestion, Prompt, RewindPreview, ToolEntry,
-        ToolStatus,
+        AgentSession, AgentStore, Entry, PendingQuestion, Prompt, RewindPreview, SessionEvent,
+        ToolEntry, ToolStatus,
     },
     slash_commands::{AppCommand, CommandToken, app_command_for_text},
     usage_rings::{ContextCard, UsageCard, context_chip, context_chip_shown, usage_chip},
@@ -198,6 +199,7 @@ pub struct ChatView {
     side_pane: Option<side_pane::SidePane>,
     side_pane_openings: usize,
     _side_pane_load: Task<()>,
+    plugin_ui: plugin_ui::PluginUi,
     pending_side_questions: Vec<(u64, side_pane::PendingSideQuestion)>,
     side_questions_asked: u64,
     workspace: WeakEntity<Workspace>,
@@ -357,6 +359,7 @@ impl ChatView {
                 this.schedule_search_refresh(cx);
                 if this.subagent.is_none() {
                     this.sync_answer_editors(window, cx);
+                    this.answer_prompt_requests(window, cx);
                 }
                 this.sync_tab(cx);
                 cx.notify();
@@ -373,8 +376,16 @@ impl ChatView {
                 EditorEvent::SelectionsChanged { .. } => this.update_command_menu(cx),
                 _ => {}
             }),
+            cx.subscribe(&session, |this, _, event: &SessionEvent, cx| {
+                if let SessionEvent::PluginUi(event) = event
+                    && this.subagent.is_none()
+                {
+                    this.apply_plugin_ui_event(event, cx);
+                }
+            }),
             cx.on_release(|this, cx| {
                 if this.subagent.is_none() {
+                    this.plugin_ui.detach(&this.session, cx);
                     let id = this.session.read(cx).metadata().id.clone();
                     this.store.update(cx, |store, _| store.chat_closed(&id));
                 }
@@ -424,6 +435,7 @@ impl ChatView {
             side_pane: None,
             side_pane_openings: 0,
             _side_pane_load: Task::ready(()),
+            plugin_ui: plugin_ui::PluginUi::new(),
             pending_side_questions: Vec::new(),
             side_questions_asked: 0,
             workspace,
@@ -4509,6 +4521,7 @@ impl ChatView {
         }
         if self.subagent.is_none() {
             self.sync_prompt_suggestion(window, cx);
+            self.sync_plugin_ui(window, cx);
         }
         self.sync_transcript(cx);
         self.update_scroll_state();
@@ -4710,6 +4723,7 @@ impl Item for ChatView {
             self.session.update(cx, |session, cx| {
                 session.set_prompt_suggestions_paused(true, cx)
             });
+            self.plugin_ui.detach(&self.session, cx);
         }
     }
 
@@ -6526,6 +6540,103 @@ mod tests {
         assert_eq!(
             view_mode_request(&mut receiver),
             serde_json::json!({ "subtype": "apply_flag_settings", "settings": { "viewMode": null } })
+        );
+    }
+
+    #[gpui::test]
+    async fn plugin_ui_attaches_only_with_the_capability_and_detaches_when_hidden(
+        cx: &mut TestAppContext,
+    ) {
+        let (session, view, cx) = focus_chat(cx).await;
+        let mut receiver = crate::session::tests::attach_live_run(&session, cx);
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            cx.run_until_parked();
+        };
+        draw(cx);
+        assert!(receiver.try_recv().is_err(), "nothing is sent without the capability");
+
+        feed_events(
+            &session,
+            vec![AgentEvent::SessionStarted {
+                harness: agent_harness::HarnessId::ClaudeCode,
+                model: String::new(),
+                tools: Vec::new(),
+                cwd: String::new(),
+                session_id: String::new(),
+                assistant_message_id: "a1".into(),
+                capabilities: vec!["ui_surface_v1".into()],
+            }],
+            cx,
+        );
+        draw(cx);
+        let Ok(agent_harness::Steer::Control(attach)) = receiver.try_recv() else {
+            panic!("expected a ui_attach request");
+        };
+        assert_eq!(attach.request["subtype"], "ui_attach");
+        assert_eq!(attach.request["surface"], "vscode");
+        let client_id = attach.request["client_id"].clone();
+        assert!(client_id.is_string());
+        attach
+            .reply
+            .send(Ok(serde_json::json!({ "surfaces": ["vscode"] })))
+            .expect("the chat waits for the reply");
+        draw(cx);
+        assert!(
+            receiver.try_recv().is_err(),
+            "an attached chat doesn't attach again"
+        );
+
+        view.update_in(cx, |view, window, cx| Item::deactivated(view, window, cx));
+        cx.run_until_parked();
+        let Ok(agent_harness::Steer::Control(detach)) = receiver.try_recv() else {
+            panic!("expected a ui_detach request");
+        };
+        assert_eq!(
+            detach.request,
+            serde_json::json!({ "subtype": "ui_detach", "client_id": client_id })
+        );
+    }
+
+    #[gpui::test]
+    async fn plugin_ui_reads_fills_and_copies_for_the_agent(cx: &mut TestAppContext) {
+        let (session, view, cx) = focus_chat(cx).await;
+        let ask = |request: serde_json::Value, cx: &mut VisualTestContext| {
+            let mut answer = crate::session::tests::ui_host_request(&session, request, cx);
+            cx.run_until_parked();
+            answer.try_recv().expect("the request was answered")
+        };
+        view.update_in(cx, |view, window, cx| {
+            view.set_composer_text_for_test("héllo", window, cx);
+            view.composer.update(cx, |editor, cx| {
+                editor.move_to_end(&editor::actions::MoveToEnd, window, cx)
+            });
+        });
+        assert_eq!(
+            ask(serde_json::json!({ "subtype": "ui_prompt_read" }), cx),
+            serde_json::json!({ "text": "héllo", "cursor": 5 })
+        );
+        assert_eq!(
+            ask(
+                serde_json::json!({ "subtype": "ui_prompt_fill", "text": " world", "mode": "append" }),
+                cx
+            ),
+            serde_json::json!({ "filled": true })
+        );
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.composer.read(cx).text(cx)),
+            "héllo world"
+        );
+        assert_eq!(
+            ask(serde_json::json!({ "subtype": "ui_copy", "text": "copied" }), cx),
+            serde_json::json!({ "copied": true })
+        );
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("copied".to_owned())
         );
     }
 

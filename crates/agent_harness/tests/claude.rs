@@ -86,6 +86,7 @@ fn controls(answer_label: &'static str) -> (RunControls, mpsc::Sender<Steer>, Ca
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
         mcp: agent_harness::no_mcp_servers(),
+        ui_host: agent_harness::no_ui_host(),
     };
     (controls, steer_tx, token)
 }
@@ -485,6 +486,7 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
         mcp: agent_harness::no_mcp_servers(),
+        ui_host: agent_harness::no_ui_host(),
     };
     let events = run_to_end(&harness(), request("scenario:askuser"), controls).await;
 
@@ -608,6 +610,68 @@ async fn mcp_messages_are_answered_by_the_mcp_callback() {
     assert_eq!(
         reply,
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})
+    );
+}
+
+#[tokio::test]
+async fn ui_host_requests_are_answered_by_the_ui_host_callback() {
+    let cwd = tempfile::tempdir().expect("temporary directory");
+    let mut req = request("scenario:ui-host");
+    req.cwd = cwd.path().display().to_string();
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let (mut controls, _steer, _token) = controls("Allow");
+    controls.ui_host = Arc::new({
+        let received = received.clone();
+        move |request: serde_json::Value| {
+            let answer = match request["subtype"].as_str() {
+                Some("ui_copy") => serde_json::json!({"copied": true}),
+                _ => serde_json::json!({"text": "draft", "cursor": 99}),
+            };
+            received.lock().unwrap().push(request);
+            let (reply_tx, reply_rx) = oneshot::channel();
+            reply_tx.send(answer).expect("receiver is still held");
+            reply_rx
+        }
+    });
+
+    let events = run_to_end(&harness(), req, controls).await;
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::SessionStarted { capabilities, .. } if capabilities == &["ui_surface_v1"]
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::PluginUi { event } if event["subtype"] == "ui_status"
+        )),
+        "{events:?}"
+    );
+    assert_eq!(
+        *received.lock().unwrap(),
+        vec![
+            serde_json::json!({"subtype": "ui_copy", "text": "copied text"}),
+            serde_json::json!({"subtype": "ui_prompt_read"}),
+        ]
+    );
+    let replies =
+        std::fs::read_to_string(cwd.path().join(".ui-replies")).expect("replies were written");
+    let replies: Vec<serde_json::Value> = replies
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("reply is JSON"))
+        .collect();
+    assert_eq!(replies[0]["response"]["request_id"], "ui-copy");
+    assert_eq!(
+        replies[0]["response"]["response"],
+        serde_json::json!({"copied": true})
+    );
+    assert_eq!(replies[1]["response"]["request_id"], "ui-read");
+    assert_eq!(
+        replies[1]["response"]["response"],
+        serde_json::json!({"text": "draft", "cursor": 5})
     );
 }
 
@@ -1090,6 +1154,7 @@ fn permission_controls(
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
         mcp: agent_harness::no_mcp_servers(),
+        ui_host: agent_harness::no_ui_host(),
     };
     (controls, steer_tx)
 }
@@ -1301,6 +1366,7 @@ async fn a_stop_withdraws_the_question_the_turn_was_waiting_on() {
         permission: tokio::sync::watch::channel(PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
         mcp: agent_harness::no_mcp_servers(),
+        ui_host: agent_harness::no_ui_host(),
     };
     let mut req = request("scenario:stop-asking");
     req.permission = PermissionMode::Ask;

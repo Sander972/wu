@@ -518,6 +518,13 @@ pub enum AgentEvent {
         cwd: String,
         session_id: String,
         assistant_message_id: String,
+        /// Protocol features the agent announced, e.g. Claude Code's `ui_surface_v1` for plugin drawing.
+        #[serde(default)]
+        capabilities: Vec<String>,
+    },
+    /// A plugin drawing frame (`ui_toast`, `ui_status`, `ui_invalidate`, `ui_panes`, ...) as the agent sent it.
+    PluginUi {
+        event: serde_json::Value,
     },
     TextDelta {
         text: String,

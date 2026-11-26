@@ -541,6 +541,7 @@ impl Normalizer {
                     cwd: f.cwd,
                     session_id: f.session_id,
                     assistant_message_id: self.assistant_message_id.clone(),
+                    capabilities: f.capabilities,
                 }];
                 if let Some(mode) = f.permission_mode {
                     events.push(AgentEvent::PermissionModeReported { mode });
@@ -875,6 +876,7 @@ impl Normalizer {
                 suggestion: f.suggestion,
             }],
 
+            Frame::PluginUi(event) => vec![AgentEvent::PluginUi { event }],
             Frame::ControlRequest(_) | Frame::Other => Vec::new(),
         }
     }
@@ -1004,6 +1006,36 @@ mod tests {
             Some(&AgentEvent::PermissionModeReported {
                 mode: "default".into()
             })
+        );
+    }
+
+    #[test]
+    fn ui_frames_become_plugin_ui_events() {
+        let toast = r#"{"type":"system","subtype":"ui_toast","plugin":"wu-draw-test","text":"wu-draw-test toast","timeout_ms":4000,"uuid":"u1","session_id":"s1"}"#;
+        assert_eq!(
+            normalize_one(toast),
+            vec![AgentEvent::PluginUi {
+                event: serde_json::from_str(toast).unwrap()
+            }]
+        );
+        let status =
+            r#"{"type":"system","subtype":"ui_status","plugin":"wu-draw-test","text":null}"#;
+        assert_eq!(
+            normalize_one(status),
+            vec![AgentEvent::PluginUi {
+                event: serde_json::from_str(status).unwrap()
+            }]
+        );
+        let events = normalize_one(
+            r#"{"type":"system","subtype":"init","model":"m","cwd":"/x","session_id":"s1","capabilities":["msg_lifecycle_v1","ui_surface_v1"]}"#,
+        );
+        assert!(
+            matches!(
+                events.first(),
+                Some(AgentEvent::SessionStarted { capabilities, .. })
+                    if capabilities.iter().any(|capability| capability == "ui_surface_v1")
+            ),
+            "{events:?}"
         );
     }
 

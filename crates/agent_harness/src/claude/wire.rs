@@ -13,6 +13,7 @@ pub(crate) enum Frame {
     PromptSuggestion(PromptSuggestionFrame),
     Result(ResultFrame),
     ControlRequest(ControlRequestFrame),
+    PluginUi(Value),
     Other,
 }
 
@@ -26,6 +27,8 @@ pub(crate) struct SystemFrame {
     pub model: String,
     #[serde(default)]
     pub tools: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default)]
     pub cwd: String,
     #[serde(default)]
@@ -318,6 +321,14 @@ pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
     let value: Value = serde_json::from_str(line)?;
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
     let frame = match kind {
+        "system"
+            if value
+                .get("subtype")
+                .and_then(Value::as_str)
+                .is_some_and(|subtype| subtype.starts_with("ui_")) =>
+        {
+            Frame::PluginUi(value)
+        }
         "system" => Frame::System(serde_json::from_value(value)?),
         "stream_event" => Frame::StreamEvent(serde_json::from_value(value)?),
         "assistant" => Frame::Assistant(serde_json::from_value(value)?),

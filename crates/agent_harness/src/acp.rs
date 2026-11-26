@@ -1054,6 +1054,7 @@ async fn run_session(session: Session) {
         cwd: request.cwd.clone(),
         session_id: session_id.clone(),
         assistant_message_id: feed.message_id().to_owned(),
+        capabilities: Vec::new(),
     };
     if !send(&event_tx, started).await {
         shutdown_child(&mut child, kill_grace).await;

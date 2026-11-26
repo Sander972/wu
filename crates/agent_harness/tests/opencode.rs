@@ -303,6 +303,7 @@ fn controls_answering(
         permission: tokio::sync::watch::channel(agent_harness::PermissionMode::Ask).1,
         before_file_tool: agent_harness::file_tools_go_ahead(),
         mcp: agent_harness::no_mcp_servers(),
+        ui_host: agent_harness::no_ui_host(),
     };
     (controls, steer_tx, token, asked)
 }

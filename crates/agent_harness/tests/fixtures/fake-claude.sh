@@ -608,6 +608,18 @@ case "$first" in
   esac
   ;;
 
+*scenario:ui-host*)
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-ui","capabilities":["ui_surface_v1"]}'
+  emit '{"type":"system","subtype":"ui_status","plugin":"wu-draw-test","text":"wu-draw-test status","uuid":"ui-1","session_id":"sess-ui"}'
+  emit '{"type":"control_request","request_id":"ui-copy","request":{"subtype":"ui_copy","text":"copied text"}}'
+  read_reply copy_reply || exit 1
+  printf '%s\n' "$copy_reply" > .ui-replies
+  emit '{"type":"control_request","request_id":"ui-read","request":{"subtype":"ui_prompt_read"}}'
+  read_reply read_reply_line || exit 1
+  printf '%s\n' "$read_reply_line" >> .ui-replies
+  emit '{"type":"result","subtype":"success","result":"done","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ui"}'
+  ;;
+
 *scenario:mcp*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-mcp"}'
   case "$init_line" in

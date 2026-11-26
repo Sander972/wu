@@ -28,7 +28,7 @@ use crate::{
 use crate::process::{Child, ChildStdin, Command, Stdio};
 use crate::{
     BeforeFileToolFn, Harness, HarnessError, McpMessageFn, RunControls, Steer, TurnSettings,
-    shutdown_child,
+    UiHostFn, shutdown_child,
 };
 use catalog::{apply_ultrathink, to_effort};
 use normalize::Normalizer;
@@ -1482,6 +1482,7 @@ async fn run_session(session: Session) {
         mut permission,
         before_file_tool,
         mcp,
+        ui_host,
     } = controls;
     let request_input = Arc::new(request_input);
     let launched_bypass = skip_prompts;
@@ -1585,7 +1586,7 @@ async fn run_session(session: Session) {
                             skip_prompts = current.skips_prompts();
                         }
                         request_tasks.retain(|task| !task.is_finished());
-                        request_tasks.extend(handle_control_request(req, skip_prompts, &request_input, &before_file_tool, &mcp, &stdin_tx));
+                        request_tasks.extend(handle_control_request(req, skip_prompts, &request_input, &before_file_tool, &mcp, &ui_host, &stdin_tx));
                         continue;
                     }
                     if starts_parent_turn(&frame) {
@@ -1927,9 +1928,13 @@ fn handle_control_request(
     request_input: &Arc<RequestInputFn>,
     before_file_tool: &BeforeFileToolFn,
     mcp: &McpMessageFn,
+    ui_host: &UiHostFn,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
 ) -> Option<tokio::task::AbortHandle> {
     match req.request.subtype.as_str() {
+        "ui_copy" | "ui_prompt_read" | "ui_prompt_fill" | "ui_prompt_suggest" => {
+            return answer_ui_host(req, ui_host, stdin_tx);
+        }
         "can_use_tool" => {}
         "elicitation" => return answer_elicitation(req, request_input, stdin_tx),
         // The extension (2.1.331) answers its own save hook with the hook output `{continue: true}`.
@@ -2075,6 +2080,52 @@ fn answer_mcp_message(
         }
     });
     Some(task.abort_handle())
+}
+
+/// The extension (2.1.332) answers a drawing request its webview leaves unanswered this long with an empty result.
+const UI_HOST_TIMEOUT: Duration = Duration::from_millis(4500);
+/// The longest composer text a `ui_prompt_read` hands over, in UTF-16 units like the extension's.
+const PROMPT_READ_LIMIT: usize = 1_000_000;
+
+fn answer_ui_host(
+    req: ControlRequestFrame,
+    ui_host: &UiHostFn,
+    stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
+) -> Option<tokio::task::AbortHandle> {
+    let subtype = req.request.subtype;
+    let mut request = req.request.other;
+    request.insert("subtype".into(), Value::String(subtype.clone()));
+    let reply = ui_host(Value::Object(request));
+    let request_id = req.request_id;
+    let stdin_tx = stdin_tx.clone();
+    let task = tokio::spawn(async move {
+        let answer = match tokio::time::timeout(UI_HOST_TIMEOUT, reply).await {
+            Ok(Ok(answer)) if subtype == "ui_prompt_read" => bounded_prompt_read(answer),
+            Ok(Ok(answer)) => answer,
+            Ok(Err(_)) | Err(_) => serde_json::json!({}),
+        };
+        let line = control_response_line(&request_id, answer);
+        if stdin_tx.send(StdinMsg::Line(line)).is_err() {
+            log::debug!("claude stdin writer gone before a {subtype} request was answered");
+        }
+    });
+    Some(task.abort_handle())
+}
+
+/// Mirrors the extension: an oversized text is not sent at all, and a cursor outside the text sits at its end.
+fn bounded_prompt_read(answer: Value) -> Value {
+    let text = answer
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| text.encode_utf16().count() <= PROMPT_READ_LIMIT)
+        .unwrap_or_default();
+    let length = text.encode_utf16().count() as u64;
+    let cursor = answer
+        .get("cursor")
+        .and_then(Value::as_u64)
+        .filter(|cursor| *cursor <= length)
+        .unwrap_or(length);
+    serde_json::json!({ "text": text, "cursor": cursor })
 }
 
 fn elicitation_question(request: &ControlRequestBody) -> Option<UserInputQuestion> {
@@ -2375,6 +2426,7 @@ mod tests {
             request_input,
             &crate::file_tools_go_ahead(),
             &crate::no_mcp_servers(),
+            &crate::no_ui_host(),
             stdin_tx,
         );
         let reply = tokio::time::timeout(std::time::Duration::from_secs(5), stdin_rx.recv());
@@ -2413,6 +2465,7 @@ mod tests {
             &request_input,
             &before_file_tool,
             &crate::no_mcp_servers(),
+            &crate::no_ui_host(),
             &stdin_tx,
         );
 
@@ -2425,6 +2478,65 @@ mod tests {
         assert_eq!(reply["response"]["request_id"], "h1");
         assert_eq!(reply["response"]["response"], json!({"continue": true}));
         assert_eq!(held.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ui_host_that_never_answers_gets_an_empty_reply_after_the_cap() {
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel();
+        let held = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ui_host: UiHostFn = Arc::new({
+            let held = held.clone();
+            move |request| {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                held.lock().unwrap().push((request, reply_tx));
+                reply_rx
+            }
+        });
+        let request: ControlRequestFrame = serde_json::from_value(json!({
+            "request_id": "u1",
+            "request": {"subtype": "ui_prompt_fill", "text": "hi", "mode": "append"},
+        }))
+        .unwrap();
+        let request_input: Arc<RequestInputFn> =
+            Arc::new(Box::new(|_| tokio::sync::oneshot::channel().1));
+        handle_control_request(
+            request,
+            false,
+            &request_input,
+            &crate::file_tools_go_ahead(),
+            &crate::no_mcp_servers(),
+            &ui_host,
+            &stdin_tx,
+        );
+
+        let started = tokio::time::Instant::now();
+        let Some(StdinMsg::Line(line)) = stdin_rx.recv().await else {
+            panic!("the request was never answered");
+        };
+        assert_eq!(started.elapsed(), UI_HOST_TIMEOUT);
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["response"]["request_id"], "u1");
+        assert_eq!(reply["response"]["response"], json!({}));
+        assert_eq!(
+            held.lock().unwrap()[0].0,
+            json!({"subtype": "ui_prompt_fill", "text": "hi", "mode": "append"})
+        );
+    }
+
+    #[test]
+    fn ui_prompt_read_drops_an_oversized_text_and_clamps_the_cursor() {
+        assert_eq!(
+            bounded_prompt_read(json!({"text": "héllo", "cursor": 9})),
+            json!({"text": "héllo", "cursor": 5})
+        );
+        assert_eq!(
+            bounded_prompt_read(json!({"text": "x".repeat(PROMPT_READ_LIMIT + 1), "cursor": 0})),
+            json!({"text": "", "cursor": 0})
+        );
+        assert_eq!(
+            bounded_prompt_read(json!({})),
+            json!({"text": "", "cursor": 0})
+        );
     }
 
     #[test]
