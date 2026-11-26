@@ -506,7 +506,7 @@ pub(crate) fn initialize_request_line(
     let mut request = json!({ "subtype": "initialize" });
     if for_run {
         request["promptSuggestions"] = json!(prompt_suggestions);
-        // Each background task gets its own Stop in wu, so the CLI lets the turn's Stop spare running background agents.
+        // Opts into the CLI's per-task Stop, under which interrupting a turn leaves running background tasks alone; wu's Stop still ends the whole run whenever it knows of background tasks, and the card's per-task Stop is the way to end one task.
         request["perTaskStopAffordance"] = json!(true);
         request["sdkMcpServers"] = json!([IDE_MCP_SERVER]);
         request["hooks"] = json!({

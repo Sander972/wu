@@ -48,8 +48,7 @@ fn output_file(tool_output: &str) -> Option<PathBuf> {
 fn output_tail(output: &str) -> SharedString {
     let lines = output
         .lines()
-        .filter_map(|line| line.rsplit('\r').next())
-        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| line.rsplit('\r').find(|segment| !segment.trim().is_empty()))
         .collect::<Vec<_>>();
     lines[lines.len().saturating_sub(OUTPUT_TAIL_LINES)..]
         .join("\n")
@@ -307,7 +306,6 @@ impl BackgroundTasksCard {
         });
         let poll_output = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(OUTPUT_POLL).await;
                 let Ok(requests) = this.update(cx, |card, cx| card.request_output(cx)) else {
                     return;
                 };
@@ -329,6 +327,7 @@ impl BackgroundTasksCard {
                         return;
                     }
                 }
+                cx.background_executor().timer(OUTPUT_POLL).await;
             }
         });
         Self {
@@ -751,9 +750,10 @@ mod tests {
                 .into(),
         });
         feed_events(&session, events, cx);
-        let mut receiver = attach_live_run(&session, cx);
         let card =
             cx.new(|cx| BackgroundTasksCard::new(session.clone(), WeakEntity::new_invalid(), cx));
+        cx.run_until_parked();
+        let mut receiver = attach_live_run(&session, cx);
 
         card.update(cx, |card, cx| card.stop("bg2".into(), cx));
         cx.run_until_parked();
@@ -856,6 +856,21 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn output_is_requested_when_the_card_opens_then_every_poll(cx: &mut TestAppContext) {
+        let (_store, session, _directory) = card_session(cx);
+        feed_events(&session, shell_task("bg1"), cx);
+        let mut receiver = attach_live_run(&session, cx);
+        let _card =
+            cx.new(|cx| BackgroundTasksCard::new(session.clone(), WeakEntity::new_invalid(), cx));
+        cx.run_until_parked();
+        next_control(&mut receiver);
+        assert!(receiver.try_recv().is_err());
+        cx.executor().advance_clock(OUTPUT_POLL);
+        cx.run_until_parked();
+        next_control(&mut receiver);
+    }
+
+    #[gpui::test]
     async fn output_polling_stops_when_the_card_closes(cx: &mut TestAppContext) {
         let (_store, session, _directory) = card_session(cx);
         feed_events(&session, shell_task("bg1"), cx);
@@ -876,7 +891,7 @@ mod tests {
         );
         call.reply
             .send(Ok(serde_json::json!({
-                "output": "one\ntwo\nthree\nfour\n50%\r100%\n",
+                "output": "one\ntwo\nthree\nfour\n50%\r100%\r",
                 "total_bytes": 30,
                 "truncated": false,
             })))
