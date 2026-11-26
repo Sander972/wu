@@ -1448,6 +1448,42 @@ async fn a_model_change_reaches_the_running_agent_without_a_restart() {
 }
 
 #[tokio::test]
+async fn thinking_toggle_is_applied_live() {
+    let harness = harness();
+    let on = turn_settings("gateway/alpha", serde_json::json!({ "thinking": "on" }));
+    let off = turn_settings("gateway/alpha", serde_json::json!({ "thinking": "off" }));
+    assert!(harness.applies_settings_live(&on, &off));
+
+    let mut req = request("scenario:thinking");
+    req.model = off.model.clone();
+    req.model_options = off.model_options.clone();
+    let (controls, steer, _token) = controls("A");
+    let mut stream = harness.run(req, controls).await.expect("run starts");
+    let first = turn_events(&mut stream).await;
+    assert_eq!(reply_text(&first), "launch=disabled last=none");
+
+    let with_settings = |settings: &agent_harness::TurnSettings| {
+        Steer::Message(SteerMessage {
+            prompt: "again".into(),
+            message_id: None,
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            context: Vec::new(),
+            settings: Some(settings.clone()),
+        })
+    };
+    for (settings, expected) in [
+        (&on, "launch=disabled last=31999/summarized"),
+        (&on, "launch=disabled last=31999/summarized"),
+        (&off, "launch=disabled last=0/null"),
+    ] {
+        steer.send(with_settings(settings)).await.expect("queued");
+        let turn = turn_events(&mut stream).await;
+        assert_eq!(reply_text(&turn), expected);
+    }
+}
+
+#[tokio::test]
 async fn a_run_reports_the_same_commands_as_the_lookup() {
     let cwd = tempfile::tempdir().expect("temporary directory");
     let own_command = cwd.path().join(".claude/commands/usage.md");

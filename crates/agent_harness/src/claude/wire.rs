@@ -461,6 +461,22 @@ pub(crate) fn set_model_line(request_id: &str, model: &str) -> String {
     .to_string()
 }
 
+pub(crate) fn set_max_thinking_tokens_line(request_id: &str, enabled: bool) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {
+            "subtype": "set_max_thinking_tokens",
+            "max_thinking_tokens": if enabled { THINKING_BUDGET_TOKENS } else { 0 },
+            "thinking_display": if enabled { Some("summarized") } else { None },
+        },
+    })
+    .to_string()
+}
+
+/// The budget the VS Code extension gives a thinking model when thinking is switched on.
+const THINKING_BUDGET_TOKENS: u32 = 31999;
+
 pub(crate) const PRESAVE_CALLBACK_ID: &str = "wu-presave";
 
 /// The in-process MCP server a run offers; its tools reach the model as `mcp__ide__<tool>`.
@@ -524,6 +540,18 @@ mod tests {
             permission_response(&deny, &json!({"command": "ls"}), Some("t1")),
             json!({"behavior": "deny", "message": "m", "interrupt": true, "toolUseID": "t1"})
         );
+    }
+
+    #[test]
+    fn thinking_line_carries_budget_and_display() {
+        let on: Value =
+            serde_json::from_str(&set_max_thinking_tokens_line("t1", true)).expect("json");
+        assert_eq!(on["request"]["max_thinking_tokens"], 31999);
+        assert_eq!(on["request"]["thinking_display"], "summarized");
+        let off: Value =
+            serde_json::from_str(&set_max_thinking_tokens_line("t2", false)).expect("json");
+        assert_eq!(off["request"]["max_thinking_tokens"], 0);
+        assert_eq!(off["request"]["thinking_display"], Value::Null);
     }
 
     #[test]

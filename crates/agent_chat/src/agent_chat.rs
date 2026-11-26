@@ -66,6 +66,8 @@ actions!(
         ToggleDictation,
         /// Renames the chat from its tab.
         RenameChat,
+        /// Expands or collapses every thought process in the chat.
+        ToggleThinkingBlocks,
         /// Shows or hides the chat panel.
         ToggleChatPanel,
         /// Moves the chat out of its tab and into the chat panel.

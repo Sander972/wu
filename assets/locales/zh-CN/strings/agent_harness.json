@@ -27,6 +27,7 @@
   "Billing error. Check your Claude plan or payment method.": "账单错误。请检查你的 Claude 套餐或付款方式。",
   "Bypass": "绕过权限",
   "Claude 5-hour limit reached and the turn was blocked. Try again after it resets.": "已达到 Claude 5 小时限额，本轮已被阻止。请在限额重置后再试。",
+  "Claude Code couldn't change thinking right away, so it stays as it was. {error}": "Claude Code 无法立即更改思考设置，将保持原状。{error}",
   "Claude Code couldn't find your earlier message, so it may still see it.": "Claude Code 找不到你之前的消息，所以它可能仍然能看到这条消息。",
   "Claude Code couldn't switch the permission mode right away, so the new mode applies from your next message. {error}": "Claude Code 无法立即切换权限模式，新模式将从你的下一条消息开始生效。{error}",
   "Claude Code is signed in, but ~/.claude.json doesn't say which account it is, so the login can't be backed up. Not switching.": "Claude Code 已登录，但 ~/.claude.json 没有说明是哪个账号，因此无法备份该登录。未切换。",

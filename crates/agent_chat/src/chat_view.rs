@@ -25,7 +25,7 @@ pub(crate) use editor_context::{
 
 use crate::{
     AgentChatSettings, AgentKind, MoveChatToPanel, MoveChatToTab, RenameChat, Send, Stop,
-    SubmitAnswer,
+    SubmitAnswer, ToggleThinkingBlocks,
     chat_style::{
         Chip, accent, flavour_seed, flavour_word, format_elapsed, gradient_spinner, hairline, ink,
         mix, page, text_faint, ui, wash, working_animation,
@@ -200,6 +200,8 @@ pub struct ChatView {
     images: Entity<image_viewer::ChatImageCache>,
     show_scroll_button: bool,
     expanded_rows: HashSet<String>,
+    /// Every thought process is open, except the rows clicked since, which `expanded_rows` flips back.
+    thinking_expanded: bool,
     group_overrides: HashMap<String, bool>,
     expanded_users: HashSet<usize>,
     expanded_questions: HashSet<String>,
@@ -410,6 +412,7 @@ impl ChatView {
             images,
             show_scroll_button: false,
             expanded_rows: HashSet::default(),
+            thinking_expanded: false,
             group_overrides: HashMap::default(),
             expanded_users: HashSet::default(),
             expanded_questions: HashSet::default(),
@@ -953,6 +956,21 @@ impl ChatView {
                 })
                 .log_err();
         });
+    }
+
+    fn thought_open(&self, key: &str) -> bool {
+        self.expanded_rows.contains(key) != self.thinking_expanded
+    }
+
+    fn toggle_thinking_blocks(
+        &mut self,
+        _: &ToggleThinkingBlocks,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.thinking_expanded = !self.thinking_expanded;
+        self.expanded_rows.retain(|key| !key.starts_with("thought-"));
+        cx.notify();
     }
 
     fn rename_chat(&mut self, _: &RenameChat, window: &mut Window, cx: &mut Context<Self>) {
@@ -2776,11 +2794,12 @@ impl ChatView {
             Some(Entry::Tool(tool)) => format!("tools-{}", tool.id),
             _ => format!("tools-at-{}", items.start),
         };
+        let has_thinking = group.iter().any(|entry| matches!(entry, Entry::Thinking(_)));
         let open = self
             .group_overrides
             .get(&group_key)
             .copied()
-            .unwrap_or(is_live);
+            .unwrap_or(is_live || (self.thinking_expanded && has_thinking));
         let summary: SharedString = self.group_summary(items.clone(), cx).into();
         let colors = cx.theme().colors();
         let title = if is_live {
@@ -2881,7 +2900,10 @@ impl ChatView {
                 .map(|view| (view.additions, view.deletions)),
             _ => None,
         };
-        let expanded = self.expanded_rows.contains(&key);
+        let expanded = match entry {
+            Entry::Thinking(_) => self.thought_open(&key),
+            _ => self.expanded_rows.contains(&key),
+        };
         let body = expanded.then(|| match entry {
             Entry::Tool(tool) => self.render_tool_detail(tool, cx),
             Entry::Thinking(markdown) => v_flex()
@@ -4394,6 +4416,7 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::dismiss_commands))
             .on_action(cx.listener(Self::toggle_dictation))
             .on_action(cx.listener(Self::rename_chat))
+            .on_action(cx.listener(Self::toggle_thinking_blocks))
             .on_action(cx.listener(Self::move_to_panel))
             .on_action(cx.listener(Self::move_to_tab))
             .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {
@@ -6465,11 +6488,20 @@ mod tests {
         session.read_with(cx, |session, _| {
             let answers = session.side_answers();
             assert_eq!(answers.len(), 20);
-            assert_eq!(answers.front().map(|(question, _)| question.as_str()), Some("q0"));
-            assert_eq!(answers.back().map(|(question, _)| question.as_str()), Some("q19"));
+            assert_eq!(
+                answers.front().map(|(question, _)| question.as_str()),
+                Some("q0")
+            );
+            assert_eq!(
+                answers.back().map(|(question, _)| question.as_str()),
+                Some("q19")
+            );
         });
         session.update(cx, |session, cx| session.remove_side_answer(0, cx));
-        assert_eq!(session.read_with(cx, |session, _| session.side_answers().len()), 19);
+        assert_eq!(
+            session.read_with(cx, |session, _| session.side_answers().len()),
+            19
+        );
     }
 
     #[gpui::test]
@@ -6511,5 +6543,67 @@ mod tests {
             })
         });
         assert!(session.read_with(cx, |session, _| session.side_answers().is_empty()));
+    }
+
+    #[gpui::test]
+    async fn ctrl_o_expands_all_thinking_rows(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (view, session, cx) = side_question_view(directory.path(), cx).await;
+        cx.update(|_, cx| {
+            cx.bind_keys([KeyBinding::new(
+                "ctrl-o",
+                ToggleThinkingBlocks,
+                Some("AgentChat"),
+            )]);
+        });
+        crate::session::tests::feed_events(
+            &session,
+            vec![
+                agent_harness::AgentEvent::ReasoningDelta {
+                    text: "first thought".into(),
+                },
+                agent_harness::AgentEvent::ToolCall {
+                    id: "tool-1".into(),
+                    call: ToolCall::Unknown {
+                        name: "Bash".into(),
+                        input: None,
+                    },
+                },
+                agent_harness::AgentEvent::ReasoningDelta {
+                    text: "second thought".into(),
+                },
+            ],
+            cx,
+        );
+        let thinking_keys: Vec<String> = session.read_with(cx, |session, _| {
+            session
+                .entries()
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| matches!(entry, Entry::Thinking(_)))
+                .map(|(index, _)| format!("thought-{index}"))
+                .collect()
+        });
+        assert_eq!(thinking_keys.len(), 2);
+        let open = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                thinking_keys
+                    .iter()
+                    .map(|key| view.thought_open(key))
+                    .collect::<Vec<_>>()
+            })
+        };
+        view.update_in(cx, |view, window, cx| {
+            window.focus(&view.composer.focus_handle(cx), cx)
+        });
+        assert_eq!(open(cx), [false, false]);
+        cx.simulate_keystrokes("ctrl-o");
+        assert_eq!(open(cx), [true, true]);
+        view.update(cx, |view, _| {
+            view.expanded_rows.insert(thinking_keys[0].clone());
+        });
+        assert_eq!(open(cx), [false, true]);
+        cx.simulate_keystrokes("ctrl-o");
+        assert_eq!(open(cx), [false, false]);
     }
 }

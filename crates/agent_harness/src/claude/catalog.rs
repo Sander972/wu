@@ -60,6 +60,15 @@ fn toggle(id: &str, label: &str) -> ModelOption {
     }
 }
 
+pub(crate) const THINKING_OPTION: &str = "thinking";
+
+fn thinking_toggle() -> ModelOption {
+    ModelOption {
+        default_choice: "on".into(),
+        ..toggle(THINKING_OPTION, &i18n::tc!("model option", "Thinking"))
+    }
+}
+
 pub(crate) fn context_window() -> ModelOption {
     ModelOption {
         id: CONTEXT_WINDOW_OPTION.into(),
@@ -199,6 +208,7 @@ pub(super) fn with_discovered_models(
     let mut default = None;
     let mut valid = false;
     let mut sizes: Vec<(String, Vec<String>)> = Vec::new();
+    let mut thinking_support: Vec<(String, bool)> = Vec::new();
     for entry in entries {
         let text = |key: &str| {
             entry
@@ -217,6 +227,12 @@ pub(super) fn with_discovered_models(
             continue;
         }
         valid = true;
+        if let Some(supported) = entry
+            .get("supportsThinkingOff")
+            .and_then(serde_json::Value::as_bool)
+        {
+            thinking_support.push((id.to_owned(), supported));
+        }
         if text("value") == Some("default") {
             default = Some(id.to_owned());
         }
@@ -278,6 +294,20 @@ pub(super) fn with_discovered_models(
                 .options
                 .retain(|option| option.id != CONTEXT_WINDOW_OPTION);
             model.options.insert(0, discovered_context_window(found));
+        }
+    }
+    for (base, supported) in thinking_support {
+        let Some(model) = models.iter_mut().find(|model| model.id == base) else {
+            continue;
+        };
+        let offered = model
+            .options
+            .iter()
+            .any(|option| option.id == THINKING_OPTION);
+        if supported && !offered {
+            model.options.push(thinking_toggle());
+        } else if !supported {
+            model.options.retain(|option| option.id != THINKING_OPTION);
         }
     }
     if let Some(default) = default
@@ -435,7 +465,7 @@ pub fn static_models() -> Vec<Model> {
             "Haiku 4.5",
             "Fastest model for everyday tasks",
             &[],
-            vec![toggle("thinking", &i18n::tc!("model option", "Thinking"))],
+            vec![thinking_toggle()],
         ),
     ]
 }

@@ -109,6 +109,15 @@ fn resolve_claude_executable() -> Option<PathBuf> {
     crate::executable::find_on_paths("claude", extra)
 }
 
+/// Thinking is on unless the option says otherwise, like the CLI's own default.
+fn thinking_enabled(options: &serde_json::Map<String, Value>) -> bool {
+    match options.get(catalog::THINKING_OPTION) {
+        Some(Value::Bool(on)) => *on,
+        Some(Value::String(choice)) => choice != "off" && choice != "false",
+        _ => true,
+    }
+}
+
 fn option_is_on(options: &serde_json::Map<String, Value>, key: &str) -> bool {
     match options.get(key) {
         Some(Value::Bool(b)) => *b,
@@ -205,13 +214,16 @@ impl ClaudeHarness {
             "--verbose",
             "--include-partial-messages",
             "--replay-user-messages",
-            // Newer models emit no thinking text unless a summary is requested.
-            "--thinking-display",
-            "summarized",
             // Undocumented: routes `can_use_tool` requests to the stdio control channel.
             "--permission-prompt-tool",
             "stdio",
         ]);
+        if thinking_enabled(&request.model_options) {
+            // Newer models emit no thinking text unless a summary is requested.
+            cmd.args(["--thinking-display", "summarized"]);
+        } else {
+            cmd.arg("--thinking=disabled");
+        }
         if let Some(model) = &request.model {
             cmd.arg("--model");
             cmd.arg(model_argument_for(
@@ -636,6 +648,7 @@ impl Harness for ClaudeHarness {
         let launch_only = |settings: &TurnSettings| {
             let mut options = settings.model_options.clone();
             options.remove(catalog::CONTEXT_WINDOW_OPTION);
+            options.remove(catalog::THINKING_OPTION);
             (
                 to_effort(settings.reasoning, settings.model.as_deref()),
                 settings.reasoning == Some(ReasoningLevel::Ultracode),
@@ -1077,6 +1090,7 @@ impl ClaudeHarness {
             model_argument: request.model.as_deref().map(|model| {
                 model_argument_for(model, &request.model_options, discovered.as_deref())
             }),
+            thinking_on: thinking_enabled(&request.model_options),
             discovered,
             commands_scan,
             interrupt_grace: self.interrupt_grace,
@@ -1237,6 +1251,7 @@ struct Session {
     controls: RunControls,
     reasoning: Option<ReasoningLevel>,
     model_argument: Option<String>,
+    thinking_on: bool,
     discovered: Option<Vec<Model>>,
     commands_scan: Option<(PathBuf, PathBuf)>,
     interrupt_grace: Duration,
@@ -1325,6 +1340,7 @@ async fn run_session(session: Session) {
         controls,
         mut reasoning,
         mut model_argument,
+        mut thinking_on,
         discovered,
         mut commands_scan,
         interrupt_grace,
@@ -1392,6 +1408,11 @@ async fn run_session(session: Session) {
                             error = error
                         )
                         .to_string();
+                        if event_tx.send(Ok(AgentEvent::Error { message })).await.is_err() { break 'main; }
+                        continue;
+                    }
+                    if let Some(error) = wire::control_error(line, SET_THINKING_REQUEST_PREFIX) {
+                        let message = t!("Claude Code couldn't change thinking right away, so it stays as it was. {error}", error = error).to_string();
                         if event_tx.send(Ok(AgentEvent::Error { message })).await.is_err() { break 'main; }
                         continue;
                     }
@@ -1558,6 +1579,12 @@ async fn run_session(session: Session) {
                             model_argument = Some(wanted);
                             model_switched = true;
                         }
+                        let thinking_wanted = thinking_enabled(&settings.model_options);
+                        if thinking_wanted != thinking_on {
+                            let id = format!("{SET_THINKING_REQUEST_PREFIX}{}", uuid::Uuid::new_v4());
+                            if stdin_tx.send(StdinMsg::Line(wire::set_max_thinking_tokens_line(&id, thinking_wanted))).is_err() { break 'main; }
+                            thinking_on = thinking_wanted;
+                        }
                     }
                     turn_running = true;
                     let id = uuid::Uuid::new_v4().to_string();
@@ -1681,6 +1708,7 @@ type RequestInputFn = Box<
 
 const SET_MODE_REQUEST_PREFIX: &str = "wu-set-mode-";
 const SET_MODEL_REQUEST_PREFIX: &str = "wu-set-model-";
+const SET_THINKING_REQUEST_PREFIX: &str = "wu-set-thinking-";
 const RUN_INITIALIZE_REQUEST: &str = "wu-run-initialize";
 const CONTROL_REQUEST_PREFIX: &str = "wu-ctl-";
 
@@ -2049,9 +2077,6 @@ fn flag_settings(request: &RunRequest) -> serde_json::Map<String, Value> {
     let mut settings = serde_json::Map::new();
     if option_is_on(&request.model_options, "fastMode") {
         settings.insert("fastMode".into(), Value::Bool(true));
-    }
-    if option_is_on(&request.model_options, "thinking") {
-        settings.insert("alwaysThinkingEnabled".into(), Value::Bool(true));
     }
     if request.reasoning == Some(ReasoningLevel::Ultracode) {
         settings.insert("ultracode".into(), Value::Bool(true));

@@ -1358,6 +1358,7 @@
     "context": "AgentChat",
     "bindings": {
       "cmd-f": "buffer_search::Deploy",
+      "ctrl-o": "agent_chat::ToggleThinkingBlocks",
     },
   },
   {

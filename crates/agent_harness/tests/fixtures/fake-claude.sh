@@ -507,6 +507,30 @@ case "$first" in
   done
   ;;
 
+*scenario:thinking*)
+  launch=enabled
+  for arg in "$@"; do [ "$arg" = "--thinking=disabled" ] && launch=disabled; done
+  last=none
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-thinking"}'
+  text_delta "launch=$launch last=$last"
+  emit '{"type":"result","subtype":"success","result":"first","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-thinking"}'
+  while read -r line; do
+    case "$line" in
+    *'"subtype":"set_max_thinking_tokens"'*)
+      tokens=$(printf '%s\n' "$line" | sed 's/.*"max_thinking_tokens":\([0-9]*\).*/\1/')
+      display=$(printf '%s\n' "$line" | sed 's/.*"thinking_display":\([^,}]*\).*/\1/' | tr -d '"')
+      last="$tokens/$display"
+      emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$(request_id "$line")\"}}"
+      ;;
+    *'"type":"user"'*)
+      emit "$line"
+      text_delta "launch=$launch last=$last"
+      emit '{"type":"result","subtype":"success","result":"next","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-thinking"}'
+      ;;
+    esac
+  done
+  ;;
+
 *scenario:hook*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Read"],"cwd":"/tmp","session_id":"sess-hook"}'
   case "$init_line" in

@@ -99,3 +99,34 @@ async fn failed_or_logged_out_initialize_falls_back_to_curated_catalog() {
         assert!(harness.model_catalog(false).await.is_err());
     }
 }
+
+#[tokio::test]
+async fn thinking_option_follows_supports_thinking_off() {
+    let (_dir, harness) = fixture(json!({"subtype":"success", "response":{
+        "commands":[],
+        "models":[
+            {"value":"claude-sonnet-5", "displayName":"Sonnet 5", "supportsThinkingOff":true},
+            {"value":"claude-fable-5", "displayName":"Fable 5", "supportsThinkingOff":false},
+            {"value":"claude-haiku-4-5", "displayName":"Haiku 4.5", "supportsThinkingOff":false},
+            {"value":"gateway/yes", "displayName":"Yes", "supportsThinkingOff":true},
+            {"value":"gateway/unknown", "displayName":"Unknown"}
+        ]
+    }}));
+    let catalog = harness.model_catalog(true).await.unwrap();
+    let thinking = |id: &str| {
+        catalog
+            .models
+            .iter()
+            .find(|model| model.id == id)
+            .unwrap_or_else(|| panic!("{id} is listed"))
+            .options
+            .iter()
+            .find(|option| option.id == "thinking")
+            .map(|option| option.default_choice.clone())
+    };
+    assert_eq!(thinking("claude-sonnet-5").as_deref(), Some("on"));
+    assert_eq!(thinking("gateway/yes").as_deref(), Some("on"));
+    assert_eq!(thinking("claude-fable-5"), None);
+    assert_eq!(thinking("claude-haiku-4-5"), None);
+    assert_eq!(thinking("gateway/unknown"), None);
+}
