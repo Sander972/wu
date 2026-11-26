@@ -35,7 +35,7 @@ use ui::{
 };
 use util::ResultExt as _;
 use workspace::{
-    SaveIntent, SplitDirection, Toast, Workspace,
+    MultiWorkspace, SaveIntent, SplitDirection, Toast, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     notifications::NotificationId,
 };
@@ -169,8 +169,59 @@ pub(crate) fn create_session(
         .into_iter()
         .next()
         .unwrap_or_else(|| paths::home_dir().clone());
+    let branch = current_branch(&project, &cwd, cx);
     let store = store_for(workspace, cx);
-    Some(store.update(cx, |store, cx| store.create_session(kind, cwd, cx)))
+    Some(store.update(cx, |store, cx| {
+        store.create_session_in(kind, cwd, None, branch, cx)
+    }))
+}
+
+fn current_branch(project: &Entity<Project>, cwd: &Path, cx: &App) -> Option<String> {
+    project
+        .read(cx)
+        .repositories(cx)
+        .values()
+        .map(|repository| repository.read(cx))
+        .filter(|repository| cwd.starts_with(repository.work_directory_abs_path.as_ref()))
+        .max_by_key(|repository| repository.work_directory_abs_path.components().count())
+        .and_then(|repository| repository.branch.as_ref())
+        .map(|branch| branch.name().to_string())
+}
+
+/// Creates a git worktree of the project's repository and opens a Claude chat in it, leaving the current checkout untouched.
+fn new_chat_in_new_worktree(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let creating = git_ui_core::worktree_service::create_worktree_workspace(
+        workspace,
+        &wu_actions::CreateWorktree {
+            worktree_name: None,
+            branch_target: wu_actions::NewWorktreeBranchTarget::CurrentBranch,
+        },
+        window,
+        None,
+        cx,
+    );
+    // The worktree service already shows a toast for a failed creation, so a failure only needs logging here.
+    cx.spawn_in(window, async move |_, cx| {
+        let created = creating.await?;
+        cx.update(|window, cx| {
+            let Some(multi_workspace) = window.window_handle().downcast::<MultiWorkspace>() else {
+                return;
+            };
+            multi_workspace
+                .update(cx, |multi_workspace, window, cx| {
+                    multi_workspace.activate(created.workspace.clone(), None, window, cx);
+                })
+                .log_err();
+            created.workspace.update(cx, |workspace, cx| {
+                new_chat(workspace, AgentKind::Claude, window, cx)
+            });
+        })
+    })
+    .detach_and_log_err(cx);
 }
 
 fn terminal_command(kind: AgentKind, native_session_id: Option<&str>) -> (&'static str, Vec<String>) {
@@ -1011,6 +1062,7 @@ impl AgentPanel {
             .menu(move |window, cx| {
                 let workspace = workspace.clone();
                 let agents = AgentChatSettings::get_global(cx).agents().to_vec();
+                let has_claude = agents.contains(&AgentKind::Claude);
                 Some(ContextMenu::build(window, cx, move |menu, _, _| {
                     let menu = agents.into_iter().fold(menu, |menu, kind| {
                         let workspace = workspace.clone();
@@ -1026,6 +1078,22 @@ impl AgentPanel {
                             },
                         )
                     });
+                    let menu = if has_claude {
+                        let workspace = workspace.clone();
+                        menu.entry(
+                            t!("New Claude chat in a new worktree"),
+                            None,
+                            move |window, cx| {
+                                workspace
+                                    .update(cx, |workspace, cx| {
+                                        new_chat_in_new_worktree(workspace, window, cx)
+                                    })
+                                    .log_err();
+                            },
+                        )
+                    } else {
+                        menu
+                    };
                     menu.separator().entry(
                         t!("Continue Saved Chat…"),
                         Some(ContinueSavedChat.boxed_clone()),
@@ -2810,6 +2878,9 @@ impl Panel for AgentPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::tests::{make_global, new_store};
+    use gpui::TestAppContext;
+    use project::FakeFs;
 
     #[test]
     fn terminal_command_resumes_each_agents_session() {
@@ -3267,6 +3338,43 @@ mod tests {
                 .update(cx, |search, cx| search.set_text("no such chat", window, cx))
         });
         assert!(rows(cx).is_empty(), "a search rebuilds the list");
+    }
+
+    #[gpui::test]
+    async fn new_chats_record_the_current_branch(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        make_global(&store, cx);
+        let fs = FakeFs::new(cx.executor());
+        let repository = PathBuf::from(util::path!("/repo"));
+        let plain = PathBuf::from(util::path!("/plain"));
+        fs.insert_tree(&repository, serde_json::json!({ ".git": {}, "a.txt": "" }))
+            .await;
+        fs.insert_tree(&plain, serde_json::json!({ "a.txt": "" })).await;
+        fs.set_branch_name(&repository.join(".git"), Some("feature"));
+        for (root, expected) in [(repository, Some("feature")), (plain, None)] {
+            let project = project::Project::test(fs.clone(), [root.as_path()], cx).await;
+            project
+                .update(cx, |project, cx| project.git_scans_complete(cx))
+                .await;
+            let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+                workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+            });
+            let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+            let session = workspace
+                .update(cx, |workspace, cx| {
+                    create_session(workspace, AgentKind::Claude, cx)
+                })
+                .expect("a local project opens a chat");
+            let metadata = session.read_with(cx, |session, _| session.metadata().clone());
+            assert_eq!(metadata.cwd, root);
+            assert_eq!(metadata.branch.as_deref(), expected, "{root:?}");
+        }
     }
 
     #[test]

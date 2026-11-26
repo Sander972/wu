@@ -87,6 +87,16 @@ use workspace::{
     item::{Item, ItemEvent, TabContentParams},
 };
 
+/// A linked worktree's `.git` is a file pointing into `<main repository>/.git/worktrees/<name>`, which tells it apart from a main checkout (a directory) and from a submodule (whose gitdir is under `.git/modules`).
+async fn linked_worktree_name(fs: &dyn fs::Fs, cwd: &std::path::Path) -> Option<String> {
+    let pointer = fs.load(&cwd.join(".git")).await.ok()?;
+    let git_dir = std::path::Path::new(pointer.trim().strip_prefix("gitdir:")?.trim());
+    if git_dir.parent()?.file_name()? != "worktrees" {
+        return None;
+    }
+    Some(cwd.file_name()?.to_string_lossy().into_owned())
+}
+
 const CONTENT_WIDTH: f32 = 736.;
 const COMPOSER_WIDTH: f32 = CONTENT_WIDTH + 32.;
 const SIDE_GUTTER: f32 = 48.;
@@ -231,6 +241,9 @@ pub struct ChatView {
     _dictation_levels: Task<()>,
     _dictation_events: Task<()>,
     _dictation_download: Task<()>,
+    /// The name of the linked git worktree the chat runs in, if any.
+    worktree_name: Option<String>,
+    _worktree_check: Task<()>,
     _glide: Task<()>,
     container_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     root_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -452,6 +465,8 @@ impl ChatView {
             _dictation_levels: Task::ready(()),
             _dictation_events: Task::ready(()),
             _dictation_download: Task::ready(()),
+            worktree_name: None,
+            _worktree_check: Task::ready(()),
             _glide: Task::ready(()),
             container_bounds: Default::default(),
             root_bounds: Default::default(),
@@ -502,6 +517,9 @@ impl ChatView {
             }
         }
         view.pin_default_settings(cx);
+        if view.subagent.is_none() {
+            view.detect_worktree(cx);
+        }
         if view.subagent.is_none()
             && let Some(draft) = view.session.update(cx, |session, _| session.take_draft())
         {
@@ -511,6 +529,56 @@ impl ChatView {
         view.sync_transcript(cx);
         view.tab_state = Some(view.current_tab_state(cx));
         view
+    }
+
+    fn detect_worktree(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.session.read(cx).metadata().cwd.clone();
+        let fs = self.project.read(cx).fs().clone();
+        self._worktree_check = cx.spawn(async move |this, cx| {
+            let name = linked_worktree_name(fs.as_ref(), &cwd).await;
+            this.update(cx, |this, cx| {
+                this.worktree_name = name;
+                cx.notify();
+            })
+            .log_err();
+        });
+    }
+
+    fn render_worktree_banner(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let name = self.worktree_name.clone()?;
+        let cwd = self.session.read(cx).metadata().cwd.clone();
+        let is_open_here = self
+            .project
+            .read(cx)
+            .visible_worktrees(cx)
+            .any(|worktree| worktree.read(cx).abs_path().as_ref() == cwd);
+        let colors = cx.theme().colors();
+        Some(
+            h_flex()
+                .w_full()
+                .h(px(32.))
+                .px(px(16.))
+                .gap(px(8.))
+                .border_b_1()
+                .border_color(colors.border)
+                .text_size(ui(12.))
+                .text_color(colors.text_muted)
+                .child(t!("This chat is in worktree {name}", name = name))
+                .when(!is_open_here, |this| {
+                    this.child(
+                        Button::new("agent-open-worktree", t!("Open worktree")).on_click(
+                            move |_, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(wu_actions::OpenWorktreeInNewWindow {
+                                        path: cwd.clone(),
+                                    }),
+                                    cx,
+                                )
+                            },
+                        ),
+                    )
+                }),
+        )
     }
 
     fn start_lookups(&mut self, cx: &mut Context<Self>) {
@@ -4475,6 +4543,7 @@ impl Render for ChatView {
             }))
             .children(self.render_lightbox(cx))
             .children(self.render_link_menu())
+            .children(self.render_worktree_banner(cx))
             .on_action(cx.listener(Self::send))
             .on_action(cx.listener(Self::stop))
             .on_action(cx.listener(Self::submit_answer))
@@ -4807,6 +4876,66 @@ mod tests {
                 expected,
                 "needs_input {needs_input}, working {working}, unseen {unseen}"
             );
+        }
+    }
+
+    #[gpui::test]
+    async fn worktree_banner_shows_only_for_linked_worktrees(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(&directory.path().join("chats"), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let fs = FakeFs::new(cx.executor());
+        let root = std::path::PathBuf::from(util::path!("/root"));
+        let linked_pointer = format!(
+            "gitdir: {}",
+            root.join("main/.git/worktrees/linked").display()
+        );
+        fs.insert_tree(
+            &root,
+            serde_json::json!({
+                "main": { ".git": {} },
+                "linked": { ".git": linked_pointer },
+                "submodule": { ".git": "gitdir: ../main/.git/modules/submodule" },
+                "plain": {},
+            }),
+        )
+        .await;
+        let project = project::Project::test(fs, [], cx).await;
+        for (folder, expected) in [
+            ("main", None),
+            ("linked", Some("linked")),
+            ("submodule", None),
+            ("plain", None),
+        ] {
+            let cwd = root.join(folder);
+            let session = store.update(cx, |store, cx| {
+                store.create_session(AgentKind::Claude, cwd.clone(), cx)
+            });
+            let window = cx.add_window(|window, cx| {
+                ChatView::new(
+                    session.clone(),
+                    store.clone(),
+                    project.clone(),
+                    WeakEntity::new_invalid(),
+                    window,
+                    cx,
+                )
+            });
+            cx.run_until_parked();
+            let (name, banner) = window
+                .update(cx, |view, _, cx| {
+                    (
+                        view.worktree_name.clone(),
+                        view.render_worktree_banner(cx).is_some(),
+                    )
+                })
+                .expect("window");
+            assert_eq!(name.as_deref(), expected, "{folder}");
+            assert_eq!(banner, expected.is_some(), "{folder}");
         }
     }
 
