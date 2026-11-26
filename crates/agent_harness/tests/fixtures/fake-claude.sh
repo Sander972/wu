@@ -57,7 +57,16 @@ answer_initialize() {
 # Continuing a cut-off turn sends no prompt: the CLI runs that turn again by itself, or stays silent when it has none to run.
 if [ -n "$CLAUDE_CODE_RESUME_INTERRUPTED_TURN" ]; then
   case " $* " in
-  *' --resume=sess-cut-off '*)
+  *' --resume=sess-cut-off '* | *' --resume=sess-slow-start '*)
+    case " $* " in
+    *' --resume=sess-slow-start '*)
+      # Startup (MCP servers) is slow but never silent for long: only the frames are spaced out.
+      for _ in 1 2 3; do
+        emit '{"type":"command_lifecycle","uuid":"slow","state":"started"}'
+        sleep 0.3
+      done
+      ;;
+    esac
     emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-cut-off"}'
     text_delta "continued within $CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS ms"
     emit '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[]}}'

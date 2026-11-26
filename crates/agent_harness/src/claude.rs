@@ -1446,7 +1446,7 @@ async fn run_session(session: Session) {
     let mut request_tasks: Vec<tokio::task::AbortHandle> = Vec::new();
     // Dropped when the loop ends, so callers still waiting get an error instead of hanging.
     let mut pending_controls: HashMap<String, tokio::sync::oneshot::Sender<_>> = HashMap::new();
-    let resumed_turn_deadline = tokio::time::Instant::now() + resumed_turn_timeout;
+    let mut resumed_turn_deadline = tokio::time::Instant::now() + resumed_turn_timeout;
 
     'main: loop {
         tokio::select! {
@@ -1509,6 +1509,10 @@ async fn run_session(session: Session) {
                             continue;
                         }
                     };
+                    // A slow start (MCP servers) stays silent for long, so the wait for a turn restarts with every frame.
+                    if awaiting_resumed_turn {
+                        resumed_turn_deadline = tokio::time::Instant::now() + resumed_turn_timeout;
+                    }
                     if let Frame::ControlRequest(req) = frame {
                         // A mode the CLI switched to itself arrives without a change notification, so it isn't sent back.
                         let current = *permission.borrow();

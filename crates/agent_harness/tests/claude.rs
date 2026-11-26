@@ -1643,3 +1643,24 @@ async fn a_resume_with_nothing_to_continue_ends_quietly() {
         "{events:?}"
     );
 }
+
+#[tokio::test]
+async fn a_slow_start_of_a_continued_turn_is_not_given_up_on() {
+    let mut request = request("");
+    request.resume = Some("sess-slow-start".into());
+    request.resume_interrupted = true;
+    // The startup frames take about 900 ms in all, longer than the timeout, but none is 500 ms apart from the next.
+    let harness = harness().with_resumed_turn_timeout(Duration::from_millis(500));
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness, request, controls).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
