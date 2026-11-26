@@ -2646,6 +2646,8 @@ impl ChatView {
             .unwrap_or(0);
         let label = if self.subagent.is_none() && self.session.read(cx).is_compacting() {
             t!("Compacting conversation…").to_string()
+        } else if self.subagent.is_none() && self.session.read(cx).is_continuing_turn() {
+            t!("Continuing…").to_string()
         } else {
             format!(
                 "{}…",

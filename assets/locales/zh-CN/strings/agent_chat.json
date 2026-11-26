@@ -74,6 +74,7 @@
   "Continue a chat from Claude Code, Codex, OpenCode or Antigravity…": "继续 Claude Code、Codex、OpenCode 或 Antigravity 中的对话…",
   "Continue in Terminal": "在终端中继续",
   "Continued from a saved {source} chat": "已从保存的 {source} 对话继续",
+  "Continuing…": "正在继续…",
   "Copied": "已复制",
   "Copied the reply to the clipboard.": "已将回复复制到剪贴板。",
   "Copy Agent Session ID": "复制智能体会话 ID",

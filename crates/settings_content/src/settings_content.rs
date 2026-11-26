@@ -1175,6 +1175,10 @@ pub struct AgentChatSettingsContent {
     ///
     /// Default: true
     pub confirm_quit_while_working: Option<bool>,
+    /// When a Claude Code chat was working as Wu quit, continue that turn if the chat is opened again within 10 minutes.
+    ///
+    /// Default: true
+    pub continue_after_reload: Option<bool>,
     /// Keep the computer from going to sleep while an agent is working.
     ///
     /// Default: true

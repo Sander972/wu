@@ -139,6 +139,7 @@ pub struct ClaudeHarness {
     titles: Arc<history::TitleCache>,
     interrupt_grace: Duration,
     kill_grace: Duration,
+    resumed_turn_timeout: Duration,
     initialize: discovery::InitializeCache,
     models_cache: crate::catalog::Catalog,
 }
@@ -151,6 +152,7 @@ impl Default for ClaudeHarness {
             titles: Arc::default(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
+            resumed_turn_timeout: Duration::from_secs(30),
             initialize: discovery::InitializeCache::default(),
             models_cache: crate::catalog::Catalog::default(),
         }
@@ -179,6 +181,12 @@ impl ClaudeHarness {
     pub fn with_graces(mut self, interrupt_grace: Duration, kill_grace: Duration) -> Self {
         self.interrupt_grace = interrupt_grace;
         self.kill_grace = kill_grace;
+        self
+    }
+
+    /// How long a run asked to continue a cut-off turn waits for Claude Code to start it.
+    pub fn with_resumed_turn_timeout(mut self, timeout: Duration) -> Self {
+        self.resumed_turn_timeout = timeout;
         self
     }
 
@@ -247,6 +255,20 @@ impl ClaudeHarness {
         cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
         // A wu started from an IDE's terminal inherits that IDE's port, and a chat must not connect to it.
         cmd.env_remove("CLAUDE_CODE_SSE_PORT");
+        // Like the VS Code extension, never pass on resume variables Wu itself inherited, so a chat only runs a turn again when asked to.
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("CLAUDE_CODE_RESUME_") {
+                cmd.env_remove(key);
+            }
+        }
+        if request.resume_interrupted {
+            // The CLI runs the cut-off turn again by itself at startup, so no prompt is sent; like the VS Code extension, it is told how old a turn it may still run.
+            cmd.env("CLAUDE_CODE_RESUME_INTERRUPTED_TURN", "1");
+            cmd.env(
+                "CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS",
+                crate::INTERRUPTED_TURN_MAX_AGE.as_millis().to_string(),
+            );
+        }
         // Headless sessions only connect the Chrome extension when asked to.
         cmd.arg(if request.chrome {
             "--chrome"
@@ -907,6 +929,7 @@ impl ClaudeHarness {
             chrome: false,
             drop_prompt: None,
             ephemeral: resume.is_none(),
+            resume_interrupted: false,
             context: Vec::new(),
         };
         let mut cmd = self.build_command(&exe, &launch, None);
@@ -1093,16 +1116,18 @@ impl ClaudeHarness {
 
         let (images, image_problems) = load_attachment_blocks(&request.attachments).await;
         let first_prompt_id = uuid::Uuid::new_v4().to_string();
-        let first = wire::user_message_line(
-            &apply_ultrathink(
-                request.reasoning,
-                &with_skills(&request.prompt, &request.skills),
-            ),
-            &images,
-            &request.context,
-            &first_prompt_id,
-        );
-        stdin_tx.send(StdinMsg::Line(first)).ok();
+        if !request.resume_interrupted {
+            let first = wire::user_message_line(
+                &apply_ultrathink(
+                    request.reasoning,
+                    &with_skills(&request.prompt, &request.skills),
+                ),
+                &images,
+                &request.context,
+                &first_prompt_id,
+            );
+            stdin_tx.send(StdinMsg::Line(first)).ok();
+        }
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         for message in drop_problem.into_iter().chain(image_problems) {
@@ -1129,6 +1154,8 @@ impl ClaudeHarness {
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
+            awaiting_resumed_turn: request.resume_interrupted,
+            resumed_turn_timeout: self.resumed_turn_timeout,
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -1290,6 +1317,8 @@ struct Session {
     interrupt_grace: Duration,
     kill_grace: Duration,
     stderr_tail: crate::StderrTail,
+    awaiting_resumed_turn: bool,
+    resumed_turn_timeout: Duration,
 }
 
 fn model_argument_for(
@@ -1379,6 +1408,8 @@ async fn run_session(session: Session) {
         interrupt_grace,
         kill_grace,
         stderr_tail,
+        mut awaiting_resumed_turn,
+        resumed_turn_timeout,
     } = session;
     let RunControls {
         request_input,
@@ -1415,6 +1446,7 @@ async fn run_session(session: Session) {
     let mut request_tasks: Vec<tokio::task::AbortHandle> = Vec::new();
     // Dropped when the loop ends, so callers still waiting get an error instead of hanging.
     let mut pending_controls: HashMap<String, tokio::sync::oneshot::Sender<_>> = HashMap::new();
+    let resumed_turn_deadline = tokio::time::Instant::now() + resumed_turn_timeout;
 
     'main: loop {
         tokio::select! {
@@ -1489,6 +1521,7 @@ async fn run_session(session: Session) {
                         continue;
                     }
                     if starts_parent_turn(&frame) {
+                        awaiting_resumed_turn = false;
                         turn_running = true;
                         turn_resumed_after_held_done = held_done.is_some();
                     }
@@ -1620,6 +1653,7 @@ async fn run_session(session: Session) {
                         }
                     }
                     turn_running = true;
+                    awaiting_resumed_turn = false;
                     let id = uuid::Uuid::new_v4().to_string();
                     let (images, image_problems) = load_attachment_blocks(&msg.attachments).await;
                     for message in image_problems {
@@ -1682,6 +1716,21 @@ async fn run_session(session: Session) {
                 }
                 any_done = true;
                 turn_running = turn_resumed_after_held_done;
+            },
+
+            // The CLI says nothing when it finds no cut-off turn it may run again, and just waits for a prompt.
+            _ = tokio::time::sleep_until(resumed_turn_deadline), if awaiting_resumed_turn => {
+                let done = AgentEvent::Done {
+                    status: DoneStatus::Interrupted,
+                    result: None,
+                    error: None,
+                    session_id: norm.session_id.clone(),
+                };
+                if event_tx.send(Ok(done)).await.is_err() {
+                    log::debug!("claude run consumer gone before the resumed turn was given up");
+                }
+                any_done = true;
+                break 'main;
             },
 
             _ = event_tx.closed() => break 'main,
@@ -2148,6 +2197,7 @@ mod tests {
                 chrome: false,
                 drop_prompt: None,
                 ephemeral: false,
+                resume_interrupted: false,
                 context: Vec::new(),
             };
             flag_settings(&launch).get("alwaysThinkingEnabled").cloned()
@@ -2415,6 +2465,7 @@ mod tests {
             chrome: false,
             drop_prompt: None,
             ephemeral: false,
+            resume_interrupted: false,
             context: Vec::new(),
         };
         request.model_options.insert("thinking".into(), json!("off"));
@@ -2443,6 +2494,7 @@ mod tests {
             chrome: true,
             drop_prompt: None,
             ephemeral: false,
+            resume_interrupted: false,
             context: Vec::new(),
         };
         let harness = ClaudeHarness::new();
@@ -2480,6 +2532,7 @@ mod tests {
             chrome: false,
             drop_prompt: None,
             ephemeral: false,
+            resume_interrupted: false,
             context: Vec::new(),
         };
         let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
@@ -2508,6 +2561,7 @@ mod tests {
             chrome: false,
             drop_prompt: None,
             ephemeral: false,
+            resume_interrupted: false,
             context: Vec::new(),
         };
         let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
@@ -2537,6 +2591,7 @@ mod tests {
             chrome: false,
             drop_prompt: None,
             ephemeral: false,
+            resume_interrupted: false,
             context: Vec::new(),
         };
         let harness = ClaudeHarness::new();

@@ -7857,7 +7857,7 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
-    fn chat_section() -> [SettingsPageItem; 12] {
+    fn chat_section() -> [SettingsPageItem; 13] {
         [
             SettingsPageItem::SectionHeader(n!("Chat")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -8019,6 +8019,30 @@ fn agent_chat_page() -> SettingsPage {
                             .agent_chat
                             .get_or_insert_default()
                             .confirm_quit_while_working = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Continue After Restart"),
+                description: n!(
+                    "When a Claude Code chat was working as Wu quit, continue that turn if the chat is opened again within 10 minutes."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.continue_after_reload"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent_chat
+                            .as_ref()?
+                            .continue_after_reload
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .continue_after_reload = value;
                     },
                 }),
                 metadata: None,

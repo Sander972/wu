@@ -261,6 +261,7 @@ fn request(prompt: &str) -> RunRequest {
         chrome: false,
         drop_prompt: None,
         ephemeral: false,
+        resume_interrupted: false,
         context: Vec::new(),
     }
 }

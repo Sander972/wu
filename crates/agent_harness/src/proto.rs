@@ -157,7 +157,13 @@ pub struct RunRequest {
     /// Text blocks sent ahead of the prompt, such as the editor selection. Agents without a way to send them ignore them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<String>,
+    /// Runs again the turn that `resume`'s session was in the middle of when it was cut off, instead of sending `prompt`. Only Claude Code supports it.
+    #[serde(default)]
+    pub resume_interrupted: bool,
 }
+
+/// How long after a chat was cut off mid-turn its turn may still run again.
+pub const INTERRUPTED_TURN_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

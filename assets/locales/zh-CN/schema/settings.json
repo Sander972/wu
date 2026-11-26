@@ -697,6 +697,7 @@
   "What to show for directories in the outline panel.\n\nDefault: icon": "大纲面板中目录显示的内容。\n\n默认值：icon",
   "What to show for directories in the project panel.\n\nDefault: icon": "项目面板中目录显示的内容。\n\n默认值：icon",
   "What working directory to use when launching the terminal\n\nDefault: current_project_directory": "启动终端时使用的工作目录\n\n默认值：current_project_directory",
+  "When a Claude Code chat was working as Wu quit, continue that turn if the chat is opened again within 10 minutes.\n\nDefault: true": "如果 Wu 退出时某个 Claude Code 对话仍在工作，那么在 10 分钟内重新打开该对话时会继续这一轮。\n\n默认值：true",
   "When a pane holds agent chats, its tab bar's + button starts a new chat instead of a new file.\n\nDefault: true": "当窗格中有智能体对话时，标签栏的 + 按钮会新建对话而不是新建文件。\n\n默认值：true",
   "When false, forcefully disables the horizontal scrollbar. Otherwise, obey other settings.\n\nDefault: true": "为 false 时，强制停用水平滚动条。否则遵循其他设置。\n\n默认值：true",
   "When false, forcefully disables the vertical scrollbar. Otherwise, obey other settings.\n\nDefault: true": "为 false 时，强制停用垂直滚动条。否则遵循其他设置。\n\n默认值：true",

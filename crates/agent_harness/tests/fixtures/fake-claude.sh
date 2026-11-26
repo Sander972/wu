@@ -7,8 +7,6 @@
 # mirror live captures from CLI 2.1.228. Driven by
 # crates/harness/tests/claude.rs.
 
-read -r first || exit 1
-
 emit() { printf '%s\n' "$1"; }
 
 # Permission mode changes can arrive between any two replies.
@@ -55,6 +53,25 @@ answer_initialize() {
     emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{\"commands\":[{\"name\":\"review\",\"description\":\"Review a pull request\",\"argumentHint\":\"[pr number]\"},{\"name\":\"compact\",\"description\":\"Compact the conversation\",\"argumentHint\":\"\"},{\"name\":\"usage\",\"description\":\"Show plan usage\"},{\"name\":\"model\",\"description\":\"Set the AI model\"},{\"name\":\"\",\"description\":\"nameless: dropped\"}],\"output_style\":\"default\"}}}"
   fi
 }
+
+# Continuing a cut-off turn sends no prompt: the CLI runs that turn again by itself, or stays silent when it has none to run.
+if [ -n "$CLAUDE_CODE_RESUME_INTERRUPTED_TURN" ]; then
+  case " $* " in
+  *' --resume=sess-cut-off '*)
+    emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-cut-off"}'
+    text_delta "continued within $CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS ms"
+    emit '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[]}}'
+    emit '{"type":"result","subtype":"success","result":"ok","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-cut-off"}'
+    exit 0
+    ;;
+  esac
+  while read -r line; do
+    case "$line" in *'"subtype":"initialize"'*) answer_initialize "$line" ;; esac
+  done
+  exit 0
+fi
+
+read -r first || exit 1
 
 # A run asks for its commands ahead of the first prompt; a probe sends nothing else.
 case "$first" in

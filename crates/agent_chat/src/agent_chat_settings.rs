@@ -32,6 +32,7 @@ pub struct AgentChatSettings {
     agents: Vec<AgentKind>,
     pub steer_while_working: bool,
     pub confirm_quit_while_working: bool,
+    pub continue_after_reload: bool,
     pub prevent_idle_sleep: bool,
     pub claude_in_chrome: bool,
     pub autosave: bool,
@@ -128,6 +129,7 @@ impl Settings for AgentChatSettings {
             steer_while_working: content.while_working.unwrap_or_default()
                 == AgentChatWhileWorking::Steer,
             confirm_quit_while_working: content.confirm_quit_while_working.unwrap_or(true),
+            continue_after_reload: content.continue_after_reload.unwrap_or(true),
             prevent_idle_sleep: content.prevent_idle_sleep.unwrap_or(true),
             claude_in_chrome: content.claude_in_chrome.unwrap_or(true),
             autosave: content.autosave.unwrap_or(true),

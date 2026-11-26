@@ -294,6 +294,9 @@ pub struct SessionMetadata {
     /// The agent's id for a message taken back to edit, forgotten by the agent on the next run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_prompt: Option<String>,
+    /// Unix seconds when Wu last saw the chat mid-turn: set as a turn starts and again at quit, cleared when it ends, so it is still set after a crash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupted_at: Option<i64>,
 }
 
 impl SessionMetadata {
@@ -321,6 +324,7 @@ impl SessionMetadata {
             project_root: None,
             branch: None,
             dropped_prompt: None,
+            interrupted_at: None,
         }
     }
 
@@ -1223,6 +1227,8 @@ pub enum SessionEvent {
 pub struct AgentSession {
     directory: Arc<Path>,
     working_since: Option<Instant>,
+    /// Running again the turn Wu quit in the middle of.
+    continuing_turn: bool,
     run_failed: bool,
     harness: Arc<dyn Harness>,
     restart_on_next_send: bool,
@@ -1304,6 +1310,7 @@ impl AgentSession {
         Self {
             directory,
             working_since: None,
+            continuing_turn: false,
             run_failed: false,
             harness,
             restart_on_next_send: false,
@@ -1574,6 +1581,49 @@ impl AgentSession {
 
     pub fn is_compacting(&self) -> bool {
         self.working && self.compacting
+    }
+
+    pub fn is_continuing_turn(&self) -> bool {
+        self.working && self.continuing_turn
+    }
+
+    /// Runs again, once, the Claude turn that Wu quit or crashed in the middle of, if the chat is opened soon after.
+    fn continue_cut_off_turn(&mut self, cx: &mut Context<Self>) {
+        let Some(interrupted_at) = self.metadata.interrupted_at.take() else {
+            return;
+        };
+        self.save_metadata(cx);
+        let age = u64::try_from(now() - interrupted_at).map(Duration::from_secs);
+        if !AgentChatSettings::get_global(cx).continue_after_reload
+            || !age.is_ok_and(|age| age <= agent_harness::INTERRUPTED_TURN_MAX_AGE)
+            || self.metadata.kind != AgentKind::Claude
+            || self.metadata.native_session_id.is_none()
+            || self.metadata.dropped_prompt.is_some()
+            || self.working
+        {
+            return;
+        }
+        self.continuing_turn = true;
+        self.working = true;
+        self.working_since = Some(Instant::now());
+        self.run_failed = false;
+        self.metadata.outcome = None;
+        self.start_run(Prompt::default(), cx);
+        cx.notify();
+    }
+
+    fn refresh_interrupted_at(&mut self, cx: &mut Context<Self>) {
+        if self.metadata.interrupted_at.is_some() {
+            self.metadata.interrupted_at = Some(now());
+            self.save_metadata(cx);
+        }
+    }
+
+    fn clear_interrupted_at(&mut self, cx: &mut Context<Self>) {
+        self.continuing_turn = false;
+        if self.metadata.interrupted_at.take().is_some() {
+            self.save_metadata(cx);
+        }
     }
 
     pub fn can_steer(&self, prompt: &Prompt) -> bool {
@@ -1993,6 +2043,7 @@ impl AgentSession {
             self.interrupt_run(cx);
         } else {
             self.working = false;
+            self.clear_interrupted_at(cx);
             cx.notify();
         }
     }
@@ -2535,6 +2586,7 @@ impl AgentSession {
             drop_prompt,
             ephemeral: false,
             context: prompt.context.clone(),
+            resume_interrupted: self.continuing_turn && prompt.is_empty(),
         };
         let (steering_tx, steering_rx) = tokio::sync::mpsc::channel(32);
         let interrupt = CancellationToken::new();
@@ -2728,6 +2780,7 @@ impl AgentSession {
             }
             _ => {
                 self.working = false;
+                self.clear_interrupted_at(cx);
                 if !self.user_stopped {
                     self.send_next_queued(cx);
                 }
@@ -2868,6 +2921,7 @@ impl AgentSession {
                     self.set_native_session_id(session_id, cx);
                 }
                 self.working = self.prompt_after_stop.is_some();
+                self.continuing_turn = false;
                 self.compacting = false;
                 self.transcript.text_block_open = false;
                 self.cancel_running_tools();
@@ -3217,6 +3271,9 @@ impl AgentSession {
 
     fn touch(&mut self, cx: &mut Context<Self>) {
         self.metadata.updated_at = now();
+        // A continued turn is never marked, so it continues only once.
+        self.metadata.interrupted_at =
+            (self.working && !self.continuing_turn).then_some(self.metadata.updated_at);
         self.active_at = Instant::now();
         self.save_metadata(cx);
         self.save_entries_soon(cx);
@@ -3873,6 +3930,10 @@ impl AgentStore {
         cx.on_app_quit(|store, cx| {
             for harness in store.harnesses.values() {
                 harness.app_quitting();
+            }
+            let live: Vec<Entity<AgentSession>> = store.live.values().cloned().collect();
+            for session in live {
+                session.update(cx, |session, cx| session.refresh_interrupted_at(cx));
             }
             store.finish_saving(cx)
         })
@@ -5314,6 +5375,7 @@ impl AgentStore {
                     session
                 });
                 this.track(session.clone(), cx);
+                session.update(cx, |session, cx| session.continue_cut_off_turn(cx));
                 Ok(session)
             })?
         })
@@ -7620,6 +7682,108 @@ done
         store.update(cx, |store, cx| store.delete_session(&id, cx));
         assert!(opening.await.is_err());
         store.read_with(cx, |store, _| assert!(!store.live.contains_key(&id)));
+    }
+
+    /// A closed Claude chat whose agent session `sess-cut-off` was cut off mid-turn `minutes_ago`.
+    fn chat_cut_off(
+        minutes_ago: i64,
+        cx: &mut TestAppContext,
+    ) -> (tempfile::TempDir, Entity<AgentStore>, String) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let id = store.update(cx, |store, cx| {
+            let session =
+                store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx);
+            session.update(cx, |session, cx| {
+                session.update_metadata(
+                    |metadata| {
+                        metadata.native_session_id = Some("sess-cut-off".into());
+                        metadata.interrupted_at = Some(now() - minutes_ago * 60);
+                    },
+                    cx,
+                );
+                session.metadata().id.clone()
+            })
+        });
+        cx.run_until_parked();
+        store.update(cx, |store, _| store.live.clear());
+        (directory, store, id)
+    }
+
+    async fn reopen(
+        store: &Entity<AgentStore>,
+        id: &str,
+        cx: &mut TestAppContext,
+    ) -> Entity<AgentSession> {
+        store
+            .update(cx, |store, cx| store.open_session(id, cx))
+            .await
+            .expect("chat reopens")
+    }
+
+    #[gpui::test]
+    async fn interrupted_chat_resumes_once_within_the_window(cx: &mut TestAppContext) {
+        let (_directory, store, id) = chat_cut_off(2, cx);
+        let session = reopen(&store, &id, cx).await;
+        session.read_with(cx, |session, _| {
+            assert!(session.is_working());
+            assert!(session.is_continuing_turn());
+            assert_eq!(session.metadata().interrupted_at, None);
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+        assert_eq!(last_reply(&session, cx), "continued within 600000 ms");
+        assert!(
+            user_texts(&session, cx).is_empty(),
+            "no prompt is sent again"
+        );
+        session.read_with(cx, |session, _| assert!(!session.is_continuing_turn()));
+
+        drop(session);
+        store.update(cx, |store, _| store.live.clear());
+        let again = reopen(&store, &id, cx).await;
+        again.read_with(cx, |session, _| assert!(!session.is_working()));
+    }
+
+    #[gpui::test]
+    async fn older_interruptions_are_left_alone(cx: &mut TestAppContext) {
+        let (_directory, store, id) = chat_cut_off(11, cx);
+        let session = reopen(&store, &id, cx).await;
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert!(!session.is_working());
+            assert_eq!(session.metadata().interrupted_at, None);
+        });
+        assert!(user_texts(&session, cx).is_empty());
+    }
+
+    #[gpui::test]
+    async fn setting_off_never_resumes(cx: &mut TestAppContext) {
+        let (_directory, store, id) = chat_cut_off(2, cx);
+        update_chat_settings(cx, |settings| settings.continue_after_reload = Some(false));
+        let session = reopen(&store, &id, cx).await;
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| assert!(!session.is_working()));
+    }
+
+    #[gpui::test]
+    async fn a_working_chat_is_marked_until_its_turn_ends(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| session.send_message("scenario:happy", cx));
+        session.read_with(cx, |session, _| {
+            assert!(session.metadata().interrupted_at.is_some())
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.metadata().interrupted_at, None)
+        });
     }
 
     #[gpui::test]

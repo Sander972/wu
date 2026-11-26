@@ -57,6 +57,7 @@ fn request(prompt: &str) -> RunRequest {
         chrome: false,
         drop_prompt: None,
         ephemeral: false,
+        resume_interrupted: false,
         context: Vec::new(),
     }
 }
@@ -1594,4 +1595,51 @@ async fn login_flow_sends_three_requests_to_one_process() {
         .expect("the CLI completed the sign-in");
     assert_eq!(signed_in["account"]["email"], "me@example.com");
     assert_eq!(signed_in["callback"], "abc|xyz");
+}
+
+#[tokio::test]
+async fn a_cut_off_turn_continues_without_a_prompt() {
+    let mut request = request("");
+    request.resume = Some("sess-cut-off".into());
+    request.resume_interrupted = true;
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), request, controls).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text } if text == "continued within 600000 ms"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_resume_with_nothing_to_continue_ends_quietly() {
+    let mut request = request("");
+    request.resume = Some("sess-finished".into());
+    request.resume_interrupted = true;
+    let harness = harness().with_resumed_turn_timeout(Duration::from_millis(500));
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness, request, controls).await;
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                error: None,
+                ..
+            }]
+        ),
+        "{events:?}"
+    );
 }
