@@ -615,6 +615,7 @@ impl ExtensionBuilder {
                 continue;
             }
             if let Some((id, range)) = payload.as_section() {
+                let range = usize::try_from(range.start)?..usize::try_from(range.end)?;
                 RawSection {
                     id,
                     data: &input[range],
