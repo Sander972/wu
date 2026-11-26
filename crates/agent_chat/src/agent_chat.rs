@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use settings::{Settings as _, SettingsStore};
 use std::path::{Path, PathBuf};
 use util::ResultExt as _;
-use workspace::{MultiWorkspace, SaveIntent, Workspace};
+use workspace::{MultiWorkspace, SaveIntent, Toast, Workspace, notifications::NotificationId};
 
 actions!(
     agent_chat,
@@ -319,12 +319,119 @@ fn add_to_chat(
     });
 }
 
+/// Longest prompt a `wu://agent/open` link may carry, in characters.
+pub const MAX_LINK_PROMPT_CHARS: usize = 10_000;
+
+/// Whether a `wu://agent/open` link's session id is safe to look up: Wu's and Claude's ids are UUIDs, and the id names a transcript file, so anything that could leave that folder is refused.
+pub fn link_session_is_valid(session: &str) -> bool {
+    (1..=200).contains(&session.len())
+        && session
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+/// Opens the chat a `wu://agent/open` link names, or a new Claude chat, with the link's prompt waiting in the chat box. Nothing is sent.
+pub fn open_chat_from_link(
+    workspace: &mut Workspace,
+    session: Option<String>,
+    prompt: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !agent_panel::agent_chat_enabled(cx) {
+        log::info!("ignored a wu://agent/open link because Agent Chat is off");
+        return;
+    }
+    let Some(session) = session else {
+        if let Some(chat) = reveal_chat_or_new_claude(workspace, None, window, cx)
+            && let Some(prompt) = prompt
+        {
+            chat.update(cx, |chat, cx| chat.place_link_prompt(&prompt, window, cx));
+        }
+        return;
+    };
+    if !link_session_is_valid(&session) {
+        log::error!("ignored a wu://agent/open link with an invalid session id");
+        return;
+    }
+    let cwd = agent_panel::chat_roots(workspace.project(), cx)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| paths::home_dir().clone());
+    let store = agent_panel::store_for(workspace, cx);
+    let opening = store.update(cx, |store, cx| store.open_linked_session(session, cwd, cx));
+    cx.spawn_in(window, async move |workspace, cx| {
+        let result = opening.await;
+        workspace.update_in(cx, |workspace, window, cx| match result {
+            Ok(session) => {
+                agent_panel::open_chat(workspace, session.clone(), window, cx);
+                if let Some(prompt) = prompt
+                    && let Some(chat) = agent_panel::chat_view_for(workspace, &session, cx)
+                {
+                    chat.update(cx, |chat, cx| chat.place_link_prompt(&prompt, window, cx));
+                }
+            }
+            Err(error) => workspace.show_toast(
+                Toast::new(
+                    NotificationId::unique::<ChatView>(),
+                    t!(
+                        "Couldn't open the chat: {error}",
+                        error = format!("{error:#}")
+                    )
+                    .to_string(),
+                ),
+                cx,
+            ),
+        })
+    })
+    .detach_and_log_err(cx);
+}
+
+/// Shows the Plugins dialog with a `wu://agent/install-plugin` link's plugin in the install form, which waits for the user to confirm.
+pub fn install_plugin_from_link(
+    workspace: &mut Workspace,
+    plugin: String,
+    marketplace: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !agent_panel::agent_chat_enabled(cx) {
+        log::info!("ignored a wu://agent/install-plugin link because Agent Chat is off");
+        return;
+    }
+    let claude_chat = last_focused_chat(workspace, cx)
+        .filter(|chat| chat.read(cx).session().read(cx).kind() == AgentKind::Claude);
+    let Some(chat) = reveal_chat_or_new_claude(workspace, claude_chat, window, cx) else {
+        return;
+    };
+    let id = match marketplace {
+        Some(marketplace) if !plugin.contains('@') => format!("{plugin}@{marketplace}"),
+        _ => plugin,
+    };
+    // The dialog opens through the workspace, which is still being updated here.
+    window.defer(cx, move |window, cx| {
+        chat.update(cx, |chat, cx| {
+            chat.show_plugins_dialog(Some(id), window, cx)
+        })
+    });
+}
+
 fn reveal_last_chat(
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Option<Entity<ChatView>> {
-    let chat = match last_focused_chat(workspace, cx) {
+    let chat = last_focused_chat(workspace, cx);
+    reveal_chat_or_new_claude(workspace, chat, window, cx)
+}
+
+fn reveal_chat_or_new_claude(
+    workspace: &mut Workspace,
+    chat: Option<Entity<ChatView>>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Option<Entity<ChatView>> {
+    let chat = match chat {
         Some(chat) => chat,
         None => {
             let session = agent_panel::create_session(workspace, AgentKind::Claude, cx)?;
@@ -469,7 +576,7 @@ fn close_agent_chats(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::tests::new_store;
+    use crate::session::tests::{make_global, new_store};
     use gpui::{TestAppContext, UpdateGlobal as _};
     use project::FakeFs;
 
@@ -598,6 +705,146 @@ mod tests {
             composer_text(&chats[0], cx),
             "@src/a.rs#5-10 @src/a.rs#5-10 "
         );
+    }
+
+    fn settle(
+        cx: &mut gpui::VisualTestContext,
+        mut done: impl FnMut(&mut gpui::VisualTestContext) -> bool,
+    ) {
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if done(cx) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the link never reached the expected state");
+    }
+
+    #[gpui::test]
+    async fn open_link_validates_session_and_never_sends(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        make_global(&store, cx);
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        let chats = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| open_chats(workspace, cx))
+        };
+        let open_link =
+            |session: Option<String>, prompt: &str, cx: &mut gpui::VisualTestContext| {
+                workspace.update_in(cx, |workspace, window, cx| {
+                    open_chat_from_link(workspace, session, Some(prompt.to_string()), window, cx)
+                });
+                cx.run_until_parked();
+            };
+
+        for session in [
+            "a".repeat(201),
+            "../chat".into(),
+            "a\\b".into(),
+            "a..b".into(),
+            "a\0b".into(),
+        ] {
+            assert!(!link_session_is_valid(&session), "{session:?}");
+            open_link(Some(session.clone()), "hi", cx);
+            assert!(chats(cx).is_empty(), "{session:?} must open nothing");
+        }
+
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let id = session.read_with(cx, |session, _| session.metadata().id.clone());
+        assert!(link_session_is_valid(&id));
+        open_link(Some(id), "/clear", cx);
+        settle(cx, |cx| !chats(cx).is_empty());
+        let chat = chats(cx).remove(0);
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.session().clone()),
+            session
+        );
+        chat.read_with(cx, |chat, cx| {
+            assert_eq!(chat.composer_text_for_test(cx), "/clear");
+            assert!(
+                !chat.command_menu_is_open_for_test(),
+                "the link's command waits as text"
+            );
+        });
+        session.read_with(cx, |session, _| {
+            assert!(
+                !session.is_working() && !session.has_live_run(),
+                "nothing is sent"
+            );
+        });
+
+        open_link(None, "review my changes", cx);
+        settle(cx, |cx| chats(cx).len() == 2);
+        let new_chat = chats(cx)
+            .into_iter()
+            .find(|other| *other != chat)
+            .expect("a new chat");
+        new_chat.read_with(cx, |chat, cx| {
+            assert_eq!(chat.composer_text_for_test(cx), "review my changes");
+            let session = chat.session().read(cx);
+            assert_eq!(session.kind(), AgentKind::Claude);
+            assert!(
+                !session.is_working() && !session.has_live_run(),
+                "nothing is sent"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn install_plugin_link_requires_confirmation(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        make_global(&store, cx);
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            install_plugin_from_link(
+                workspace,
+                "ponytail".into(),
+                Some("ponytail-marketplace".into()),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let form_text = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_modal::<chat_view::ClaudeDialog>(cx)
+                .and_then(|dialog| dialog.read(cx).install_form_text_for_test(cx))
+        });
+        assert_eq!(
+            form_text.as_deref(),
+            Some("ponytail@ponytail-marketplace"),
+            "the install form waits, filled in, for the user to confirm"
+        );
+        let chats = workspace.read_with(cx, |workspace, cx| open_chats(workspace, cx));
+        assert_eq!(chats.len(), 1);
+        chats[0].read_with(cx, |chat, cx| {
+            let session = chat.session().read(cx);
+            assert_eq!(session.kind(), AgentKind::Claude);
+            assert!(!session.is_working() && !session.has_live_run());
+        });
     }
 
     #[gpui::test]

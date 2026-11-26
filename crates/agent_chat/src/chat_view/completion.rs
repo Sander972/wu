@@ -357,6 +357,34 @@ impl ChatView {
     }
 
     #[cfg(test)]
+    pub(crate) fn command_menu_is_open_for_test(&self) -> bool {
+        self.command_menu.is_some()
+    }
+
+    /// Adds a link's prompt after any draft, leaving it for the user to edit and send: the command and mention menus stay closed, so pressing Enter can't pick a command the link chose.
+    pub(crate) fn place_link_prompt(
+        &mut self,
+        prompt: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let token = self.composer.update(cx, |editor, cx| {
+            let separator = if editor.is_empty(cx) { "" } else { "\n\n" };
+            editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+            editor.insert(&format!("{separator}{prompt}"), window, cx);
+            let snapshot = editor.display_snapshot(cx);
+            let cursor = editor
+                .selections
+                .newest::<MultiBufferOffset>(&snapshot)
+                .head()
+                .0;
+            completion_token(&editor.text(cx), cursor)
+        });
+        self.dismissed_command = token.map(|(_, token)| token);
+        window.focus(&self.composer.focus_handle(cx), cx);
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_composer_text_for_test(
         &mut self,
         text: &str,

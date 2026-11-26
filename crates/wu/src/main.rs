@@ -1011,6 +1011,19 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                     })));
                 });
             }
+            OpenRequestKind::AgentOpen { session, prompt } => {
+                workspace::with_active_or_new_workspace(cx, move |workspace, window, cx| {
+                    agent_chat::open_chat_from_link(workspace, session, prompt, window, cx)
+                });
+            }
+            OpenRequestKind::AgentInstallPlugin {
+                plugin,
+                marketplace,
+            } => {
+                workspace::with_active_or_new_workspace(cx, move |workspace, window, cx| {
+                    agent_chat::install_plugin_from_link(workspace, plugin, marketplace, window, cx)
+                });
+            }
             OpenRequestKind::GitCommit { sha } => {
                 let base_open_options = wu::open_options_for_request(
                     request.open_behavior,

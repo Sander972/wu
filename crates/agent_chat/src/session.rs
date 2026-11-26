@@ -4252,6 +4252,39 @@ impl AgentStore {
         })
     }
 
+    /// Opens the chat a link names by Wu's id or Claude's session id, else continues Claude's own saved chat with that id in `cwd`.
+    pub fn open_linked_session(
+        &mut self,
+        session_id: String,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<AgentSession>>> {
+        let loaded = self.load_task.clone();
+        cx.spawn(async move |this, cx| {
+            if let Some(loaded) = loaded {
+                loaded.await;
+            }
+            this.update(cx, |this, cx| {
+                let known = this.sessions.iter().find(|metadata| {
+                    metadata.id == session_id
+                        || metadata.native_session_id.as_deref() == Some(session_id.as_str())
+                });
+                match known.map(|metadata| metadata.id.clone()) {
+                    Some(id) => this.open_session(&id, cx),
+                    None => {
+                        let external = ExternalSession {
+                            id: session_id,
+                            title: String::new(),
+                            updated_at: 0,
+                        };
+                        this.continue_external(AgentKind::Claude, cwd, external, cx)
+                    }
+                }
+            })?
+            .await
+        })
+    }
+
     pub(crate) fn harness(&mut self, kind: AgentKind) -> Arc<dyn Harness> {
         self.harnesses
             .entry(kind)
@@ -5755,6 +5788,11 @@ pub(crate) mod tests {
         });
         let languages = Arc::new(LanguageRegistry::test(cx.background_executor.clone()));
         cx.new(|cx| AgentStore::new(directory.into(), languages, cx))
+    }
+
+    /// Makes `store` the one workspace actions use, so they never load the real saved chats.
+    pub(crate) fn make_global(store: &Entity<AgentStore>, cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(GlobalAgentStore(store.clone())));
     }
 
     pub(crate) fn run_until(

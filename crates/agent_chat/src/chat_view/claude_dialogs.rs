@@ -1128,6 +1128,11 @@ impl ClaudeDialog {
         self.reload(cx);
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_form_text_for_test(&self, cx: &App) -> Option<String> {
+        self.form.as_ref().map(|form| form.text(0, cx))
+    }
+
     fn open_install_form(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.open_form(FormKind::Plugin, window, cx);
         let editor = match self.form.as_ref().and_then(|form| form.items.first()) {

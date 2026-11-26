@@ -69,6 +69,14 @@ pub enum OpenRequestKind {
     GitCommit {
         sha: String,
     },
+    AgentOpen {
+        session: Option<String>,
+        prompt: Option<String>,
+    },
+    AgentInstallPlugin {
+        plugin: String,
+        marketplace: Option<String>,
+    },
 }
 
 impl std::fmt::Debug for OpenRequestKind {
@@ -97,6 +105,19 @@ impl std::fmt::Debug for OpenRequestKind {
                 .field("repo_url", repo_url)
                 .finish(),
             Self::GitCommit { sha } => f.debug_struct("GitCommit").field("sha", sha).finish(),
+            Self::AgentOpen { session, prompt } => f
+                .debug_struct("AgentOpen")
+                .field("session", session)
+                .field("prompt", prompt)
+                .finish(),
+            Self::AgentInstallPlugin {
+                plugin,
+                marketplace,
+            } => f
+                .debug_struct("AgentInstallPlugin")
+                .field("plugin", plugin)
+                .field("marketplace", marketplace)
+                .finish(),
         }
     }
 }
@@ -164,6 +185,10 @@ impl OpenRequest {
                 this.parse_git_clone_url(clone_path)?
             } else if let Some(commit_path) = url.strip_prefix("wu://git/commit/") {
                 this.parse_git_commit_url(commit_path)?
+            } else if let Some(rest) = url.strip_prefix("wu://agent/open") {
+                this.parse_agent_open_url(rest)?
+            } else if let Some(rest) = url.strip_prefix("wu://agent/install-plugin") {
+                this.parse_agent_install_plugin_url(rest)?
             } else if url.starts_with("ssh://") {
                 this.parse_ssh_file_path(&url, cx)?
             } else {
@@ -222,6 +247,48 @@ impl OpenRequest {
         Ok(())
     }
 
+    fn parse_agent_open_url(&mut self, rest: &str) -> Result<()> {
+        // Format: ?session=<id>&prompt=<text>, both optional
+        let query = agent_link_query(rest)?;
+        let parameter = |name: &str| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
+        };
+        let session = parameter("session");
+        if let Some(session) = &session {
+            anyhow::ensure!(
+                agent_chat::link_session_is_valid(session),
+                "invalid agent url: unsafe session id"
+            );
+        }
+        let prompt = parameter("prompt").filter(|prompt| !prompt.is_empty());
+        if let Some(prompt) = &prompt {
+            anyhow::ensure!(
+                prompt.chars().count() <= agent_chat::MAX_LINK_PROMPT_CHARS,
+                "invalid agent url: prompt longer than {} characters",
+                agent_chat::MAX_LINK_PROMPT_CHARS
+            );
+        }
+        self.kind = Some(OpenRequestKind::AgentOpen { session, prompt });
+        Ok(())
+    }
+
+    fn parse_agent_install_plugin_url(&mut self, rest: &str) -> Result<()> {
+        // Format: ?plugin=<name>&marketplace=<name>
+        let query = agent_link_query(rest)?;
+        let parameter = |name: &str| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
+                .filter(|value| !value.is_empty())
+        };
+        let plugin = parameter("plugin").context("invalid agent url: missing plugin")?;
+        self.kind = Some(OpenRequestKind::AgentInstallPlugin {
+            plugin,
+            marketplace: parameter("marketplace"),
+        });
+        Ok(())
+    }
+
     fn parse_ssh_file_path(&mut self, file: &str, cx: &App) -> Result<()> {
         let url = parse_ssh_url(file)?;
         let host = match url
@@ -259,6 +326,15 @@ impl OpenRequest {
         self.parse_file_path(url.path());
         Ok(())
     }
+}
+
+fn agent_link_query(rest: &str) -> Result<&str> {
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    if rest.is_empty() {
+        return Ok(rest);
+    }
+    rest.strip_prefix('?')
+        .context("invalid agent url: unexpected path")
 }
 
 fn parse_ssh_url(url: &str) -> Result<url::Url> {
@@ -1509,6 +1585,108 @@ mod tests {
                 .to_string()
                 .contains("missing repo query parameter")
         );
+    }
+
+    fn parse_url(url: &str, cx: &mut TestAppContext) -> Result<OpenRequest> {
+        cx.update(|cx| {
+            OpenRequest::parse(
+                RawOpenRequest {
+                    urls: vec![url.into()],
+                    ..Default::default()
+                },
+                cx,
+            )
+        })
+    }
+
+    #[gpui::test]
+    fn parses_agent_open_with_both_parameters(cx: &mut TestAppContext) {
+        let _app_state = init_test(cx);
+
+        let request = parse_url(
+            "wu://agent/open?session=0b8e2c1a-4f6d-4e2b-9c3a-7d5e1f2a3b4c&prompt=review%20my%20changes+now",
+            cx,
+        )
+        .unwrap();
+        match request.kind {
+            Some(OpenRequestKind::AgentOpen { session, prompt }) => {
+                assert_eq!(
+                    session.as_deref(),
+                    Some("0b8e2c1a-4f6d-4e2b-9c3a-7d5e1f2a3b4c")
+                );
+                assert_eq!(prompt.as_deref(), Some("review my changes now"));
+            }
+            kind => panic!("expected AgentOpen, got {kind:?}"),
+        }
+
+        for url in ["wu://agent/open", "wu://agent/open/?prompt="] {
+            match parse_url(url, cx).unwrap().kind {
+                Some(OpenRequestKind::AgentOpen { session, prompt }) => {
+                    assert_eq!((session, prompt), (None, None), "{url}");
+                }
+                kind => panic!("expected AgentOpen for {url}, got {kind:?}"),
+            }
+        }
+        assert!(parse_url("wu://agent/openx?prompt=hi", cx).is_err());
+    }
+
+    #[gpui::test]
+    fn open_link_validates_session(cx: &mut TestAppContext) {
+        let _app_state = init_test(cx);
+
+        let too_long = "a".repeat(201);
+        for session in [
+            too_long.as_str(),
+            "..%2F..%2Fsecrets",
+            "abc%2Fdef",
+            "abc%5Cdef",
+            "abc..def",
+            "abc%00def",
+            "abc%20def",
+            "abc:def",
+            "",
+        ] {
+            let url = format!("wu://agent/open?session={session}&prompt=hi");
+            let error = parse_url(&url, cx).expect_err(&url);
+            assert!(error.to_string().contains("unsafe session id"), "{url}");
+        }
+        assert!(parse_url(&format!("wu://agent/open?session={}", "a".repeat(200)), cx).is_ok());
+
+        let long_prompt = "x".repeat(agent_chat::MAX_LINK_PROMPT_CHARS + 1);
+        assert!(parse_url(&format!("wu://agent/open?prompt={long_prompt}"), cx).is_err());
+    }
+
+    #[gpui::test]
+    fn parses_agent_install_plugin(cx: &mut TestAppContext) {
+        let _app_state = init_test(cx);
+
+        match parse_url(
+            "wu://agent/install-plugin?plugin=ponytail&marketplace=ponytail",
+            cx,
+        )
+        .unwrap()
+        .kind
+        {
+            Some(OpenRequestKind::AgentInstallPlugin {
+                plugin,
+                marketplace,
+            }) => {
+                assert_eq!(plugin, "ponytail");
+                assert_eq!(marketplace.as_deref(), Some("ponytail"));
+            }
+            kind => panic!("expected AgentInstallPlugin, got {kind:?}"),
+        }
+        match parse_url("wu://agent/install-plugin?plugin=humanizer", cx)
+            .unwrap()
+            .kind
+        {
+            Some(OpenRequestKind::AgentInstallPlugin { marketplace, .. }) => {
+                assert_eq!(marketplace, None)
+            }
+            kind => panic!("expected AgentInstallPlugin, got {kind:?}"),
+        }
+        assert!(parse_url("wu://agent/install-plugin?marketplace=ponytail", cx).is_err());
+        assert!(parse_url("wu://agent/install-plugin?plugin=", cx).is_err());
     }
 
     #[gpui::test]
