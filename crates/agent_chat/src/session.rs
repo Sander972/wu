@@ -6520,7 +6520,7 @@ pub(crate) mod tests {
         std::fs::write(
             &script,
             r#"#!/bin/sh
-args="$*"
+args=$(printf '%s' "$*" | sed 's/"/\\"/g')
 printf '{"type":"system","subtype":"init","model":"m","tools":[],"cwd":"/tmp","session_id":"sess-args"}\n'
 while read -r line; do
   printf '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$args"
@@ -8826,7 +8826,7 @@ done
         std::fs::write(
             &script,
             r#"#!/bin/sh
-args="$*"
+args=$(printf '%s' "$*" | sed 's/"/\\"/g')
 printf '{"type":"system","subtype":"init","model":"m","tools":[],"cwd":"/tmp","session_id":"sess-args"}\n'
 while read -r line; do
   printf '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$args"
