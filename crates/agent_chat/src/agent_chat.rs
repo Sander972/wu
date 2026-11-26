@@ -332,12 +332,13 @@ pub fn link_session_is_valid(session: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
-/// Whether a `wu://agent/open` link's prompt may go in the chat box: at most `MAX_LINK_PROMPT_CHARS` characters, and no control characters but newlines and tabs, which could hide text from the user.
+/// Whether a `wu://agent/open` link's prompt may go in the chat box: at most `MAX_LINK_PROMPT_CHARS` characters, no control characters but newlines and tabs, and no invisible or bidi characters, which could hide or reorder text the user then sends.
 pub fn link_prompt_is_valid(prompt: &str) -> bool {
     prompt.chars().count() <= MAX_LINK_PROMPT_CHARS
         && prompt
             .chars()
             .all(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        && chat_view::strip_invisible(prompt).1 == 0
 }
 
 /// Opens the chat a `wu://agent/open` link names, or a new Claude chat, with the link's prompt waiting in the chat box. Nothing is sent.
@@ -603,6 +604,21 @@ mod tests {
     use crate::session::tests::{make_global, new_store};
     use gpui::{TestAppContext, UpdateGlobal as _};
     use project::FakeFs;
+
+    #[test]
+    fn link_prompts_with_hidden_or_reordered_text_are_refused() {
+        for prompt in [
+            "run \u{202E}txt.exe",
+            "a\u{200B}b",
+            "\u{2066}x\u{2069}",
+            "a\u{E0041}",
+        ] {
+            assert!(!link_prompt_is_valid(prompt), "{prompt:?}");
+        }
+        for prompt in ["one\ntwo\tthree", "日本語", "👨\u{200D}👩\u{200D}👧"] {
+            assert!(link_prompt_is_valid(prompt), "{prompt:?}");
+        }
+    }
 
     fn set_enabled(enabled: bool, cx: &mut gpui::VisualTestContext) {
         cx.update(|_, cx| {

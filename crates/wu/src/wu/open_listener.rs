@@ -265,7 +265,7 @@ impl OpenRequest {
         if let Some(prompt) = &prompt {
             anyhow::ensure!(
                 agent_chat::link_prompt_is_valid(prompt),
-                "invalid agent url: prompt longer than {} characters or with control characters",
+                "invalid agent url: prompt longer than {} characters or with control or invisible characters",
                 agent_chat::MAX_LINK_PROMPT_CHARS
             );
         }

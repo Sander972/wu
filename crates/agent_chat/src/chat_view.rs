@@ -20,6 +20,7 @@ mod todo_panel;
 
 #[cfg(test)]
 pub(crate) use claude_dialogs::ClaudeDialog;
+pub(crate) use attachments::strip_invisible;
 pub(crate) use claude_dialogs::{DialogSection, context_sections};
 pub(crate) use edit_review::{ProposedEditReview, close_diff_reviews, open_diff_review};
 pub(crate) use editor_context::{
