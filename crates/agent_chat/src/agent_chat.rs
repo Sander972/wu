@@ -447,7 +447,14 @@ fn reveal_chat_or_new_claude(
     Some(chat)
 }
 
+fn sync_claude_launch(cx: &App) {
+    AgentChatSettings::get_global(cx).claude_launch.clone().set_current();
+}
+
 fn watch_enabled(cx: &mut App) {
+    sync_claude_launch(cx);
+    cx.observe_global::<SettingsStore>(|cx| sync_claude_launch(cx))
+        .detach();
     let mut enabled = AgentChatSettings::get_global(cx).enabled;
     show_commands(enabled, cx);
     cx.observe_global::<SettingsStore>(move |cx| {

@@ -43,7 +43,7 @@ use crate::{
 };
 use agent_harness::{ToolCall, UserInputAnswer, UserInputQuestion, view};
 use i18n::{t, tc};
-use settings::{AgentChatSendKey, Settings as _, SettingsStore};
+use settings::{AgentChatSendKey, Settings as _};
 use gpui::Font;
 use theme_settings::ThemeSettings;
 use collections::{HashMap, HashSet};
@@ -56,7 +56,7 @@ use gpui::{
     PromptButton, PromptLevel, Render,
     ScrollHandle, SharedString, StyleRefinement, Styled, ObjectFit, Subscription, Svg,
     ease_out_quint, Task, TextAlign, TextRun, TextStyleRefinement, Transformation,
-    UnderlineStyle, UpdateGlobal as _, WeakEntity, Window, canvas, div, img, percentage, point, px, radians, size,
+    UnderlineStyle, WeakEntity, Window, canvas, div, img, percentage, point, px, radians, size,
     svg,
 };
 use markdown::{
@@ -991,10 +991,8 @@ impl ChatView {
 
     fn toggle_focus_view(&mut self, _: &ToggleFocusView, _: &mut Window, cx: &mut Context<Self>) {
         let focus = !AgentChatSettings::get_global(cx).compact_transcript;
-        SettingsStore::update_global(cx, |store, cx| {
-            store.update_user_settings(cx, |content| {
-                content.agent_chat.get_or_insert_default().compact_transcript = Some(focus);
-            })
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |content, _| {
+            content.agent_chat.get_or_insert_default().compact_transcript = Some(focus);
         });
         self.store
             .update(cx, |store, cx| store.apply_view_mode(focus, cx));
@@ -6280,12 +6278,26 @@ mod tests {
                 _ => panic!("expected an apply_flag_settings control request"),
             }
         };
+        // Nothing watches the settings file in tests, so the written file is loaded back like the real watcher would.
+        let reload_settings_file = |cx: &mut VisualTestContext| {
+            let fs = cx.update(|_, cx| <dyn fs::Fs>::global(cx));
+            let written = cx.foreground_executor().block_test(fs.load(paths::settings_file()));
+            let written = written.expect("the settings file is written");
+            cx.update(|_, cx| {
+                <settings::SettingsStore as gpui::UpdateGlobal>::update_global(cx, |store, cx| {
+                    let parsed = store.set_user_settings(&written, cx);
+                    assert!(!matches!(parsed.parse_status, settings::ParseStatus::Failed { .. }));
+                })
+            });
+            written
+        };
         assert!(!compact(cx));
 
         view.update_in(cx, |view, window, cx| {
             view.toggle_focus_view(&ToggleFocusView, window, cx)
         });
         cx.run_until_parked();
+        assert!(reload_settings_file(cx).contains("\"compact_transcript\": true"));
         assert!(compact(cx));
         assert_eq!(
             view_mode_request(&mut receiver),
@@ -6296,6 +6308,7 @@ mod tests {
             view.toggle_focus_view(&ToggleFocusView, window, cx)
         });
         cx.run_until_parked();
+        assert!(reload_settings_file(cx).contains("\"compact_transcript\": false"));
         assert!(!compact(cx));
         assert_eq!(
             view_mode_request(&mut receiver),
@@ -6341,7 +6354,7 @@ mod tests {
         update: impl FnOnce(&mut settings::AgentChatSettingsContent),
     ) {
         cx.update(|_, cx| {
-            SettingsStore::update_global(cx, |store, cx| {
+            <settings::SettingsStore as gpui::UpdateGlobal>::update_global(cx, |store, cx| {
                 store.update_user_settings(cx, |content| {
                     update(content.agent_chat.get_or_insert_default())
                 })

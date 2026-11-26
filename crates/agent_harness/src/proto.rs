@@ -185,9 +185,31 @@ pub struct ClaudeLaunch {
     pub replace_spinner_verbs: bool,
 }
 
+static CURRENT_CLAUDE_LAUNCH: std::sync::RwLock<ClaudeLaunch> =
+    std::sync::RwLock::new(ClaudeLaunch {
+        environment: Vec::new(),
+        process_wrapper: None,
+        spinner_verbs: Vec::new(),
+        replace_spinner_verbs: false,
+    });
+
 impl ClaudeLaunch {
     fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Claude Code processes that aren't chat runs (control requests, model discovery, sign-in) have no `RunRequest` to carry these, so they use the ones last set here.
+    pub fn set_current(self) {
+        *CURRENT_CLAUDE_LAUNCH
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self;
+    }
+
+    pub fn current() -> Self {
+        CURRENT_CLAUDE_LAUNCH
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 

@@ -6,7 +6,7 @@ mod normalize;
 mod wire;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::{
-    AgentEvent, DoneStatus, ExternalSession, HarnessId, Model, PermissionDecision, PermissionMode,
+    AgentEvent, ClaudeLaunch, DoneStatus, ExternalSession, HarnessId, Model, PermissionDecision, PermissionMode,
     PermissionPrompt, ReasoningLevel, RunRequest, SkillRef, SlashCommand, SteeringMode,
     UserInputAnswer, UserInputQuestion,
 };
@@ -217,17 +217,8 @@ impl ClaudeHarness {
         request: &RunRequest,
         discovered: Option<&[crate::Model]>,
     ) -> Command {
-        let wrapper = request
-            .launch
-            .process_wrapper
-            .as_deref()
-            .filter(|wrapper| !wrapper.trim().is_empty());
-        let mut cmd =
-            crate::process::command(wrapper.map_or(exe.as_os_str(), std::ffi::OsStr::new));
+        let mut cmd = launch_command(exe, &request.launch);
         crate::compose_child_path(&mut cmd, exe);
-        if wrapper.is_some() {
-            cmd.arg(exe);
-        }
         cmd.args([
             "--print",
             "--input-format",
@@ -278,11 +269,7 @@ impl ClaudeHarness {
                 crate::INTERRUPTED_TURN_MAX_AGE.as_millis().to_string(),
             );
         }
-        for (name, value) in &request.launch.environment {
-            if user_may_set_environment_variable(name, value) {
-                cmd.env(name, value);
-            }
-        }
+        apply_user_environment(&mut cmd, &request.launch);
         // Headless sessions only connect the Chrome extension when asked to.
         cmd.arg(if request.chrome {
             "--chrome"
@@ -330,9 +317,11 @@ impl ClaudeHarness {
 
     async fn probe_initialize(&self, cwd: Option<&std::path::Path>) -> Result<Value, HarnessError> {
         let exe = self.resolve_executable()?;
-        let mut cmd = crate::process::command(&exe);
+        let launch = ClaudeLaunch::current();
+        let mut cmd = launch_command(&exe, &launch);
         cmd.current_dir(cwd.map_or_else(crate::executable::scratch_dir, std::path::Path::to_path_buf));
         crate::compose_child_path(&mut cmd, &exe);
+        apply_user_environment(&mut cmd, &launch);
         cmd.args([
             "--print",
             "--input-format",
@@ -928,26 +917,7 @@ impl ClaudeHarness {
         resume: Option<&str>,
     ) -> Result<ControlSession, HarnessError> {
         let exe = self.resolve_executable()?;
-        let launch = RunRequest {
-            prompt: String::new(),
-            model: None,
-            reasoning: None,
-            model_options: serde_json::Map::new(),
-            cwd: cwd.to_string_lossy().into_owned(),
-            permission: PermissionMode::default(),
-            resume: resume.map(str::to_owned),
-            fork: None,
-            attachments: Vec::new(),
-            skills: Vec::new(),
-            auto_compact_tokens: None,
-            chrome: false,
-            drop_prompt: None,
-            ephemeral: resume.is_none(),
-            resume_interrupted: false,
-            prompt_suggestions: false,
-            launch: Default::default(),
-            context: Vec::new(),
-        };
+        let launch = control_request(cwd, resume);
         let mut cmd = self.build_command(&exe, &launch, None);
         cmd.stderr(Stdio::null());
         let mut child = cmd.spawn().map_err(|e| {
@@ -2179,14 +2149,58 @@ fn updated_input_with_answers(
     Value::Object(updated)
 }
 
+/// The process to start: the user's wrapper with `claude` as its first argument, or `claude` itself.
+fn launch_command(exe: &Path, launch: &ClaudeLaunch) -> Command {
+    let wrapper = launch
+        .process_wrapper
+        .as_deref()
+        .filter(|wrapper| !wrapper.trim().is_empty());
+    let mut cmd = crate::process::command(wrapper.map_or(exe.as_os_str(), std::ffi::OsStr::new));
+    if wrapper.is_some() {
+        cmd.arg(exe);
+    }
+    cmd
+}
+
+fn apply_user_environment(cmd: &mut Command, launch: &ClaudeLaunch) {
+    for (name, value) in &launch.environment {
+        if user_may_set_environment_variable(name, value) {
+            cmd.env(name, value);
+        }
+    }
+}
+
 /// Wu strips the IDE port and the resume variables on purpose, so a user variable can't bring them back, and a name the OS rejects would fail the whole launch.
 fn user_may_set_environment_variable(name: &str, value: &str) -> bool {
     let name_upper = name.to_ascii_uppercase();
     !name.is_empty()
-        && !name.contains(['=', ' '])
-        && !value.contains(' ')
+        && !name.contains(['=', '\0'])
+        && !value.contains('\0')
         && name_upper != "CLAUDE_CODE_SSE_PORT"
         && !name_upper.starts_with("CLAUDE_CODE_RESUME_")
+}
+
+fn control_request(cwd: &Path, resume: Option<&str>) -> RunRequest {
+    RunRequest {
+        prompt: String::new(),
+        model: None,
+        reasoning: None,
+        model_options: serde_json::Map::new(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        permission: PermissionMode::default(),
+        resume: resume.map(str::to_owned),
+        fork: None,
+        attachments: Vec::new(),
+        skills: Vec::new(),
+        auto_compact_tokens: None,
+        chrome: false,
+        drop_prompt: None,
+        ephemeral: resume.is_none(),
+        resume_interrupted: false,
+        prompt_suggestions: false,
+        launch: ClaudeLaunch::current(),
+        context: Vec::new(),
+    }
 }
 
 fn flag_settings(request: &RunRequest) -> serde_json::Map<String, Value> {
@@ -2768,6 +2782,31 @@ mod tests {
             None,
         );
         assert_eq!(blank.as_std().get_program(), "claude");
+    }
+
+    #[test]
+    fn control_launches_use_the_current_launch_settings() {
+        crate::ClaudeLaunch {
+            environment: vec![("ANTHROPIC_BASE_URL".into(), "http://proxy".into())],
+            process_wrapper: Some("/opt/setup".into()),
+            ..Default::default()
+        }
+        .set_current();
+        let request = control_request(Path::new("."), None);
+        crate::ClaudeLaunch::default().set_current();
+        let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
+        assert_eq!(command.as_std().get_program(), "/opt/setup");
+        assert_eq!(
+            command.as_std().get_args().next(),
+            Some(std::ffi::OsStr::new("claude"))
+        );
+        let envs: std::collections::HashMap<_, _> = command.as_std().get_envs().collect();
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("ANTHROPIC_BASE_URL"))
+                .copied()
+                .flatten(),
+            Some(std::ffi::OsStr::new("http://proxy"))
+        );
     }
 
     #[test]

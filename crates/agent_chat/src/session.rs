@@ -2628,16 +2628,14 @@ impl AgentSession {
                 prompt.text.clone()
             }
         };
-        let chat_settings = AgentChatSettings::get_global(cx);
+        let chat_settings = AgentChatSettings::get_global(cx).clone();
         let allowed = chat_settings.allowed_permission(self.kind(), self.metadata.settings.permission);
         if allowed != self.metadata.settings.permission {
             self.metadata.settings.permission = allowed;
             self.save_metadata(cx);
         }
         let settings = self.metadata.settings.clone();
-        let chat_settings = AgentChatSettings::get_global(cx);
         let prompt_suggestions = chat_settings.prompt_suggestions;
-        let launch = chat_settings.claude_launch.clone();
         self.run_suggests_prompts = prompt_suggestions;
         let request = RunRequest {
             prompt: text,
@@ -2651,13 +2649,13 @@ impl AgentSession {
             resume: self.metadata.native_session_id.clone(),
             fork,
             auto_compact_tokens: self.auto_compact_tokens(cx),
-            chrome: AgentChatSettings::get_global(cx).claude_in_chrome,
+            chrome: chat_settings.claude_in_chrome,
             drop_prompt,
             ephemeral: false,
             context: prompt.context.clone(),
             resume_interrupted: self.continuing_turn && prompt.is_empty(),
             prompt_suggestions,
-            launch,
+            launch: chat_settings.claude_launch,
         };
         let (steering_tx, steering_rx) = tokio::sync::mpsc::channel(32);
         let interrupt = CancellationToken::new();
