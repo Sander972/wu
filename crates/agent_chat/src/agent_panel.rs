@@ -318,10 +318,12 @@ impl ChatFilter {
         match self {
             Self::NeedsInput => row.needs_input,
             Self::Working => row.working,
+            // Also what the row shows as Done: an unread chat that did not fail.
             Self::Completed => {
                 !row.working
                     && !row.needs_input
-                    && matches!(row.outcome, Some(ChatOutcome::Completed))
+                    && (matches!(row.outcome, Some(ChatOutcome::Completed))
+                        || (row.unseen && !matches!(row.outcome, Some(ChatOutcome::Errored))))
             }
             Self::Open => row.open,
             Self::Closed => !row.open,
@@ -2915,7 +2917,17 @@ mod tests {
         let done = make(false, false, false, Some(ChatOutcome::Completed));
         let open_done = make(false, false, true, Some(ChatOutcome::Completed));
         let failed = make(false, false, false, Some(ChatOutcome::Errored));
-        let cases: [(&SessionSummary, bool, &[ChatFilter], bool); 20] = [
+        let unread = SessionSummary {
+            unseen: true,
+            ..make(false, false, false, None)
+        };
+        let unread_failed = SessionSummary {
+            unseen: true,
+            ..make(false, false, false, Some(ChatOutcome::Errored))
+        };
+        let cases: [(&SessionSummary, bool, &[ChatFilter], bool); 22] = [
+            (&unread, false, &[Completed], true),
+            (&unread_failed, false, &[Completed], false),
             (&idle, false, &[], true),
             (&idle, true, &[], false),
             (&working, true, &[], true),

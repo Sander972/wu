@@ -487,6 +487,7 @@ impl ChatView {
             for handle in [view.composer.focus_handle(cx), view.question_focus.clone()] {
                 view._subscriptions
                     .push(cx.on_focus_in(&handle, window, |this, _, cx| {
+                        this.session.update(cx, |session, cx| session.acknowledge(cx));
                         let workspace = this.workspace.entity_id();
                         crate::remember_focused_chat(workspace, cx.weak_entity(), cx);
                     }));
@@ -4400,6 +4401,7 @@ impl Render for ChatView {
         if self.subagent.is_none()
             && window.is_window_active()
             && self.session.read(cx).metadata().unseen
+            && !self.session.read(cx).keeps_unseen()
         {
             let session = self.session.clone();
             cx.defer(move |cx| session.update(cx, |session, cx| session.mark_seen(cx)));
@@ -5507,6 +5509,62 @@ mod tests {
             chat.list.bounds_for_item(0).map(|bounds| bounds.size.height)
         });
         assert!(turn_height.is_some_and(|height| height >= px(384.)), "{turn_height:?}");
+    }
+
+    #[gpui::test]
+    async fn marking_the_visible_chat_unread_keeps_it_unread_until_it_is_focused(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let weak = cx.entity().downgrade();
+            let chat = cx.new(|cx| {
+                ChatView::new(
+                    session.clone(),
+                    store.clone(),
+                    project.clone(),
+                    weak,
+                    window,
+                    cx,
+                )
+            });
+            workspace.add_item_to_active_pane(Box::new(chat), None, true, window, cx);
+        });
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            cx.run_until_parked();
+        };
+        let unseen = |cx: &mut VisualTestContext| session.read_with(cx, |session, _| session.metadata().unseen);
+
+        session.update(cx, |session, cx| session.update_metadata(|metadata| metadata.unseen = true, cx));
+        draw(cx);
+        assert!(!unseen(cx), "an unread chat that is on screen is marked seen");
+
+        let id = session.read_with(cx, |session, _| session.metadata().id.clone());
+        store.update(cx, |store, cx| store.mark_unseen(&[id], cx));
+        draw(cx);
+        assert!(unseen(cx), "an explicit mark as unread survives a render");
+
+        session.update(cx, |session, cx| session.acknowledge(cx));
+        draw(cx);
+        assert!(!unseen(cx), "focusing the chat marks it seen again");
     }
 
     #[gpui::test]

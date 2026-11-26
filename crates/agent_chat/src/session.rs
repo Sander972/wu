@@ -1232,6 +1232,8 @@ pub struct AgentSession {
     native_fork_failed: bool,
     native_fork_errors: Vec<String>,
     title_requested: bool,
+    /// Set by an explicit "mark as unread", so an open chat in the active window is not marked seen again before the user next focuses it.
+    keep_unseen: bool,
     metadata: SessionMetadata,
     transcript: Transcript,
     subagents: HashMap<String, Subagent>,
@@ -1310,6 +1312,7 @@ impl AgentSession {
             native_fork_prompt: None,
             native_fork_failed: false,
             title_requested: false,
+            keep_unseen: false,
             native_fork_errors: Vec::new(),
             metadata,
             transcript,
@@ -1456,7 +1459,20 @@ impl AgentSession {
     }
 
     pub fn mark_unseen(&mut self, cx: &mut Context<Self>) {
+        self.keep_unseen = true;
         self.update_metadata(|metadata| metadata.unseen = true, cx);
+    }
+
+    pub fn keeps_unseen(&self) -> bool {
+        self.keep_unseen
+    }
+
+    /// The user is looking at the chat again, so it may be marked seen.
+    pub fn acknowledge(&mut self, cx: &mut Context<Self>) {
+        if self.keep_unseen {
+            self.keep_unseen = false;
+            cx.notify();
+        }
     }
 
     pub fn update_metadata(&mut self, change: impl FnOnce(&mut SessionMetadata), cx: &mut Context<Self>) {
@@ -4592,7 +4608,7 @@ impl AgentStore {
                     side_chat: metadata.side_chat,
                     outcome: metadata.outcome,
                     unseen: metadata.unseen,
-                    open: live.is_some(),
+                    open: self.loaded_session(&metadata.id).is_some(),
                     project_root: metadata.project_root().to_path_buf(),
                     branch: metadata.branch.clone(),
                     native_session_id: metadata.native_session_id.clone(),
@@ -4800,7 +4816,10 @@ impl AgentStore {
 
     pub fn mark_unseen(&mut self, ids: &[String], cx: &mut Context<Self>) {
         for id in ids {
-            self.update_session_metadata(id, |metadata| metadata.unseen = true, cx);
+            match self.loaded_session(id) {
+                Some(session) => session.update(cx, |session, cx| session.mark_unseen(cx)),
+                None => self.update_session_metadata(id, |metadata| metadata.unseen = true, cx),
+            }
         }
     }
 
@@ -8666,6 +8685,34 @@ done
             assert_eq!(summaries.len(), 2);
             assert!(summaries.iter().all(|summary| summary.unseen));
         });
+    }
+
+    #[gpui::test]
+    async fn a_released_chat_with_an_open_tab_still_counts_as_open(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let ids = new_chats(&store, directory.path(), 2, cx);
+        let held = store.update(cx, |store, _| {
+            let held = store.loaded_session(&ids[0]).expect("first chat is loaded");
+            for id in &ids {
+                store.live.remove(id);
+            }
+            store.released.insert(ids[0].clone(), held.downgrade());
+            held
+        });
+        let open_flags = store.read_with(cx, |store, cx| {
+            let summaries = store.sessions_in(&[directory.path().to_path_buf()], cx);
+            ids.iter()
+                .map(|id| {
+                    summaries
+                        .iter()
+                        .find(|summary| summary.id == *id)
+                        .map(|summary| summary.open)
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(open_flags, [Some(true), Some(false)]);
+        drop(held);
     }
 
     #[gpui::test]
