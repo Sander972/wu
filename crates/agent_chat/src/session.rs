@@ -1691,6 +1691,7 @@ impl AgentSession {
             && self.queue.is_empty()
             && self.prompt_after_stop.is_none()
             && self.metadata.native_session_id.is_some()
+            && self.remote_control_url.is_none()
     }
 
     fn release_when_idle(&mut self, idle_for: Duration, cx: &mut Context<Self>) -> IdleCheck {
@@ -6261,6 +6262,25 @@ pub(crate) mod tests {
 
         session.update(cx, |session, _| session.run = None);
         assert_eq!(url(cx), None, "the link ends with the run");
+    }
+
+    #[gpui::test]
+    async fn idle_release_keeps_a_run_with_remote_control_on(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let _receiver = attach_live_run(&session, cx);
+        session.update(cx, |session, cx| {
+            session.metadata.native_session_id = Some("sess-1".into());
+            session.remote_control_url = Some("https://claude.ai/code/session_1".into());
+            session.release_when_idle(Duration::ZERO, cx);
+            assert!(session.run.is_some(), "a phone may still drive this chat");
+            session.remote_control_url = None;
+            session.release_when_idle(Duration::ZERO, cx);
+            assert!(session.run.is_none());
+        });
     }
 
     #[gpui::test]
