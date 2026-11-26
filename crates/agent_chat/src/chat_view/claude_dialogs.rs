@@ -49,6 +49,7 @@ pub(crate) enum RowAction {
     Shell {
         label: SharedString,
         arguments: Vec<String>,
+        input: Option<String>,
         confirmation: SharedString,
     },
     Authenticate {
@@ -278,8 +279,13 @@ pub(crate) fn sandbox_sections(response: &Value) -> Vec<DialogSection> {
     sections
 }
 
-const MCP_TRANSPORTS: [&str; 3] = ["http", "sse", "stdio"];
-const MCP_SCOPES: [&str; 3] = ["local", "user", "project"];
+const MCP_TRANSPORTS: &[&str] = &["http", "sse", "stdio"];
+const MCP_SCOPES: &[&str] = &["local", "user", "project"];
+const RULE_BEHAVIORS: &[&str] = &["allow", "ask", "deny"];
+const RULE_SOURCES: &[&str] = &["userSettings", "localSettings"];
+const EDIT_RULES: [&str; 2] = ["edit-permission-rules", "--json"];
+const RELOAD_ATTEMPTS: usize = 8;
+const RELOAD_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 
 pub(crate) fn mcp_sections(response: &Value, live_run: bool) -> Vec<DialogSection> {
     let mut sections = Vec::new();
@@ -329,6 +335,7 @@ pub(crate) fn mcp_sections(response: &Value, live_run: bool) -> Vec<DialogSectio
                 arguments: ["mcp", "remove", "--scope", scope, "--", name_text]
                     .map(String::from)
                     .into(),
+                input: None,
                 confirmation: t!(
                     "Removed {name} from {scope} config. Running sessions keep it until restarted.",
                     name = name_text,
@@ -390,6 +397,82 @@ fn authentication_url(response: &Value) -> Option<String> {
         .map(|url| url.to_string())
 }
 
+fn add_rule_edit(behavior: &str, source: &str, rule: &str) -> Value {
+    json!({ "op": "add", "rules": [rule], "behavior": behavior, "destination": source })
+}
+
+fn remove_rule_edit(behavior: &str, source: &str, rule: &str) -> Value {
+    json!({ "op": "remove", "rule": rule, "behavior": behavior, "source": source })
+}
+
+fn permission_row(state: &Value, rule: &Value) -> Option<DialogRow> {
+    let text_of_rule = text(rule, "rule")?;
+    let (behavior, source) = (rule["behavior"].as_str()?, rule["source"].as_str()?);
+    let detail: String = ["prefix", "emphasis", "suffix"]
+        .into_iter()
+        .filter_map(|part| rule["description"][part].as_str())
+        .collect();
+    let mut actions = Vec::new();
+    if rule["editability"] == "persistent" && rule["notInEffect"] != true {
+        match source {
+            "userSettings" | "localSettings" => actions.push(RowAction::Shell {
+                label: t!("Remove"),
+                arguments: EDIT_RULES.map(String::from).into(),
+                input: Some(remove_rule_edit(behavior, source, &text_of_rule).to_string()),
+                confirmation: t!(
+                    "Removed {rule} from the {behavior} rules in {source}.",
+                    rule = text_of_rule,
+                    behavior = behavior,
+                    source = source
+                ),
+            }),
+            "projectSettings" => actions.extend(state["originalCwd"].as_str().map(|directory| {
+                RowAction::OpenPath(
+                    PathBuf::from(directory)
+                        .join(".claude")
+                        .join("settings.json"),
+                )
+            })),
+            _ => {}
+        }
+    }
+    Some(DialogRow {
+        detail: (!detail.is_empty()).then(|| detail.into()),
+        badge: Some(source.to_string().into()),
+        actions,
+        ..DialogRow::new(text_of_rule)
+    })
+}
+
+pub(crate) fn permission_sections(response: &Value) -> Vec<DialogSection> {
+    let state = &response["state"];
+    let mut sections: Vec<DialogSection> = [
+        ("allow", t!("Allow")),
+        ("ask", t!("Ask")),
+        ("deny", t!("Deny")),
+    ]
+    .into_iter()
+    .filter_map(|(behavior, title)| {
+        let rows: Vec<DialogRow> = items(state, "rules")
+            .filter(|rule| rule["behavior"] == behavior)
+            .filter_map(|rule| permission_row(state, rule))
+            .collect();
+        (!rows.is_empty()).then_some(DialogSection { title, rows })
+    })
+    .collect();
+    let directories: Vec<DialogRow> = items(state, "workspaceDirectories")
+        .filter_map(Value::as_str)
+        .map(|directory| DialogRow::new(directory.to_string()))
+        .collect();
+    if !directories.is_empty() {
+        sections.push(DialogSection {
+            title: t!("Workspace directories"),
+            rows: directories,
+        });
+    }
+    sections
+}
+
 fn output_style_sections(styles: &Value, settings: &Value, live_run: bool) -> Vec<DialogSection> {
     let current = settings["effective"]["outputStyle"]
         .as_str()
@@ -424,12 +507,69 @@ fn output_style_sections(styles: &Value, settings: &Value, live_run: bool) -> Ve
 
 type Reload = Box<dyn Fn(&mut App) -> Task<anyhow::Result<Vec<DialogSection>>>>;
 
-struct AddServerForm {
-    name: Entity<Editor>,
-    target: Entity<Editor>,
-    transport: &'static str,
-    scope: &'static str,
+#[derive(Clone, Copy)]
+enum FormKind {
+    Server,
+    Rule,
+}
+
+impl FormKind {
+    fn add_label(self) -> SharedString {
+        match self {
+            FormKind::Server => t!("Add server"),
+            FormKind::Rule => t!("Add rule"),
+        }
+    }
+}
+
+enum FormItem {
+    Text {
+        label: SharedString,
+        editor: Entity<Editor>,
+    },
+    Choice {
+        label: SharedString,
+        name: &'static str,
+        options: &'static [&'static str],
+        selected: usize,
+    },
+}
+
+struct DialogForm {
+    kind: FormKind,
+    items: Vec<FormItem>,
     error: Option<SharedString>,
+}
+
+impl DialogForm {
+    fn text(&self, index: usize, cx: &App) -> String {
+        match self.items.get(index) {
+            Some(FormItem::Text { editor, .. }) => editor.read(cx).text(cx).trim().to_string(),
+            _ => String::new(),
+        }
+    }
+
+    fn choice(&self, index: usize) -> &'static str {
+        match self.items.get(index) {
+            Some(FormItem::Choice {
+                options, selected, ..
+            }) => options.get(*selected).copied().unwrap_or_default(),
+            _ => "",
+        }
+    }
+}
+
+fn choice_item(
+    label: SharedString,
+    name: &'static str,
+    options: &'static [&'static str],
+) -> FormItem {
+    FormItem::Choice {
+        label,
+        name,
+        options,
+        selected: 0,
+    }
 }
 
 enum DialogState {
@@ -444,8 +584,8 @@ pub(crate) struct ClaudeDialog {
     workspace: WeakEntity<Workspace>,
     reload: Reload,
     state: DialogState,
-    can_add_server: bool,
-    form: Option<AddServerForm>,
+    add: Option<FormKind>,
+    form: Option<DialogForm>,
     confirmation: Option<SharedString>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
@@ -475,7 +615,7 @@ impl ClaudeDialog {
             workspace,
             reload,
             state: DialogState::Loading,
-            can_add_server: false,
+            add: None,
             form: None,
             confirmation: None,
             focus_handle: cx.focus_handle(),
@@ -563,7 +703,24 @@ impl ClaudeDialog {
             }
         });
         let mut dialog = Self::new(t!("MCP servers"), session, workspace, reload, cx);
-        dialog.can_add_server = true;
+        dialog.add = Some(FormKind::Server);
+        dialog
+    }
+
+    fn permissions(
+        session: Entity<AgentSession>,
+        workspace: WeakEntity<Workspace>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut dialog = Self::for_control(
+            t!("Permissions"),
+            json!({ "subtype": "list_permission_rules" }),
+            permission_sections,
+            session,
+            workspace,
+            cx,
+        );
+        dialog.add = Some(FormKind::Rule);
         dialog
     }
 
@@ -572,14 +729,40 @@ impl ClaudeDialog {
         self.state = DialogState::Loading;
         self._pending = cx.spawn(async move |this, cx| {
             let sections = sections.await;
-            this.update(cx, |this, cx| {
-                this.state = match sections {
-                    Ok(sections) => DialogState::Loaded(sections),
-                    Err(error) => DialogState::Failed(error.to_string().into()),
-                };
-                cx.notify();
-            })
-            .log_err();
+            this.update(cx, |this, cx| this.show(sections, cx))
+                .log_err();
+        });
+        cx.notify();
+    }
+
+    fn show(&mut self, sections: anyhow::Result<Vec<DialogSection>>, cx: &mut Context<Self>) {
+        self.state = match sections {
+            Ok(sections) => DialogState::Loaded(sections),
+            Err(error) => DialogState::Failed(error.to_string().into()),
+        };
+        cx.notify();
+    }
+
+    /// A running session lists permission rules from its own copy of the settings, which follows the file about a second after it changes.
+    fn reload_until_changed(&mut self, before: Option<Vec<DialogSection>>, cx: &mut Context<Self>) {
+        self.state = DialogState::Loading;
+        self._pending = cx.spawn(async move |this, cx| {
+            let sections = async {
+                let mut sections = Vec::new();
+                for attempt in 0..RELOAD_ATTEMPTS {
+                    if attempt > 0 {
+                        cx.background_executor().timer(RELOAD_INTERVAL).await;
+                    }
+                    sections = this.update(cx, |this, cx| (this.reload)(cx))?.await?;
+                    if Some(&sections) != before.as_ref() {
+                        break;
+                    }
+                }
+                anyhow::Ok(sections)
+            }
+            .await;
+            this.update(cx, |this, cx| this.show(sections, cx))
+                .log_err();
         });
         cx.notify();
     }
@@ -617,17 +800,28 @@ impl ClaudeDialog {
     fn run_shell(
         &mut self,
         arguments: Vec<String>,
+        input: Option<String>,
         confirmation: SharedString,
         cx: &mut Context<Self>,
     ) {
+        let before = match &self.state {
+            DialogState::Loaded(sections) => Some(sections.clone()),
+            _ => None,
+        };
+        // Only a settings edit (the one that sends input) shows up in a running session's list.
+        let wait_for_change = input.is_some() && self.session.read(cx).has_live_run();
         let finished = self
             .session
-            .update(cx, |session, cx| session.run_cli(arguments, cx));
+            .update(cx, |session, cx| session.run_cli(arguments, input, cx));
         self.settle(
             finished,
-            |this, (), cx| {
+            move |this, (), cx| {
                 this.confirmation = Some(confirmation);
-                this.reload(cx);
+                if wait_for_change {
+                    this.reload_until_changed(before, cx);
+                } else {
+                    this.reload(cx);
+                }
             },
             cx,
         );
@@ -655,15 +849,33 @@ impl ClaudeDialog {
         );
     }
 
-    fn open_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = cx.new(|cx| Editor::single_line(window, cx));
-        let target = cx.new(|cx| Editor::single_line(window, cx));
-        window.focus(&name.focus_handle(cx), cx);
-        self.form = Some(AddServerForm {
-            name,
-            target,
-            transport: MCP_TRANSPORTS[0],
-            scope: MCP_SCOPES[0],
+    fn open_form(&mut self, kind: FormKind, window: &mut Window, cx: &mut Context<Self>) {
+        let mut text = |label: SharedString| FormItem::Text {
+            label,
+            editor: cx.new(|cx| Editor::single_line(window, cx)),
+        };
+        let items = match kind {
+            FormKind::Server => vec![
+                text(t!("Name")),
+                choice_item(t!("Transport"), "claude-mcp-transport", MCP_TRANSPORTS),
+                text(t!("URL or command")),
+                choice_item(t!("Scope"), "claude-mcp-scope", MCP_SCOPES),
+            ],
+            FormKind::Rule => vec![
+                choice_item(t!("Behavior"), "claude-rule-behavior", RULE_BEHAVIORS),
+                text(t!("Rule")),
+                choice_item(t!("Save in"), "claude-rule-source", RULE_SOURCES),
+            ],
+        };
+        if let Some(FormItem::Text { editor, .. }) = items
+            .iter()
+            .find(|item| matches!(item, FormItem::Text { .. }))
+        {
+            window.focus(&editor.focus_handle(cx), cx);
+        }
+        self.form = Some(DialogForm {
+            kind,
+            items,
             error: None,
         });
         cx.notify();
@@ -673,21 +885,54 @@ impl ClaudeDialog {
         let Some(form) = &mut self.form else {
             return;
         };
-        let name = form.name.read(cx).text(cx).trim().to_string();
-        let target = form.target.read(cx).text(cx).trim().to_string();
-        if let Some(error) = server_input_error(&name, &target) {
-            form.error = Some(error);
-            cx.notify();
-            return;
+        let submission = match form.kind {
+            FormKind::Server => {
+                let (name, target) = (form.text(0, cx), form.text(2, cx));
+                match server_input_error(&name, &target) {
+                    Some(error) => Err(error),
+                    None => {
+                        let scope = form.choice(3);
+                        Ok((
+                            add_server_arguments(form.choice(1), scope, &name, &target),
+                            None,
+                            t!(
+                                "Added {name} to {scope} config. It will be available in new sessions.",
+                                name = name,
+                                scope = scope
+                            ),
+                        ))
+                    }
+                }
+            }
+            FormKind::Rule => {
+                let rule = form.text(1, cx);
+                if rule.is_empty() {
+                    Err(t!("Enter a rule."))
+                } else {
+                    let (behavior, source) = (form.choice(0), form.choice(2));
+                    Ok((
+                        EDIT_RULES.map(String::from).into(),
+                        Some(add_rule_edit(behavior, source, &rule).to_string()),
+                        t!(
+                            "Added {rule} to the {behavior} rules in {source}.",
+                            rule = rule,
+                            behavior = behavior,
+                            source = source
+                        ),
+                    ))
+                }
+            }
+        };
+        match submission {
+            Err(error) => {
+                form.error = Some(error);
+                cx.notify();
+            }
+            Ok((arguments, input, confirmation)) => {
+                self.form = None;
+                self.run_shell(arguments, input, confirmation, cx);
+            }
         }
-        let arguments = add_server_arguments(form.transport, form.scope, &name, &target);
-        let confirmation = t!(
-            "Added {name} to {scope} config. It will be available in new sessions.",
-            name = name,
-            scope = form.scope
-        );
-        self.form = None;
-        self.run_shell(arguments, confirmation, cx);
     }
 
     fn open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -789,12 +1034,14 @@ impl ClaudeDialog {
             RowAction::Shell {
                 label,
                 arguments,
+                input,
                 confirmation,
             } => {
-                let (arguments, confirmation) = (arguments.clone(), confirmation.clone());
+                let (arguments, input, confirmation) =
+                    (arguments.clone(), input.clone(), confirmation.clone());
                 Button::new(id, label.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.run_shell(arguments.clone(), confirmation.clone(), cx)
+                        this.run_shell(arguments.clone(), input.clone(), confirmation.clone(), cx)
                     }))
                     .into_any_element()
             }
@@ -809,12 +1056,45 @@ impl ClaudeDialog {
         }
     }
 
-    fn render_form(&self, form: &AddServerForm, cx: &mut Context<Self>) -> Section {
-        let field = |label: SharedString, editor: &Entity<Editor>| {
-            v_flex()
-                .gap_1()
-                .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
-                .child(
+    fn choice_group<const OPTIONS: usize>(
+        &self,
+        name: &'static str,
+        options: [&'static str; OPTIONS],
+        index: usize,
+        selected: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let buttons: [ToggleButtonSimple; OPTIONS] = std::array::from_fn(|position| {
+            ToggleButtonSimple::new(
+                options[position],
+                cx.listener(move |this, _, _, cx| {
+                    if let Some(FormItem::Choice { selected, .. }) = this
+                        .form
+                        .as_mut()
+                        .and_then(|form| form.items.get_mut(index))
+                    {
+                        *selected = position;
+                        cx.notify();
+                    }
+                }),
+            )
+            .selected(position == selected)
+        });
+        ToggleButtonGroup::single_row(name, buttons)
+            .selected_index(selected)
+            .into_any_element()
+    }
+
+    fn render_form(&self, form: &DialogForm, cx: &mut Context<Self>) -> Section {
+        let heading = |label: &SharedString| {
+            Label::new(label.clone())
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+        };
+        let mut fields = v_flex().gap_2();
+        for (index, item) in form.items.iter().enumerate() {
+            fields = fields.child(match item {
+                FormItem::Text { label, editor } => v_flex().gap_1().child(heading(label)).child(
                     div()
                         .w_full()
                         .px_2()
@@ -823,60 +1103,29 @@ impl ClaudeDialog {
                         .border_1()
                         .border_color(cx.theme().colors().border)
                         .child(editor.clone()),
-                )
-        };
-        let choice = |label: SharedString,
-                      name: &'static str,
-                      options: [&'static str; 3],
-                      current: &'static str,
-                      select: fn(&mut AddServerForm, &'static str)| {
-            let buttons = options.map(|option| {
-                ToggleButtonSimple::new(
-                    option,
-                    cx.listener(move |this, _, _, cx| {
-                        if let Some(form) = &mut this.form {
-                            select(form, option);
-                            cx.notify();
+                ),
+                FormItem::Choice {
+                    label,
+                    name,
+                    options,
+                    selected,
+                } => v_flex()
+                    .gap_1()
+                    .child(heading(label))
+                    .child(match **options {
+                        [first, second] => {
+                            self.choice_group(name, [first, second], index, *selected, cx)
                         }
+                        [first, second, third] => {
+                            self.choice_group(name, [first, second, third], index, *selected, cx)
+                        }
+                        _ => div().into_any_element(),
                     }),
-                )
-                .selected(option == current)
             });
-            v_flex()
-                .gap_1()
-                .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
-                .child(
-                    ToggleButtonGroup::single_row(name, buttons).selected_index(
-                        options
-                            .iter()
-                            .position(|option| *option == current)
-                            .unwrap_or_default(),
-                    ),
-                )
-        };
-        Section::new().child(
-            v_flex()
-                .gap_2()
-                .child(field(t!("Name"), &form.name))
-                .child(choice(
-                    t!("Transport"),
-                    "claude-mcp-transport",
-                    MCP_TRANSPORTS,
-                    form.transport,
-                    |form, value| form.transport = value,
-                ))
-                .child(field(t!("URL or command"), &form.target))
-                .child(choice(
-                    t!("Scope"),
-                    "claude-mcp-scope",
-                    MCP_SCOPES,
-                    form.scope,
-                    |form, value| form.scope = value,
-                ))
-                .when_some(form.error.clone(), |this, error| {
-                    this.child(Label::new(error).color(Color::Error))
-                }),
-        )
+        }
+        Section::new().child(fields.when_some(form.error.clone(), |this, error| {
+            this.child(Label::new(error).color(Color::Error))
+        }))
     }
 
     fn render_row(&self, id: &str, row: &DialogRow, cx: &mut Context<Self>) -> impl IntoElement {
@@ -984,7 +1233,9 @@ impl Render for ClaudeDialog {
             );
         }
         let failed = matches!(self.state, DialogState::Failed(_));
-        let can_add = self.can_add_server && matches!(self.state, DialogState::Loaded(_));
+        let can_add = self
+            .add
+            .filter(|_| matches!(self.state, DialogState::Loaded(_)));
         let mut modal = Modal::new("claude-dialog", Some(self.scroll_handle.clone())).header(
             ModalHeader::new()
                 .show_dismiss_button(true)
@@ -993,7 +1244,8 @@ impl Render for ClaudeDialog {
         for section in sections {
             modal = modal.section(section);
         }
-        if self.form.is_some() {
+        if let Some(form) = &self.form {
+            let submit_label = form.kind.add_label();
             modal = modal.footer(
                 ModalFooter::new().end_slot(
                     h_flex()
@@ -1007,18 +1259,21 @@ impl Render for ClaudeDialog {
                             ),
                         )
                         .child(
-                            Button::new("claude-dialog-submit-add", t!("Add server"))
+                            Button::new("claude-dialog-submit-add", submit_label)
                                 .style(ButtonStyle::Filled)
                                 .on_click(cx.listener(|this, _, _, cx| this.submit_form(cx))),
                         ),
                 ),
             );
-        } else if failed || can_add {
+        } else if failed || can_add.is_some() {
             modal = modal.footer(
                 ModalFooter::new()
-                    .start_slot::<Button>(can_add.then(|| {
-                        Button::new("claude-dialog-add-server", t!("Add server"))
-                            .on_click(cx.listener(|this, _, window, cx| this.open_form(window, cx)))
+                    .start_slot::<Button>(can_add.map(|kind| {
+                        Button::new("claude-dialog-add-server", kind.add_label()).on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_form(kind, window, cx)
+                            }),
+                        )
                     }))
                     .end_slot::<Button>(failed.then(|| {
                         Button::new("claude-dialog-close", t!("Close"))
@@ -1074,6 +1329,7 @@ impl ChatView {
             AppCommand::Sandbox => control(t!("Sandbox"), "get_sandbox_dialog", sandbox_sections),
             AppCommand::OutputStyle => Box::new(ClaudeDialog::output_styles),
             AppCommand::Mcp => Box::new(ClaudeDialog::mcp),
+            AppCommand::Permissions => Box::new(ClaudeDialog::permissions),
             AppCommand::Model
             | AppCommand::New
             | AppCommand::Resume
@@ -1417,6 +1673,7 @@ mod tests {
                 arguments: ["mcp", "remove", "--scope", "project", "--", "github"]
                     .map(String::from)
                     .into(),
+                input: None,
                 confirmation: t!(
                     "Removed {name} from {scope} config. Running sessions keep it until restarted.",
                     name = "github",
@@ -1514,6 +1771,102 @@ mod tests {
         assert_eq!(url(json!("file:///etc/passwd")), None);
         assert_eq!(url(json!("javascript:alert(1)")), None);
         assert_eq!(url(json!(null)), None);
+    }
+
+    fn permission_response() -> Value {
+        json!({
+            "state": {
+                "rules": [
+                    { "behavior": "allow", "source": "userSettings", "rule": "Bash(ls)", "description": { "prefix": "The Bash command ", "emphasis": "ls" }, "editability": "persistent" },
+                    { "behavior": "deny", "source": "projectSettings", "rule": "Read(.env)", "editability": "persistent" },
+                    { "behavior": "allow", "source": "localSettings", "rule": "Bash(git status)", "description": { "prefix": "The Bash command ", "emphasis": "git status", "suffix": " and its arguments" }, "editability": "persistent" },
+                    { "behavior": "ask", "source": "policySettings", "rule": "WebFetch", "editability": "readonly" },
+                    { "behavior": "allow", "source": "session", "rule": "Edit", "editability": "session" },
+                    { "behavior": "allow", "source": "localSettings", "rule": "Bash(shadowed)", "editability": "persistent", "notInEffect": true }
+                ],
+                "workspaceDirectories": ["/repo", "/other"],
+                "originalCwd": "/repo"
+            }
+        })
+    }
+
+    fn permission_row_in(label: &str) -> DialogRow {
+        permission_sections(&permission_response())
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .find(|row| row.label == label)
+            .expect("the rule is listed")
+    }
+
+    #[test]
+    fn permission_rows_are_grouped_by_behavior() {
+        let sections = permission_sections(&permission_response());
+        let titles: Vec<&str> = sections
+            .iter()
+            .map(|section| section.title.as_ref())
+            .collect();
+        assert_eq!(titles, ["Allow", "Ask", "Deny", "Workspace directories"]);
+        let labels: Vec<&str> = sections[0]
+            .rows
+            .iter()
+            .map(|row| row.label.as_ref())
+            .collect();
+        assert_eq!(
+            labels,
+            ["Bash(ls)", "Bash(git status)", "Edit", "Bash(shadowed)"]
+        );
+        let row = permission_row_in("Bash(git status)");
+        assert_eq!(
+            row.detail.as_deref(),
+            Some("The Bash command git status and its arguments")
+        );
+        assert_eq!(row.badge.as_deref(), Some("localSettings"));
+        assert_eq!(permission_row_in("Read(.env)").detail, None);
+        assert_eq!(sections[3].rows[1].label, "/other");
+        assert_eq!(permission_sections(&json!({})), []);
+    }
+
+    #[test]
+    fn removing_a_rule_sends_one_exact_edit() {
+        let row = permission_row_in("Bash(git status)");
+        assert_eq!(
+            row.actions,
+            [RowAction::Shell {
+                label: t!("Remove"),
+                arguments: ["edit-permission-rules", "--json"].map(String::from).into(),
+                input: Some(
+                    json!({ "op": "remove", "rule": "Bash(git status)", "behavior": "allow", "source": "localSettings" })
+                        .to_string()
+                ),
+                confirmation: t!(
+                    "Removed {rule} from the {behavior} rules in {source}.",
+                    rule = "Bash(git status)",
+                    behavior = "allow",
+                    source = "localSettings"
+                ),
+            }]
+        );
+    }
+
+    #[test]
+    fn adding_a_rule_sends_one_exact_edit() {
+        assert_eq!(
+            add_rule_edit("ask", "userSettings", "Bash(npm test)"),
+            json!({ "op": "add", "rules": ["Bash(npm test)"], "behavior": "ask", "destination": "userSettings" })
+        );
+    }
+
+    #[test]
+    fn managed_session_and_inactive_rules_have_no_remove_action() {
+        for label in ["WebFetch", "Edit", "Bash(shadowed)"] {
+            assert_eq!(permission_row_in(label).actions, [], "{label}");
+        }
+        assert_eq!(
+            permission_row_in("Read(.env)").actions,
+            [RowAction::OpenPath(PathBuf::from(
+                "/repo/.claude/settings.json"
+            ))]
+        );
     }
 
     #[gpui::test]

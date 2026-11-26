@@ -98,10 +98,11 @@ pub(crate) enum AppCommand {
     Sandbox,
     OutputStyle,
     Mcp,
+    Permissions,
 }
 
 impl AppCommand {
-    const ALL: [AppCommand; 18] = [
+    const ALL: [AppCommand; 19] = [
         AppCommand::Model,
         AppCommand::New,
         AppCommand::Resume,
@@ -123,6 +124,7 @@ impl AppCommand {
         AppCommand::Sandbox,
         AppCommand::OutputStyle,
         AppCommand::Mcp,
+        AppCommand::Permissions,
     ];
 
     fn name(&self) -> &'static str {
@@ -145,6 +147,7 @@ impl AppCommand {
             AppCommand::Sandbox => "sandbox",
             AppCommand::OutputStyle => "output-style",
             AppCommand::Mcp => "mcp",
+            AppCommand::Permissions => "permissions",
         }
     }
 
@@ -168,6 +171,7 @@ impl AppCommand {
             AppCommand::Sandbox => t!("Wu: show sandbox settings"),
             AppCommand::OutputStyle => t!("Wu: choose an output style"),
             AppCommand::Mcp => t!("Wu: manage MCP servers"),
+            AppCommand::Permissions => t!("Wu: manage permission rules"),
         }
     }
 
@@ -191,7 +195,8 @@ impl AppCommand {
             | AppCommand::Skills
             | AppCommand::Sandbox
             | AppCommand::OutputStyle
-            | AppCommand::Mcp => None,
+            | AppCommand::Mcp
+            | AppCommand::Permissions => None,
         }
     }
 }

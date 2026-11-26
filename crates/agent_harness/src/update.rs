@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::process::Stdio;
+use tokio::io::AsyncWriteExt as _;
 
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CLI_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -31,6 +32,7 @@ pub async fn update_cli(
         &executable,
         args,
         &crate::executable::scratch_dir(),
+        None,
         UPDATE_TIMEOUT,
         i18n::t!("The update took too long.").to_string(),
     )
@@ -50,12 +52,18 @@ pub async fn update_cli(
     })
 }
 
-/// Runs the CLI with `args` as separate arguments, never through a shell, and fails with its stderr when it exits unsuccessfully.
-pub async fn run_cli(executable: &Path, args: &[String], cwd: &Path) -> Result<(), CliFailed> {
+/// Runs the CLI with `args` as separate arguments, never through a shell, and fails with its stderr when it exits unsuccessfully; `input` is written to its stdin.
+pub async fn run_cli(
+    executable: &Path,
+    args: &[String],
+    cwd: &Path,
+    input: Option<&str>,
+) -> Result<(), CliFailed> {
     let output = run(
         executable,
         args,
         cwd,
+        input,
         CLI_COMMAND_TIMEOUT,
         i18n::t!("The command took too long.").to_string(),
     )
@@ -75,6 +83,7 @@ async fn run(
     executable: &Path,
     args: &[impl AsRef<std::ffi::OsStr>],
     cwd: &Path,
+    input: Option<&str>,
     timeout: Duration,
     timed_out: String,
 ) -> Result<std::process::Output, String> {
@@ -82,12 +91,23 @@ async fn run(
     command
         .args(args)
         .current_dir(cwd)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     crate::compose_child_path(&mut command, executable);
-    tokio::time::timeout(timeout, command.output())
+    let exchange = async {
+        let mut child = command.spawn()?;
+        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+            stdin.write_all(input.as_bytes()).await?;
+        }
+        child.wait_with_output().await
+    };
+    tokio::time::timeout(timeout, exchange)
         .await
         .map_err(|_| timed_out)?
         .map_err(|error| error.to_string())
@@ -211,7 +231,7 @@ exit 1",
             ),
         );
         let arguments = ["mcp", "remove", "my server; rm -rf x"].map(String::from);
-        let error = run_cli(&cli, &arguments, dir.path())
+        let error = run_cli(&cli, &arguments, dir.path(), None)
             .await
             .expect_err("fails");
         assert_eq!(error.0, "no such server");
@@ -219,6 +239,24 @@ exit 1",
         assert_eq!(
             recorded.lines().collect::<Vec<_>>(),
             ["mcp", "remove", "my server; rm -rf x"]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_cli_writes_the_input_to_stdin() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let record = dir.path().join("stdin");
+        let cli = fake_cli(
+            dir.path(),
+            "1.0.0",
+            &format!("cat > '{}'", record.display()),
+        );
+        run_cli(&cli, &[], dir.path(), Some("{\"op\":\"add\"}"))
+            .await
+            .expect("runs");
+        assert_eq!(
+            std::fs::read_to_string(record).expect("recorded input"),
+            "{\"op\":\"add\"}"
         );
     }
 }
