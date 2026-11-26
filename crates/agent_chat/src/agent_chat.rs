@@ -84,7 +84,7 @@ actions!(
         MoveChatToTab,
         /// Moves focus from the chat box to the editor, or from the editor back to the chat box of the chat you last used. On Windows, Ctrl-Escape opens the Start menu, so Ctrl-Alt-Escape does this as well.
         FocusInput,
-        /// Starts a new Claude Code chat in a tab, even when new chats open in the chat panel.
+        /// Starts a new Claude Code chat in a tab, even when new chats open in the chat panel. On Windows, Ctrl-Shift-Escape opens the Task Manager, so Ctrl-Alt-Shift-Escape does this as well.
         NewChatInTab,
         /// Reopens the chat whose tab you closed last.
         ReopenClosedChat,
