@@ -3,7 +3,8 @@ Param(
     [Parameter()][Alias('i')][switch]$Install,
     [Parameter()][Alias('h')][switch]$Help,
     [Parameter()][Alias('a')][string]$Architecture,
-    [Parameter()][Alias('c')][ValidateSet('dev', 'stable')][string]$Channel
+    [Parameter()][Alias('c')][ValidateSet('dev', 'stable')][string]$Channel,
+    [Parameter()][Alias('r')][switch]$RemoteServer
 )
 
 # https://stackoverflow.com/questions/57949031/powershell-script-stops-if-program-fails-like-bash-set-o-errexit
@@ -40,11 +41,12 @@ function Get-VSArch {
 $target = "$Architecture-pc-windows-msvc"
 
 if ($Help) {
-    Write-Output "Usage: bundle-windows.ps1 [-Architecture x86_64|aarch64] [-Channel dev|stable] [-Install] [-Help]"
+    Write-Output "Usage: bundle-windows.ps1 [-Architecture x86_64|aarch64] [-Channel dev|stable] [-RemoteServer] [-Install] [-Help]"
     Write-Output "Build the installer for Windows."
     Write-Output "Options:"
     Write-Output "  -Architecture, -a Which architecture to build (x86_64 or aarch64)"
     Write-Output "  -Channel, -c      Release channel to build (dev or stable), defaults to crates/wu/RELEASE_CHANNEL"
+    Write-Output "  -RemoteServer, -r Also build the compressed remote_server binary."
     Write-Output "  -Install, -i      Run the installer after building."
     Write-Output "  -Help, -h         Show this help message."
     exit 0
@@ -265,7 +267,9 @@ Push-Location $workspace
 PrepareForBundle
 GenerateLicenses
 BuildWuAndItsFriends
-BuildRemoteServer
+if ($RemoteServer) {
+    BuildRemoteServer
+}
 MakeAppx
 DownloadAMDGpuServices
 DownloadConpty
