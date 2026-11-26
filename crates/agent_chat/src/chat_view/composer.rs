@@ -121,8 +121,13 @@ fn permission_decision(
                 .insert("command".into(), command.into());
             Some(input)
         });
-    let updated_permissions = if choice == PermissionChoice::AlwaysAllow {
-        always_allow_updates(prompt.map_or(&[], |prompt| &prompt.suggestions), destination)
+    // The CLI's suggested rules match the original command, so saving them for an edited command would allow something the user never approved.
+    let updated_permissions = if choice == PermissionChoice::AlwaysAllow && updated_input.is_none()
+    {
+        always_allow_updates(
+            prompt.map_or(&[], |prompt| &prompt.suggestions),
+            destination,
+        )
     } else {
         Vec::new()
     };
@@ -1174,12 +1179,23 @@ impl ChatView {
             .get(&question.id)
             .filter(|_| question.permission.is_some());
         let options: Vec<AnyElement> = if is_permission {
-            let always_destination = permission_editors
-                .filter(|_| {
+            let command_edited = permission_editors
+                .and_then(|editors| editors.command.as_ref())
+                .is_some_and(|editor| {
                     question
                         .permission
                         .as_ref()
-                        .is_some_and(|prompt| prompt.allows_always)
+                        .and_then(bash_command)
+                        .map(str::trim)
+                        != Some(editor.read(cx).text(cx).trim())
+                });
+            let always_destination = permission_editors
+                .filter(|_| {
+                    !command_edited
+                        && question
+                            .permission
+                            .as_ref()
+                            .is_some_and(|prompt| prompt.allows_always)
                 })
                 .map(|editors| editors.destination.clone());
             let mut choices = vec![(t!("Allow").into_any_element(), PermissionChoice::Allow)];
@@ -1998,6 +2014,42 @@ mod tests {
                 updated_permissions: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn always_allow_on_an_edited_command_saves_no_rule() {
+        let suggestions = vec![json!({
+            "type": "addRules",
+            "rules": [{"toolName": "Bash", "ruleContent": "ls"}],
+            "behavior": "allow",
+            "destination": "session",
+        })];
+        let prompt = prompt(json!({"command": "ls"}), suggestions);
+        let decision = permission_decision(
+            Some(&prompt),
+            PermissionChoice::AlwaysAllow,
+            "localSettings",
+            Some("rm -rf ."),
+            "",
+        );
+        assert_eq!(
+            decision,
+            PermissionDecision::Allow {
+                updated_input: Some(json!({"command": "rm -rf ."})),
+                updated_permissions: Vec::new(),
+            }
+        );
+        let unedited = permission_decision(
+            Some(&prompt),
+            PermissionChoice::AlwaysAllow,
+            "localSettings",
+            Some("ls"),
+            "",
+        );
+        assert!(matches!(
+            unedited,
+            PermissionDecision::Allow { updated_permissions, .. } if updated_permissions.len() == 1
+        ));
     }
 
     #[test]
