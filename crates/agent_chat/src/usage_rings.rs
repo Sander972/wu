@@ -318,14 +318,18 @@ pub struct ContextCard {
 }
 
 impl ContextCard {
-    /// A Claude session also lists what fills its context window.
+    /// A Claude session also lists what fills its context window, once it has a run or a session to ask about; a fresh chat would start an agent process only to report an empty one.
     pub fn new(
         context: Option<ContextSnapshot>,
         session: Option<Entity<AgentSession>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let breakdown = session
-            .filter(|session| session.read(cx).kind() == AgentKind::Claude)
+            .filter(|session| {
+                let session = session.read(cx);
+                session.kind() == AgentKind::Claude
+                    && (session.has_live_run() || session.metadata().native_session_id.is_some())
+            })
             .map(|session| {
                 session.update(cx, |session, cx| {
                     session.control(json!({ "subtype": "get_context_usage" }), cx)
@@ -736,6 +740,28 @@ mod tests {
         assert!(!card.is_deployed(), "clicking elsewhere closes the card");
     }
 
+
+    #[gpui::test]
+    fn a_fresh_chat_starts_no_agent_for_its_context_breakdown(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = crate::session::tests::new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let one_off_controls =
+            |cx: &mut TestAppContext| session.read_with(cx, |session, _| session.one_off_controls);
+        cx.new(|cx| ContextCard::new(None, Some(session.clone()), cx));
+        assert_eq!(one_off_controls(cx), 0);
+
+        session.update(cx, |session, cx| {
+            session.update_metadata(
+                |metadata| metadata.native_session_id = Some("sess-1".into()),
+                cx,
+            )
+        });
+        cx.new(|cx| ContextCard::new(None, Some(session.clone()), cx));
+        assert_eq!(one_off_controls(cx), 1, "a saved session is asked about");
+    }
 
     #[test]
     fn token_counts_are_grouped_by_thousands() {
