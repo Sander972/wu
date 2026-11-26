@@ -1615,8 +1615,8 @@ impl AgentSession {
             let failed = link.is_err();
             this.update(cx, |this, cx| {
                 this.remote_control_url = link.as_ref().ok().cloned().flatten();
-                // A failed or unanswered enable can still have started the bridge, which must not keep exposing the chat without an indicator.
-                if failed && enabled {
+                // A failed or unanswered enable can still have started the bridge, which must not keep exposing the chat without an indicator; a run that already ended took the bridge with it, and asking then would start a one-off process.
+                if failed && enabled && this.run.is_some() {
                     this.control(
                         serde_json::json!({ "subtype": "remote_control", "enabled": false }),
                         cx,
@@ -6253,6 +6253,44 @@ pub(crate) mod tests {
             next_remote_control_call(&mut receiver).request,
             serde_json::json!({ "subtype": "remote_control", "enabled": false })
         );
+    }
+
+    #[gpui::test]
+    async fn an_enable_that_fails_because_the_run_ended_starts_no_one_off_process(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        // The fake CLI logs each control request it gets into this file once it exists.
+        let requests = directory.path().join(".cloud-requests");
+        std::fs::write(&requests, "").expect("request log");
+        let mut receiver = attach_live_run(&session, cx);
+        let enabling = session.update(cx, |session, cx| session.set_remote_control(true, cx));
+        let call = next_remote_control_call(&mut receiver);
+        session.update(cx, |session, _| session.run = None);
+        drop(call);
+        assert!(enabling.await.is_err());
+
+        // A one-off process started for the failed enable would have logged before this later one finishes.
+        session
+            .update(cx, |session, cx| {
+                session.control(serde_json::json!({ "subtype": "get_plan" }), cx)
+            })
+            .await
+            .expect("the CLI answered");
+        let subtypes: Vec<String> = std::fs::read_to_string(&requests)
+            .expect("request log")
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).expect("json line")["request"]
+                    ["subtype"]
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(subtypes, ["\"get_plan\""]);
     }
 
     #[gpui::test]
