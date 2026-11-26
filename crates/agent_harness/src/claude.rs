@@ -455,6 +455,7 @@ const HIDDEN_COMMANDS: &[&str] = &[
     "reload-plugins",
     "reload-skills",
     "remote-control",
+    "remote-control-startup",
     "rename",
     "resume",
     "rewind",
@@ -1342,7 +1343,19 @@ fn report_commands(
         log::debug!("claude did not list its commands: {initialize_response}");
         return;
     }
+    let remote_control_available = initialize_response
+        .get("remote_control_available")
+        .and_then(Value::as_bool);
     tokio::spawn(async move {
+        if let Some(available) = remote_control_available
+            && event_tx
+                .send(Ok(AgentEvent::RemoteControlAvailable { available }))
+                .await
+                .is_err()
+        {
+            log::debug!("claude run consumer gone before Remote Control availability was reported");
+            return;
+        }
         match listed_commands(&initialize_response, project, config_dir).await {
             Ok(commands) => {
                 if event_tx

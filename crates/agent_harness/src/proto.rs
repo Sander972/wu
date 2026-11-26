@@ -608,6 +608,10 @@ pub enum AgentEvent {
     AvailableCommands {
         commands: Vec<SlashCommand>,
     },
+    /// Whether this account can use Remote Control, as the CLI reports it when the run starts.
+    RemoteControlAvailable {
+        available: bool,
+    },
     Error {
         message: String,
     },

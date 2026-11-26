@@ -1247,6 +1247,10 @@ pub struct AgentSession {
     prompt_cache_ticker: Task<()>,
     /// Whether the live run was started asking for suggestions.
     run_suggests_prompts: bool,
+    /// What the CLI reported at the last run start; kept across runs so the command stays listed between turns.
+    remote_control_available: bool,
+    /// The link of this run's Remote Control session, which ends with the run.
+    remote_control_url: Option<String>,
     run_failed: bool,
     harness: Arc<dyn Harness>,
     restart_on_next_send: bool,
@@ -1334,6 +1338,8 @@ impl AgentSession {
             prompt_cache: None,
             prompt_cache_ticker: Task::ready(()),
             run_suggests_prompts: false,
+            remote_control_available: false,
+            remote_control_url: None,
             run_failed: false,
             harness,
             restart_on_next_send: false,
@@ -1563,6 +1569,54 @@ impl AgentSession {
     /// Without a live run, a control request goes to a one-off process, so session-scoped changes are lost.
     pub fn has_live_run(&self) -> bool {
         self.run.is_some()
+    }
+
+    pub fn remote_control_available(&self) -> bool {
+        self.remote_control_available
+    }
+
+    /// The link of the live run's Remote Control session; anyone holding it can drive this chat, so it is shown only on request and never logged.
+    pub fn remote_control_url(&self) -> Option<&str> {
+        self.run.as_ref()?;
+        self.remote_control_url.as_deref()
+    }
+
+    /// Starts or stops exposing the live run on claude.ai and the Claude apps.
+    pub fn set_remote_control(
+        &mut self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        if self.run.is_none() {
+            return Task::ready(Err(anyhow::anyhow!(
+                t!("Remote Control needs a running Claude session.").to_string()
+            )));
+        }
+        let mut request = serde_json::json!({ "subtype": "remote_control", "enabled": enabled });
+        if enabled && !self.metadata.title.is_empty() {
+            request["name"] = self.metadata.title.clone().into();
+        }
+        let answer = self.control(request, cx);
+        cx.spawn(async move |this, cx| {
+            let response = answer.await?;
+            let url = if enabled {
+                let url = response["session_url"]
+                    .as_str()
+                    .filter(|url| !url.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            t!("Claude Code didn't return a Remote Control link.").to_string()
+                        )
+                    })?;
+                Some(url.to_string())
+            } else {
+                None
+            };
+            this.update(cx, |this, cx| {
+                this.remote_control_url = url;
+                cx.notify();
+            })
+        })
     }
 
     fn listed_state(&self) -> ListedState {
@@ -2767,6 +2821,7 @@ impl AgentSession {
             })
             .log_err();
         });
+        self.remote_control_url = None;
         self.run = Some(ActiveRun {
             steering: steering_tx,
             interrupt,
@@ -2844,6 +2899,7 @@ impl AgentSession {
 
     fn run_ended(&mut self, cx: &mut Context<Self>) {
         self.run = None;
+        self.remote_control_url = None;
         self.background_tasks.clear();
         self.known_tasks.clear();
         self.pending_questions.clear();
@@ -3199,6 +3255,9 @@ impl AgentSession {
             }
             AgentEvent::AvailableCommands { commands } => {
                 cx.emit(SessionEvent::CommandsReported(commands));
+            }
+            AgentEvent::RemoteControlAvailable { available } => {
+                self.remote_control_available = available;
             }
             AgentEvent::Usage { .. }
             | AgentEvent::InputRequested { .. }
@@ -5955,6 +6014,116 @@ pub(crate) mod tests {
         });
         let reply = reply.await.expect("the CLI answered");
         assert_eq!(reply["exists"], true);
+    }
+
+    fn next_remote_control_call(receiver: &mut tokio::sync::mpsc::Receiver<Steer>) -> ControlCall {
+        match receiver.try_recv() {
+            Ok(Steer::Control(call)) => call,
+            _ => panic!("expected a remote_control control request"),
+        }
+    }
+
+    #[gpui::test]
+    async fn remote_control_enable_shows_the_session_url(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let url = |cx: &mut TestAppContext| {
+            session.read_with(cx, |session, _| {
+                session.remote_control_url().map(str::to_string)
+            })
+        };
+        let refused = session.update(cx, |session, cx| session.set_remote_control(true, cx));
+        assert!(refused.await.is_err(), "needs a live run");
+
+        let mut receiver = attach_live_run(&session, cx);
+        session.update(cx, |session, _| {
+            session.metadata.title = "Fix the bug".into()
+        });
+        let enabling = session.update(cx, |session, cx| session.set_remote_control(true, cx));
+        let call = next_remote_control_call(&mut receiver);
+        assert_eq!(
+            call.request,
+            serde_json::json!({ "subtype": "remote_control", "enabled": true, "name": "Fix the bug" })
+        );
+        call.reply
+            .send(Ok(serde_json::json!({
+                "session_url": "https://claude.ai/code/session_1",
+                "connect_url": "https://claude.ai/code?bridge=1",
+                "bridge_epoch": 1,
+            })))
+            .expect("the session waits for the reply");
+        enabling.await.expect("Remote Control starts");
+        assert_eq!(url(cx).as_deref(), Some("https://claude.ai/code/session_1"));
+
+        session.update(cx, |session, _| session.run = None);
+        assert_eq!(url(cx), None, "the link ends with the run");
+    }
+
+    #[gpui::test]
+    async fn remote_control_without_a_link_fails_and_shows_nothing(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let mut receiver = attach_live_run(&session, cx);
+        let enabling = session.update(cx, |session, cx| session.set_remote_control(true, cx));
+        next_remote_control_call(&mut receiver)
+            .reply
+            .send(Ok(serde_json::json!({})))
+            .expect("the session waits for the reply");
+        assert!(enabling.await.is_err());
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.remote_control_url(), None)
+        });
+    }
+
+    #[gpui::test]
+    async fn remote_control_disable_clears_the_indicator(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let mut receiver = attach_live_run(&session, cx);
+        session.update(cx, |session, _| {
+            session.remote_control_url = Some("https://claude.ai/code/session_1".into())
+        });
+        let disabling = session.update(cx, |session, cx| session.set_remote_control(false, cx));
+        let call = next_remote_control_call(&mut receiver);
+        assert_eq!(
+            call.request,
+            serde_json::json!({ "subtype": "remote_control", "enabled": false })
+        );
+        call.reply
+            .send(Ok(serde_json::json!({})))
+            .expect("the session waits for the reply");
+        disabling.await.expect("Remote Control stops");
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.remote_control_url(), None)
+        });
+    }
+
+    #[gpui::test]
+    async fn the_run_start_reports_whether_remote_control_is_available(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let available = |cx: &mut TestAppContext| {
+            session.read_with(cx, |session, _| session.remote_control_available())
+        };
+        assert!(!available(cx));
+        feed_events(
+            &session,
+            vec![AgentEvent::RemoteControlAvailable { available: true }],
+            cx,
+        );
+        assert!(available(cx));
     }
 
     fn session_with_message(

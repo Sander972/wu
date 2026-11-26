@@ -257,6 +257,16 @@ impl ChatView {
                 )
             });
         }
+        if !self.session.read(cx).remote_control_available() {
+            items.retain(|item| {
+                !matches!(
+                    item.target,
+                    CommandTarget::App(
+                        AppCommand::RemoteControl | AppCommand::RemoteControlStartup
+                    )
+                )
+            });
+        }
         items
     }
 
@@ -880,6 +890,8 @@ impl ChatView {
             }
             AppCommand::FocusView => self.toggle_focus_view(&ToggleFocusView, window, cx),
             AppCommand::Tasks => self.show_background_tasks(window, cx),
+            AppCommand::RemoteControl => self.start_remote_control(window, cx),
+            AppCommand::RemoteControlStartup => self.toggle_remote_control_startup(cx),
             AppCommand::Settings | AppCommand::Diff | AppCommand::Files | AppCommand::Terminal => {
                 let Some(name) = command.action_name() else {
                     return;

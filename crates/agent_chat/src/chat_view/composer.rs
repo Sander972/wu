@@ -602,6 +602,33 @@ impl ChatView {
         )
     }
 
+    fn render_remote_control_indicator(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        self.session.read(cx).remote_control_url()?;
+        Some(
+            Chip::new(
+                "agent-remote-control",
+                6.,
+                h_flex()
+                    .h(px(20.))
+                    .px(px(7.))
+                    .gap(px(5.))
+                    .text_size(ui(11.))
+                    .whitespace_nowrap()
+                    .child(
+                        div()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(cx.theme().status().success),
+                    )
+                    .child(t!("Remote Control")),
+            )
+            .hover_background(ink(0.05, cx))
+            .tooltip(t!("Stop Remote Control"))
+            .on_click(cx.listener(|this, _, _, cx| this.stop_remote_control(cx)))
+            .into_any_element(),
+        )
+    }
+
     pub(super) fn render_footer(&self, cx: &Context<Self>) -> impl IntoElement {
         let session = self.session.read(cx);
         let kind = session.kind();
@@ -630,6 +657,7 @@ impl ChatView {
                     .children(self.render_agent_update(cx))
                     .children(self.render_editor_context_chip(cx)),
             )
+            .children(self.render_remote_control_indicator(cx))
             .children(self.render_background_indicator(cx))
             .child(
                 h_flex()

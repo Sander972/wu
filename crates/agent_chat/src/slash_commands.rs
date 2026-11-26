@@ -111,6 +111,8 @@ pub(crate) enum AppCommand {
     Config,
     FocusView,
     Tasks,
+    RemoteControl,
+    RemoteControlStartup,
 }
 
 /// Where Wu opens its issue tracker for `/bug` and `/feedback`.
@@ -137,7 +139,7 @@ impl CommandSection {
 
 impl AppCommand {
     // Sectioned commands come last and grouped, in the order the menu shows them, so the menu needs no sorting.
-    const ALL: [AppCommand; 31] = [
+    const ALL: [AppCommand; 33] = [
         AppCommand::New,
         AppCommand::Resume,
         AppCommand::Settings,
@@ -156,6 +158,7 @@ impl AppCommand {
         AppCommand::Login,
         AppCommand::Usage,
         AppCommand::Tasks,
+        AppCommand::RemoteControl,
         AppCommand::Mcp,
         AppCommand::Skills,
         AppCommand::OutputStyle,
@@ -171,6 +174,7 @@ impl AppCommand {
         AppCommand::Bug,
         AppCommand::Config,
         AppCommand::FocusView,
+        AppCommand::RemoteControlStartup,
         AppCommand::Model,
     ];
 
@@ -186,9 +190,11 @@ impl AppCommand {
             | AppCommand::Sandbox
             | AppCommand::Plugins => Some(CommandSection::Customize),
             AppCommand::Export { .. } | AppCommand::Bookmarks => Some(CommandSection::Context),
-            AppCommand::Logout | AppCommand::Bug | AppCommand::Config | AppCommand::FocusView => {
-                Some(CommandSection::Settings)
-            }
+            AppCommand::Logout
+            | AppCommand::Bug
+            | AppCommand::Config
+            | AppCommand::FocusView
+            | AppCommand::RemoteControlStartup => Some(CommandSection::Settings),
             AppCommand::Model => Some(CommandSection::Model),
             AppCommand::New
             | AppCommand::Resume
@@ -204,7 +210,8 @@ impl AppCommand {
             | AppCommand::Copy { .. }
             | AppCommand::Btw { .. }
             | AppCommand::Login
-            | AppCommand::Tasks => None,
+            | AppCommand::Tasks
+            | AppCommand::RemoteControl => None,
         }
     }
 
@@ -241,6 +248,8 @@ impl AppCommand {
             AppCommand::Config => "config",
             AppCommand::FocusView => "focus",
             AppCommand::Tasks => "tasks",
+            AppCommand::RemoteControl => "remote-control",
+            AppCommand::RemoteControlStartup => "remote-control-startup",
         }
     }
 
@@ -279,6 +288,12 @@ impl AppCommand {
                 t!("Wu: hide tool calls and activity, showing only prompts and replies")
             }
             AppCommand::Tasks => t!("Wu: show running background tasks"),
+            AppCommand::RemoteControl => {
+                t!("Wu: control this chat from claude.ai or the Claude app")
+            }
+            AppCommand::RemoteControlStartup => {
+                t!("Wu: turn Remote Control for all sessions on or off")
+            }
         }
     }
 
@@ -315,7 +330,9 @@ impl AppCommand {
             | AppCommand::Bug
             | AppCommand::Config
             | AppCommand::FocusView
-            | AppCommand::Tasks => None,
+            | AppCommand::Tasks
+            | AppCommand::RemoteControl
+            | AppCommand::RemoteControlStartup => None,
         }
     }
 }
@@ -329,6 +346,8 @@ pub(crate) fn hidden_command_target(name: &str) -> Option<AppCommand> {
         "bug" | "feedback" => Some(AppCommand::Bug),
         "chrome" => Some(AppCommand::Config),
         "bashes" => Some(AppCommand::Tasks),
+        "remote-control" => Some(AppCommand::RemoteControl),
+        "remote-control-startup" => Some(AppCommand::RemoteControlStartup),
         _ => None,
     }
 }
@@ -630,7 +649,7 @@ mod tests {
         assert_eq!(names_in(CommandSection::Context), ["export", "bookmarks"]);
         assert_eq!(
             names_in(CommandSection::Settings),
-            ["logout", "bug", "config", "focus"]
+            ["logout", "bug", "config", "focus", "remote-control-startup"]
         );
         assert_eq!(names_in(CommandSection::Model), ["model"]);
         let mut order: Vec<CommandSection> = items.iter().filter_map(|item| item.section).collect();
@@ -660,7 +679,10 @@ mod tests {
         assert_eq!(hidden_command_target("bashes"), Some(AppCommand::Tasks));
         assert_eq!(hidden_command_target("vim"), None);
         assert_eq!(hidden_command_target("config"), None);
-        assert_eq!(hidden_command_target("remote-control"), None);
+        assert_eq!(
+            hidden_command_target("remote-control"),
+            Some(AppCommand::RemoteControl)
+        );
     }
 
     #[test]

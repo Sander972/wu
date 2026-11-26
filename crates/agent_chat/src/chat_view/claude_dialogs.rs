@@ -36,13 +36,11 @@ pub(crate) struct DialogRow {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[expect(
-    dead_code,
-    reason = "OpenUrl rows come with the dialogs that need them"
-)]
 pub(crate) enum RowAction {
     OpenPath(PathBuf),
     OpenUrl(String),
+    Copy(String),
+    StopRemoteControl,
     Control {
         label: SharedString,
         request: Value,
@@ -283,6 +281,35 @@ pub(crate) fn sandbox_sections(response: &Value) -> Vec<DialogSection> {
         });
     }
     sections
+}
+
+/// The link is shown in full so it can be checked against the phone it is opened on, and opened only when it is a secure web address.
+pub(crate) fn remote_control_sections(session_url: Option<&str>) -> Vec<DialogSection> {
+    let Some(url) = session_url else {
+        return vec![DialogSection {
+            title: t!("Remote Control"),
+            rows: vec![DialogRow::new(t!("Remote Control is off."))],
+        }];
+    };
+    let mut link = DialogRow {
+        detail: Some(url.to_string().into()),
+        actions: vec![RowAction::Copy(url.to_string())],
+        ..DialogRow::new(t!("Session link"))
+    };
+    if url.starts_with("https://") {
+        link.actions.push(RowAction::OpenUrl(url.to_string()));
+    }
+    let stop = DialogRow {
+        detail: Some(t!(
+            "Anyone with the link and your account can send messages to this chat."
+        )),
+        actions: vec![RowAction::StopRemoteControl],
+        ..DialogRow::new(t!("Stop Remote Control"))
+    };
+    vec![DialogSection {
+        title: t!("Remote Control"),
+        rows: vec![link, stop],
+    }]
 }
 
 fn dollars(cost: f64) -> String {
@@ -1103,6 +1130,28 @@ impl ClaudeDialog {
         dialog
     }
 
+    fn remote_control(
+        session: Entity<AgentSession>,
+        workspace: WeakEntity<Workspace>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let reload: Reload = Box::new({
+            let session = session.clone();
+            move |cx| {
+                let sections = remote_control_sections(session.read(cx).remote_control_url());
+                Task::ready(Ok(sections))
+            }
+        });
+        Self::new(t!("Remote Control"), session, workspace, reload, cx)
+    }
+
+    fn stop_remote_control(&mut self, cx: &mut Context<Self>) {
+        let stopped = self
+            .session
+            .update(cx, |session, cx| session.set_remote_control(false, cx));
+        self.settle(stopped, |_, _, cx| cx.emit(DismissEvent), cx);
+    }
+
     fn plugins(
         session: Entity<AgentSession>,
         workspace: WeakEntity<Workspace>,
@@ -1491,6 +1540,19 @@ impl ClaudeDialog {
                     .on_click(move |_, _, cx| cx.open_url(&url))
                     .into_any_element()
             }
+            RowAction::Copy(text) => {
+                let text = text.clone();
+                Button::new(id, t!("Copy"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                        this.confirmation = Some(t!("Copied the link."));
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
+            RowAction::StopRemoteControl => Button::new(id, t!("Stop"))
+                .on_click(cx.listener(|this, _, _, cx| this.stop_remote_control(cx)))
+                .into_any_element(),
             RowAction::Control { label, request } => {
                 let request = request.clone();
                 Button::new(id, label.clone())
@@ -2168,6 +2230,132 @@ impl ChatView {
         show_toast(&self.workspace, message.to_string(), cx);
     }
 
+    pub(super) fn start_remote_control(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session = self.session.read(cx);
+        let refusal = if !session.has_live_run() {
+            Some(t!(
+                "Remote Control exposes the running Claude session. Send a message first, then try again."
+            ))
+        } else if !session.remote_control_available() {
+            Some(t!(
+                "Remote Control isn't available for this Claude account."
+            ))
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            show_toast(&self.workspace, refusal.to_string(), cx);
+            return;
+        }
+        if session.remote_control_url().is_some() {
+            self.show_remote_control_dialog(window, cx);
+            return;
+        }
+        let started = self
+            .session
+            .update(cx, |session, cx| session.set_remote_control(true, cx));
+        cx.spawn_in(window, async move |this, cx| {
+            let started = started.await;
+            this.update_in(cx, |this, window, cx| match started {
+                Ok(()) => this.show_remote_control_dialog(window, cx),
+                Err(error) => show_toast(
+                    &this.workspace,
+                    t!("Couldn't start Remote Control: {error}", error = error).to_string(),
+                    cx,
+                ),
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    fn show_remote_control_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        let weak_workspace = self.workspace.clone();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, move |_, cx| {
+                    ClaudeDialog::remote_control(session, weak_workspace, cx)
+                })
+            })
+            .log_err();
+    }
+
+    pub(super) fn stop_remote_control(&mut self, cx: &mut Context<Self>) {
+        let stopped = self
+            .session
+            .update(cx, |session, cx| session.set_remote_control(false, cx));
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = stopped.await {
+                this.update(cx, |this, cx| {
+                    show_toast(
+                        &this.workspace,
+                        t!("Couldn't stop Remote Control: {error}", error = error).to_string(),
+                        cx,
+                    )
+                })
+                .log_err();
+            }
+        })
+        .detach();
+    }
+
+    /// Persists the setting for every session and applies it to the running one.
+    pub(super) fn toggle_remote_control_startup(&mut self, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        cx.spawn(async move |this, cx| {
+            let toggled = async {
+                let settings = session
+                    .update(cx, |session, cx| {
+                        session.control(json!({ "subtype": "get_settings" }), cx)
+                    })
+                    .await?;
+                let enabled = settings["effective"]["remoteControlAtStartup"] != true;
+                session
+                    .update(cx, |session, cx| {
+                        session.control(
+                            json!({
+                                "subtype": "update_settings",
+                                "source": "userSettings",
+                                "settings": { "remoteControlAtStartup": enabled },
+                            }),
+                            cx,
+                        )
+                    })
+                    .await?;
+                let applied = session.update(cx, |session, cx| {
+                    session.has_live_run().then(|| {
+                        session.control(
+                            json!({
+                                "subtype": "apply_flag_settings",
+                                "settings": { "remoteControlAtStartup": enabled },
+                            }),
+                            cx,
+                        )
+                    })
+                });
+                if let Some(applied) = applied {
+                    applied.await?;
+                }
+                anyhow::Ok(enabled)
+            }
+            .await;
+            let message = match toggled {
+                Ok(true) => t!("Remote Control will start with every session."),
+                Ok(false) => t!("Remote Control no longer starts with every session."),
+                Err(error) => t!(
+                    "Couldn't change the Remote Control setting: {error}",
+                    error = error
+                ),
+            };
+            this.update(cx, |this, cx| {
+                show_toast(&this.workspace, message.to_string(), cx)
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
     /// Opens the plugins dialog, with the install form filled in when `install` names a plugin.
     pub(crate) fn show_plugins_dialog(
         &mut self,
@@ -2250,7 +2438,9 @@ impl ChatView {
             | AppCommand::Bug
             | AppCommand::Config
             | AppCommand::FocusView
-            | AppCommand::Tasks => return,
+            | AppCommand::Tasks
+            | AppCommand::RemoteControl
+            | AppCommand::RemoteControlStartup => return,
         };
         let session = self.session.clone();
         let weak_workspace = self.workspace.clone();
@@ -2483,6 +2673,34 @@ mod tests {
         let labels: Vec<&str> = rows[1..].iter().map(|row| row.label.as_ref()).collect();
         assert_eq!(labels, ["default", "Concise"]);
         assert!(rows.iter().all(|row| row.actions.is_empty()));
+    }
+
+    #[test]
+    fn remote_control_dialog_offers_copy_open_and_stop() {
+        let url = "https://claude.ai/code/session_1";
+        let sections = remote_control_sections(Some(url));
+        let rows = &sections[0].rows;
+        assert_eq!(rows[0].detail.as_deref(), Some(url));
+        assert_eq!(
+            rows[0].actions,
+            [RowAction::Copy(url.into()), RowAction::OpenUrl(url.into())]
+        );
+        assert_eq!(rows[1].actions, [RowAction::StopRemoteControl]);
+    }
+
+    #[test]
+    fn remote_control_dialog_never_opens_an_insecure_link() {
+        let url = "http://example.com/session_1";
+        let rows = &remote_control_sections(Some(url))[0].rows;
+        assert_eq!(rows[0].actions, [RowAction::Copy(url.into())]);
+    }
+
+    #[test]
+    fn remote_control_dialog_without_a_link_says_it_is_off() {
+        let rows = &remote_control_sections(None)[0].rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, t!("Remote Control is off."));
+        assert!(rows[0].actions.is_empty());
     }
 
     fn action_labels(row: &DialogRow) -> Vec<SharedString> {

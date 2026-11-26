@@ -6530,6 +6530,65 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn startup_toggle_applies_the_flag_setting(cx: &mut TestAppContext) {
+        let (session, view, cx) = focus_chat(cx).await;
+        let mut receiver = crate::session::tests::attach_live_run(&session, cx);
+        let mut answer_next = |reply: serde_json::Value, cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            let call = match receiver.try_recv() {
+                Ok(agent_harness::Steer::Control(call)) => call,
+                _ => panic!("expected a control request"),
+            };
+            call.reply
+                .send(Ok(reply))
+                .expect("the chat waits for the reply");
+            call.request
+        };
+        view.update(cx, |view, cx| view.toggle_remote_control_startup(cx));
+        assert_eq!(
+            answer_next(
+                serde_json::json!({ "effective": { "remoteControlAtStartup": false } }),
+                cx
+            ),
+            serde_json::json!({ "subtype": "get_settings" })
+        );
+        assert_eq!(
+            answer_next(serde_json::json!({}), cx),
+            serde_json::json!({
+                "subtype": "update_settings",
+                "source": "userSettings",
+                "settings": { "remoteControlAtStartup": true },
+            })
+        );
+        assert_eq!(
+            answer_next(serde_json::json!({}), cx),
+            serde_json::json!({
+                "subtype": "apply_flag_settings",
+                "settings": { "remoteControlAtStartup": true },
+            })
+        );
+    }
+
+    #[gpui::test]
+    async fn remote_control_commands_are_listed_only_when_available(cx: &mut TestAppContext) {
+        let (session, view, cx) = focus_chat(cx).await;
+        let listed = |cx: &mut VisualTestContext| -> Vec<String> {
+            view.update(cx, |view, cx| view.command_items(cx))
+                .into_iter()
+                .map(|item| item.name)
+                .filter(|name| name.starts_with("remote-control"))
+                .collect()
+        };
+        assert!(listed(cx).is_empty());
+        crate::session::tests::feed_events(
+            &session,
+            vec![agent_harness::AgentEvent::RemoteControlAvailable { available: true }],
+            cx,
+        );
+        assert_eq!(listed(cx), ["remote-control", "remote-control-startup"]);
+    }
+
+    #[gpui::test]
     async fn escape_stops_only_when_enabled_and_working(cx: &mut TestAppContext) {
         let (session, view, cx) = focus_chat(cx).await;
         cx.update(|_, cx| {
