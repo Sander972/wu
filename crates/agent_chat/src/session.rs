@@ -1452,6 +1452,10 @@ impl AgentSession {
         }
     }
 
+    pub fn mark_unseen(&mut self, cx: &mut Context<Self>) {
+        self.update_metadata(|metadata| metadata.unseen = true, cx);
+    }
+
     pub fn update_metadata(&mut self, change: impl FnOnce(&mut SessionMetadata), cx: &mut Context<Self>) {
         change(&mut self.metadata);
         self.save_metadata(cx);
@@ -3308,6 +3312,8 @@ pub struct SessionSummary {
     pub side_chat: bool,
     pub outcome: Option<ChatOutcome>,
     pub unseen: bool,
+    /// Held in memory: open in a tab, running, or waiting for an answer.
+    pub open: bool,
     pub project_root: PathBuf,
     pub branch: Option<String>,
     pub native_session_id: Option<String>,
@@ -4541,6 +4547,7 @@ impl AgentStore {
                     side_chat: metadata.side_chat,
                     outcome: metadata.outcome,
                     unseen: metadata.unseen,
+                    open: live.is_some(),
                     project_root: metadata.project_root().to_path_buf(),
                     branch: metadata.branch.clone(),
                     native_session_id: metadata.native_session_id.clone(),
@@ -4673,6 +4680,12 @@ impl AgentStore {
         self.update_session_metadata(id, |metadata| metadata.title = title, cx);
     }
 
+    pub fn mark_unseen(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        for id in ids {
+            self.update_session_metadata(id, |metadata| metadata.unseen = true, cx);
+        }
+    }
+
     pub fn set_pinned(&mut self, id: &str, pinned: bool, cx: &mut Context<Self>) {
         self.update_session_metadata(id, |metadata| metadata.pinned = pinned, cx);
     }
@@ -4708,12 +4721,14 @@ impl AgentStore {
         }
     }
 
-    /// Only chats of the group's project can join it, because groups are listed per project.
+    /// Only chats of the group's project can join it, because groups are listed per project, and side chats follow their parent instead.
     fn chats_in_project(&self, ids: &[String], project_key: &str) -> Vec<String> {
         ids.iter()
             .filter(|id| {
                 self.sessions.iter().any(|metadata| {
-                    metadata.id == **id && metadata.project_root().to_string_lossy() == project_key
+                    metadata.id == **id
+                        && !metadata.side_chat
+                        && metadata.project_root().to_string_lossy() == project_key
                 })
             })
             .cloned()
@@ -8388,6 +8403,58 @@ done
             store.move_to_group(&there, Some(&group), cx);
         });
         assert_eq!(group_members(&store, cx), [("Here".to_string(), here)]);
+    }
+
+    #[gpui::test]
+    async fn side_chats_never_join_groups(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let ids = new_chats(&store, directory.path(), 2, cx);
+        store.update(cx, |store, _| store.live.clear());
+        store.update(cx, |store, cx| {
+            let parent = ids[0].clone();
+            store.update_session_metadata(
+                &ids[1],
+                |metadata| {
+                    metadata.side_chat = true;
+                    metadata.parent_id = Some(parent);
+                },
+                cx,
+            );
+            store.create_group(directory.path(), "Group", &ids, cx);
+        });
+        assert_eq!(
+            group_members(&store, cx),
+            [("Group".to_string(), vec![ids[0].clone()])]
+        );
+    }
+
+    #[gpui::test]
+    async fn mark_unread_sets_unseen_and_survives_reload(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let ids = new_chats(&store, directory.path(), 2, cx);
+        store.update(cx, |store, cx| {
+            for id in &ids {
+                if let Some(session) = store.loaded_session(id) {
+                    session.update(cx, |session, cx| session.touch(cx));
+                }
+            }
+            store.mark_unseen(&ids[..1], cx);
+            let loaded = store
+                .loaded_session(&ids[1])
+                .expect("second chat is loaded");
+            loaded.update(cx, |session, cx| session.mark_unseen(cx));
+        });
+        cx.run_until_parked();
+        store.update(cx, |store, _| store.live.clear());
+        let reopened = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        reopened.read_with(cx, |store, cx| {
+            let summaries = store.sessions_in(&[directory.path().to_path_buf()], cx);
+            assert_eq!(summaries.len(), 2);
+            assert!(summaries.iter().all(|summary| summary.unseen));
+        });
     }
 
     #[gpui::test]

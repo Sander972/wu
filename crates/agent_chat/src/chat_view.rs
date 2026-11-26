@@ -24,7 +24,8 @@ pub(crate) use editor_context::{
 };
 
 use crate::{
-    AgentChatSettings, AgentKind, MoveChatToPanel, MoveChatToTab, RenameChat, Send, Stop,
+    AgentChatSettings, AgentKind, MarkChatUnread, MoveChatToPanel, MoveChatToTab, RenameChat,
+    Send, Stop,
     SubmitAnswer, ToggleThinkingBlocks,
     chat_style::{
         Chip, accent, flavour_seed, flavour_word, format_elapsed, gradient_spinner, hairline, ink,
@@ -4489,7 +4490,12 @@ impl Item for ChatView {
     fn tab_content(&self, params: TabContentParams, _: &Window, cx: &App) -> AnyElement {
         let session = self.session.read(cx);
         let needs_input = self.subagent.is_none() && !session.pending_questions().is_empty();
+        let unseen = self.subagent.is_none() && session.metadata().unseen;
         let is_working = self.is_working(cx);
+        let dot = tab_dot(needs_input, is_working, unseen).map(|dot| match dot {
+            TabDot::Pending => cx.theme().status().info,
+            TabDot::Unseen => cx.theme().status().warning,
+        });
         let renaming = self.rename_editor.is_some();
         let this = self.this.clone();
         h_flex()
@@ -4512,9 +4518,19 @@ impl Item for ChatView {
                         .ok();
                 }
             })
-            .on_action(move |action: &MoveChatToTab, window, cx| {
-                this.update(cx, |this, cx| this.move_to_tab(action, window, cx))
-                    .ok();
+            .on_action({
+                let this = this.clone();
+                move |action: &MoveChatToTab, window, cx| {
+                    this.update(cx, |this, cx| this.move_to_tab(action, window, cx))
+                        .ok();
+                }
+            })
+            .on_action(move |_: &MarkChatUnread, _, cx| {
+                this.update(cx, |this, cx| {
+                    this.session
+                        .update(cx, |session, cx| session.mark_unseen(cx))
+                })
+                .ok();
             })
             .child(
                 div()
@@ -4552,12 +4568,8 @@ impl Item for ChatView {
                         )
                     }),
             )
-            .when(needs_input, |this| {
-                this.child(
-                    Icon::new(IconName::AgentChatRoundLine)
-                        .size(IconSize::XSmall)
-                        .color(Color::Accent),
-                )
+            .when_some(dot, |this, color| {
+                this.child(div().size(px(6.)).flex_none().rounded_full().bg(color))
             })
             .when(!needs_input && is_working, |this| {
                 this.child(
@@ -4595,7 +4607,11 @@ impl Item for ChatView {
         } else {
             (t!("Move to Side Panel"), Box::new(MoveChatToPanel))
         };
-        vec![(t!("Rename"), Box::new(RenameChat)), move_action]
+        vec![
+            (t!("Rename"), Box::new(RenameChat)),
+            (t!("Mark as Unread"), Box::new(MarkChatUnread)),
+            move_action,
+        ]
     }
 
     fn tab_icon(&self, _: &Window, cx: &App) -> Option<Icon> {
@@ -4667,6 +4683,22 @@ impl Item for ChatView {
 
 impl EventEmitter<workspace::searchable::SearchEvent> for ChatView {}
 
+#[derive(Debug, PartialEq, Eq)]
+enum TabDot {
+    Pending,
+    Unseen,
+}
+
+fn tab_dot(needs_input: bool, working: bool, unseen: bool) -> Option<TabDot> {
+    if needs_input {
+        Some(TabDot::Pending)
+    } else if unseen && !working {
+        Some(TabDot::Unseen)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4677,6 +4709,25 @@ mod tests {
     use editor::CodeActionProvider as _;
     use gpui::{KeyBinding, TestAppContext, VisualTestContext};
     use project::FakeFs;
+
+    #[test]
+    fn tab_dot_is_blue_for_pending_and_orange_for_unseen() {
+        let cases = [
+            (false, false, false, None),
+            (true, false, false, Some(TabDot::Pending)),
+            (true, true, true, Some(TabDot::Pending)),
+            (false, false, true, Some(TabDot::Unseen)),
+            (false, true, true, None),
+            (false, true, false, None),
+        ];
+        for (needs_input, working, unseen, expected) in cases {
+            assert_eq!(
+                tab_dot(needs_input, working, unseen),
+                expected,
+                "needs_input {needs_input}, working {working}, unseen {unseen}"
+            );
+        }
+    }
 
     fn bind_composer_keys(cx: &mut TestAppContext) {
         cx.update(|cx| {

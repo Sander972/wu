@@ -4,7 +4,7 @@ use crate::{
     chat_style::{accent, ink, selected_row, text_faint, ui, wash, working_animation},
     chat_view::ChatView,
     session::{
-        AgentSession, AgentStore, ChatListPrefs, ChatOutcome, MAX_GROUPS_PER_PROJECT,
+        AgentSession, AgentStore, ChatListPrefs, ChatOutcome, ChatSort, MAX_GROUPS_PER_PROJECT,
         SessionSummary,
     },
 };
@@ -30,7 +30,9 @@ use std::{
     time::Duration,
 };
 use time::OffsetDateTime;
-use ui::{Clickable, ContextMenu, IconName, PopoverMenu, Toggleable, Tooltip, prelude::*};
+use ui::{
+    Clickable, ContextMenu, IconName, IconPosition, PopoverMenu, Toggleable, Tooltip, prelude::*,
+};
 use util::ResultExt as _;
 use workspace::{
     SaveIntent, SplitDirection, Toast, Workspace,
@@ -232,6 +234,59 @@ enum Renaming {
     Group(SharedString),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChatFilter {
+    NeedsInput,
+    Working,
+    Completed,
+    Open,
+    Closed,
+}
+
+impl ChatFilter {
+    const ALL: [Self; 5] = [
+        Self::NeedsInput,
+        Self::Working,
+        Self::Completed,
+        Self::Open,
+        Self::Closed,
+    ];
+
+    fn label(self) -> SharedString {
+        match self {
+            Self::NeedsInput => t!("Needs input"),
+            Self::Working => t!("Working"),
+            Self::Completed => t!("Completed"),
+            Self::Open => tc!("chat", "Open"),
+            Self::Closed => t!("Closed"),
+        }
+    }
+
+    fn matches(self, row: &SessionSummary) -> bool {
+        match self {
+            Self::NeedsInput => row.needs_input,
+            Self::Working => row.working,
+            Self::Completed => {
+                !row.working
+                    && !row.needs_input
+                    && matches!(row.outcome, Some(ChatOutcome::Completed))
+            }
+            Self::Open => row.open,
+            Self::Closed => !row.open,
+        }
+    }
+}
+
+/// Several filters are OR-ed, and the "Active" toggle narrows whatever they let through to the chats that are working, waiting for input or open.
+pub(crate) fn matches_filters(
+    row: &SessionSummary,
+    active_only: bool,
+    filters: &[ChatFilter],
+) -> bool {
+    (!active_only || row.working || row.needs_input || row.open)
+        && (filters.is_empty() || filters.iter().any(|filter| filter.matches(row)))
+}
+
 #[derive(Default)]
 struct Selection {
     ids: Vec<SharedString>,
@@ -317,6 +372,8 @@ pub struct AgentPanel {
     row_menu: Option<RowMenu>,
     hovered_row: Option<SharedString>,
     selection: Selection,
+    active_only: bool,
+    filters: Vec<ChatFilter>,
     list_scroll: ScrollHandle,
     list_model: Option<ListModel>,
     showing_saved: bool,
@@ -389,6 +446,8 @@ impl AgentPanel {
             row_menu: None,
             hovered_row: None,
             selection: Selection::default(),
+            active_only: false,
+            filters: Vec::new(),
             list_scroll: ScrollHandle::new(),
             list_model: None,
             showing_saved: false,
@@ -492,6 +551,28 @@ impl AgentPanel {
             .log_err();
         })
         .detach();
+    }
+
+    fn toggle_active_only(&mut self, cx: &mut Context<Self>) {
+        self.active_only = !self.active_only;
+        self.list_model = None;
+        cx.notify();
+    }
+
+    fn toggle_filter(&mut self, filter: ChatFilter, cx: &mut Context<Self>) {
+        match self.filters.iter().position(|active| *active == filter) {
+            Some(position) => {
+                self.filters.remove(position);
+            }
+            None => self.filters.push(filter),
+        }
+        self.list_model = None;
+        cx.notify();
+    }
+
+    fn update_prefs(&mut self, change: impl FnOnce(&mut ChatListPrefs), cx: &mut Context<Self>) {
+        self.store
+            .update(cx, |store, cx| store.update_list_prefs(change, cx));
     }
 
     fn move_to_group(&mut self, ids: &[String], group_id: Option<&str>, cx: &mut Context<Self>) {
@@ -607,7 +688,7 @@ impl AgentPanel {
         let archived = session.archived;
         let native_id = session.native_session_id.clone();
         let project_root = session.project_root.clone();
-        let groupable = !session.side_chat;
+        let unseen = session.unseen;
         if !(self.selection.ids.len() > 1 && self.selection.contains(&id)) {
             self.selection.clear();
         }
@@ -617,8 +698,16 @@ impl AgentPanel {
             self.selection.ids.iter().map(ToString::to_string).collect()
         };
         let multiple = ids.len() > 1;
-        let prefs = self.store.read(cx).list_prefs();
+        let store = self.store.read(cx);
+        // Groups are listed per project, so a selection that spans projects can only be taken out of its groups.
+        let same_project = ids.iter().all(|id| {
+            store
+                .sessions_metadata()
+                .any(|metadata| metadata.id == *id && metadata.project_root() == project_root)
+        });
+        let prefs = store.list_prefs();
         let any_grouped = ids.iter().any(|id| prefs.is_grouped(id));
+        let groupable = !session.side_chat && (same_project || any_grouped);
         let groups: Vec<(String, SharedString)> = prefs
             .groups
             .get(project_root.to_string_lossy().as_ref())
@@ -686,6 +775,20 @@ impl AgentPanel {
                                 .update(cx, |store, cx| store.set_archived(&ids, !archived, cx))
                         }),
                     )
+                })
+                .when(multiple || !unseen, |menu| {
+                    menu.entry(t!("Mark as unread"), None, {
+                        let ids = ids.clone();
+                        action(
+                            &panel,
+                            Box::new(move |panel, _, cx| {
+                                panel.selection.clear();
+                                panel
+                                    .store
+                                    .update(cx, |store, cx| store.mark_unseen(&ids, cx))
+                            }),
+                        )
+                    })
                 });
             let menu = if groupable {
                 menu.submenu(t!("Move to group"), {
@@ -696,29 +799,31 @@ impl AgentPanel {
                         panel.clone(),
                     );
                     move |mut menu, _, _| {
-                        for (group_id, name) in &groups {
-                            menu = menu.entry(name.clone(), None, {
-                                let (ids, group_id) = (ids.clone(), group_id.clone());
+                        if same_project {
+                            for (group_id, name) in &groups {
+                                menu = menu.entry(name.clone(), None, {
+                                    let (ids, group_id) = (ids.clone(), group_id.clone());
+                                    action(
+                                        &panel,
+                                        Box::new(move |panel, _, cx| {
+                                            panel.move_to_group(&ids, Some(&group_id), cx)
+                                        }),
+                                    )
+                                });
+                            }
+                            if !groups.is_empty() {
+                                menu = menu.separator();
+                            }
+                            menu = menu.entry(t!("New group…"), None, {
+                                let (ids, project_root) = (ids.clone(), project_root.clone());
                                 action(
                                     &panel,
-                                    Box::new(move |panel, _, cx| {
-                                        panel.move_to_group(&ids, Some(&group_id), cx)
+                                    Box::new(move |panel, window, cx| {
+                                        panel.create_group(&project_root, &ids, window, cx)
                                     }),
                                 )
                             });
                         }
-                        if !groups.is_empty() {
-                            menu = menu.separator();
-                        }
-                        menu = menu.entry(t!("New group…"), None, {
-                            let (ids, project_root) = (ids.clone(), project_root.clone());
-                            action(
-                                &panel,
-                                Box::new(move |panel, window, cx| {
-                                    panel.create_group(&project_root, &ids, window, cx)
-                                }),
-                            )
-                        });
                         if any_grouped {
                             menu = menu.entry(t!("Remove from group"), None, {
                                 let ids = ids.clone();
@@ -883,6 +988,87 @@ impl AgentPanel {
             .into_any_element()
     }
 
+    fn filter_menu(&self, cx: &Context<Self>) -> AnyElement {
+        let panel = cx.entity().downgrade();
+        let filters = self.filters.clone();
+        let prefs = self.store.read(cx).list_prefs().clone();
+        PopoverMenu::new("agent-panel-filter")
+            .trigger(
+                HeaderButton::new(
+                    "agent-panel-filter-trigger",
+                    IconName::FilterFunnel,
+                    t!("Filter and View"),
+                )
+                .toggle_state(!filters.is_empty()),
+            )
+            .anchor(gpui::Anchor::TopRight)
+            .menu(move |window, cx| {
+                let (panel, filters, prefs) = (panel.clone(), filters.clone(), prefs.clone());
+                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                    let menu = ChatFilter::ALL
+                        .into_iter()
+                        .fold(menu.header(t!("Filter")), |menu, filter| {
+                            menu.toggleable_entry(
+                                filter.label(),
+                                filters.contains(&filter),
+                                IconPosition::Start,
+                                None,
+                                menu_action(
+                                    &panel,
+                                    Box::new(move |panel, _, cx| panel.toggle_filter(filter, cx)),
+                                ),
+                            )
+                        });
+                    let toggle = |menu: ContextMenu,
+                                  label: SharedString,
+                                  toggled: bool,
+                                  change: fn(&mut ChatListPrefs)| {
+                        menu.toggleable_entry(
+                            label,
+                            toggled,
+                            IconPosition::Start,
+                            None,
+                            menu_action(
+                                &panel,
+                                Box::new(move |panel, _, cx| panel.update_prefs(change, cx)),
+                            ),
+                        )
+                    };
+                    let menu = toggle(
+                        menu.separator().header(t!("List view")),
+                        t!("All projects"),
+                        prefs.all_projects,
+                        |prefs| prefs.all_projects = !prefs.all_projects,
+                    );
+                    let menu = toggle(
+                        menu,
+                        t!("Group by project"),
+                        prefs.group_by_project,
+                        |prefs| prefs.group_by_project = !prefs.group_by_project,
+                    );
+                    let menu = toggle(
+                        menu,
+                        t!("Compact rows"),
+                        prefs.compact_rows,
+                        |prefs| prefs.compact_rows = !prefs.compact_rows,
+                    );
+                    let menu = toggle(
+                        menu.separator(),
+                        t!("Sort by last updated"),
+                        prefs.sort == ChatSort::Updated,
+                        |prefs| prefs.sort = ChatSort::Updated,
+                    );
+                    toggle(
+                        menu,
+                        t!("Sort by created"),
+                        prefs.sort == ChatSort::Created,
+                        |prefs| prefs.sort = ChatSort::Created,
+                    )
+                }))
+            })
+            .into_any_element()
+    }
+
     pub(crate) fn toggle_saved_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.showing_saved = !self.showing_saved;
         let placeholder = if self.showing_saved {
@@ -960,6 +1146,18 @@ impl AgentPanel {
                                 }),
                             ),
                         )
+                    })
+                    .when(!self.showing_saved, |this| {
+                        this.child(
+                            HeaderButton::new(
+                                "agent-panel-active-only",
+                                IconName::BoltOutlined,
+                                t!("Active"),
+                            )
+                            .toggle_state(self.active_only)
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_active_only(cx))),
+                        )
+                        .child(self.filter_menu(cx))
                     })
                     .child(self.new_chat_menu(cx)),
             )
@@ -1565,8 +1763,10 @@ impl AgentPanel {
         let sessions: Vec<Rc<SessionSummary>> = in_roots
             .into_iter()
             .filter(|session| Self::matches_search(session, &query))
+            .filter(|session| matches_filters(session, self.active_only, &self.filters))
             .map(Rc::new)
             .collect();
+        let searching = searching || self.active_only || !self.filters.is_empty();
         // Groups are per project, so only those of the projects being listed take part in the layout.
         let mut layout_prefs = prefs.clone();
         if !prefs.all_projects {
@@ -2079,7 +2279,7 @@ impl RowStatus {
         } else {
             match (session.outcome, session.unseen) {
                 (Some(ChatOutcome::Errored), _) => Self::Failed,
-                (Some(ChatOutcome::Completed), true) => Self::Done,
+                (_, true) => Self::Done,
                 _ => Self::Idle,
             }
         }
@@ -2628,6 +2828,7 @@ mod tests {
             side_chat: false,
             outcome: None,
             unseen: false,
+            open: false,
             project_root: PathBuf::from(project),
             branch: None,
             native_session_id: None,
@@ -2644,6 +2845,53 @@ mod tests {
             .iter()
             .map(|row| row.session.id.clone())
             .collect()
+    }
+
+    #[test]
+    fn filter_matching() {
+        use ChatFilter::*;
+        let make = |working, needs_input, open, outcome| SessionSummary {
+            working,
+            needs_input,
+            open,
+            outcome,
+            ..session("chat", "/a")
+        };
+        let idle = make(false, false, false, None);
+        let working = make(true, false, true, None);
+        let waiting = make(false, true, true, None);
+        let done = make(false, false, false, Some(ChatOutcome::Completed));
+        let open_done = make(false, false, true, Some(ChatOutcome::Completed));
+        let failed = make(false, false, false, Some(ChatOutcome::Errored));
+        let cases: [(&SessionSummary, bool, &[ChatFilter], bool); 20] = [
+            (&idle, false, &[], true),
+            (&idle, true, &[], false),
+            (&working, true, &[], true),
+            (&waiting, true, &[], true),
+            (&open_done, true, &[], true),
+            (&done, true, &[], false),
+            (&working, false, &[Working], true),
+            (&waiting, false, &[Working], false),
+            (&waiting, false, &[NeedsInput], true),
+            (&done, false, &[Completed], true),
+            (&failed, false, &[Completed], false),
+            (&working, false, &[Completed], false),
+            (&idle, false, &[Open], false),
+            (&idle, false, &[Closed], true),
+            (&working, false, &[Closed], false),
+            (&working, false, &[Working, Closed], true),
+            (&done, false, &[Working, Closed], true),
+            (&done, false, &[Working, NeedsInput], false),
+            (&done, true, &[Completed], false),
+            (&open_done, true, &[Completed], true),
+        ];
+        for (index, (row, active_only, filters, expected)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                matches_filters(row, active_only, filters),
+                expected,
+                "case {index}"
+            );
+        }
     }
 
     #[test]

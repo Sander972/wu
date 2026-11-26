@@ -66,6 +66,8 @@ actions!(
         ToggleDictation,
         /// Renames the chat from its tab.
         RenameChat,
+        /// Marks the chat as unread, so its tab and list row show that it has news.
+        MarkChatUnread,
         /// Expands or collapses every thought process in the chat.
         ToggleThinkingBlocks,
         /// Shows or hides the chat panel.
