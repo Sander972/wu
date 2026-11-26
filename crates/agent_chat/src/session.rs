@@ -4261,6 +4261,7 @@ impl AgentStore {
         .detach();
         cx.observe_global::<settings::SettingsStore>(|store, cx| {
             store.update_idle_sleep_guard(cx);
+            store.apply_allowed_permissions(cx);
             if store.auto_archive_ready {
                 store.auto_archive_stale(cx);
             }
@@ -4289,6 +4290,28 @@ impl AgentStore {
                 session
                     .update(cx, |session, cx| session.control(request.clone(), cx))
                     .detach_and_log_err(cx);
+            }
+        }
+    }
+
+    /// Turning Bypass off takes it from open chats right away, live runs included, instead of only at their next start.
+    fn apply_allowed_permissions(&mut self, cx: &mut Context<Self>) {
+        let chat_settings = AgentChatSettings::get_global(cx).clone();
+        let sessions: Vec<Entity<AgentSession>> = self
+            .live
+            .values()
+            .cloned()
+            .chain(self.released.values().filter_map(WeakEntity::upgrade))
+            .collect();
+        for session in sessions {
+            let (kind, permission) = session.read_with(cx, |session, _| {
+                (session.kind(), session.metadata.settings.permission)
+            });
+            let allowed = chat_settings.allowed_permission(kind, permission);
+            if allowed != permission {
+                session.update(cx, |session, cx| {
+                    session.pin_settings(|settings| settings.permission = allowed, cx)
+                });
             }
         }
     }
@@ -6957,6 +6980,38 @@ pub(crate) mod tests {
             .await
             .expect("chat reopens");
         assert_eq!(session_id(&reopened, cx), id);
+    }
+
+    #[gpui::test]
+    async fn disallowing_bypass_takes_it_from_a_live_run(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let _receiver = attach_live_run(&session, cx);
+        let mut live_permission = session
+            .update(cx, |session, cx| {
+                session.update_settings(
+                    |settings| settings.permission = PermissionMode::FullAccess,
+                    cx,
+                );
+                session.run.as_ref().map(|run| run.permission.subscribe())
+            })
+            .expect("a live run");
+        assert_eq!(
+            *live_permission.borrow_and_update(),
+            PermissionMode::FullAccess
+        );
+
+        update_chat_settings(cx, |content| content.allow_bypass_permissions = Some(false));
+        cx.run_until_parked();
+
+        assert_eq!(*live_permission.borrow_and_update(), PermissionMode::Auto);
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.settings().permission, PermissionMode::Auto);
+            assert!(session.run.is_some(), "the run keeps going");
+        });
     }
 
     #[gpui::test]
