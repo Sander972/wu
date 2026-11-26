@@ -163,6 +163,8 @@
     "attach_open_file": true,
     // Offers "Fix with Claude" in the code actions of an error or warning.
     "show_fix_actions": true,
+    // Archives chats you haven't touched for this many days: 0 (off), 1, 2, 7 or 14. Open, pinned, unread and running chats are kept.
+    "archive_inactive_sessions": 14,
     // How the Git panel writes commit messages.
     "commit_message": {
       // "claude_code", "codex", "opencode" or "antigravity". When unset, the first installed agent.

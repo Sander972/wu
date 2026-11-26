@@ -7809,7 +7809,7 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
-    fn chat_section() -> [SettingsPageItem; 11] {
+    fn chat_section() -> [SettingsPageItem; 12] {
         [
             SettingsPageItem::SectionHeader(n!("Chat")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -7993,6 +7993,30 @@ fn agent_chat_page() -> SettingsPage {
                             .agent_chat
                             .get_or_insert_default()
                             .prevent_idle_sleep = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Archive Inactive Chats"),
+                description: n!(
+                    "Archive chats you haven't touched for this long. Open, pinned, unread and running chats are kept."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.archive_inactive_sessions"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent_chat
+                            .as_ref()?
+                            .archive_inactive_sessions
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .archive_inactive_sessions = value;
                     },
                 }),
                 metadata: None,

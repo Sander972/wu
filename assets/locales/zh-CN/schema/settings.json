@@ -45,6 +45,7 @@
   "Any key-value pairs added to this list will be added to the terminal's\nenvironment. Use `:` to separate multiple values.\n\nDefault: {}": "添加到此列表中的所有键值对都会加入终端的环境变量。使用 `:` 分隔多个值。\n\n默认值：{}",
   "Apply profile settings on top of Wu's default settings, ignoring user customizations.": "在 Wu 的默认设置之上应用配置文件设置，忽略用户的自定义设置。",
   "Apply profile settings on top of the user's current settings.": "在用户当前的设置之上应用配置文件设置。",
+  "Archive chats you haven't touched for this many days (0 turns it off, otherwise 1, 2, 7 or 14). Open, pinned, unread and running chats are kept.\n\nDefault: 14": "归档超过这么多天未使用的对话（0 为关闭，否则可选 1、2、7 或 14）。已打开、已置顶、未读和正在运行的对话会保留。\n\n默认值：14",
   "Ask before quitting or restarting Wu while an agent is working, since that stops it.\n\nDefault: true": "智能体正在工作时，退出或重启 Wu 前先询问，因为这样会让它停止。\n\n默认值：true",
   "Automatically detect the conda manager": "自动检测 conda 管理器",
   "Autosave when focus changes.": "焦点改变时自动保存。",

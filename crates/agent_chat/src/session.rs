@@ -49,6 +49,7 @@ const REWIND_IDLE_POLL: Duration = Duration::from_millis(100);
 const SAVE_INTERVAL_WHILE_WORKING: Duration = Duration::from_secs(5);
 const RUN_INPUT_BATCH: usize = 128;
 const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const AUTO_ARCHIVE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const IDLE_RECHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const USAGE_FORCED_MIN_INTERVAL: Duration = Duration::from_secs(30);
@@ -267,6 +268,11 @@ pub struct SessionMetadata {
     #[serde(default)]
     pub pinned: bool,
     #[serde(default)]
+    pub archived: bool,
+    /// When the chat last left the archive, so auto-archive doesn't take it straight back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unarchived_at: Option<i64>,
+    #[serde(default)]
     pub parent_id: Option<String>,
     #[serde(default)]
     pub side_chat: bool,
@@ -302,6 +308,8 @@ impl SessionMetadata {
             settings,
             context: None,
             pinned: false,
+            archived: false,
+            unarchived_at: None,
             parent_id: None,
             side_chat: false,
             fork_context: None,
@@ -3294,6 +3302,7 @@ pub struct SessionSummary {
     pub working: bool,
     pub needs_input: bool,
     pub pinned: bool,
+    pub archived: bool,
     pub parent_id: Option<String>,
     pub side_chat: bool,
     pub outcome: Option<ChatOutcome>,
@@ -3359,6 +3368,24 @@ fn chat_list_path(directory: &Path) -> PathBuf {
 
 fn saved_messages_path(directory: &Path) -> PathBuf {
     directory.join("saved_messages.json")
+}
+
+pub(crate) fn should_auto_archive(
+    metadata: &SessionMetadata,
+    now: i64,
+    days: u32,
+    is_open: bool,
+    is_grouped: bool,
+) -> bool {
+    let last_active = metadata
+        .updated_at
+        .max(metadata.unarchived_at.unwrap_or(i64::MIN));
+    days > 0
+        && last_active <= now - i64::from(days) * 86_400
+        && !is_open
+        && !metadata.unseen
+        && !metadata.pinned
+        && !is_grouped
 }
 
 fn fork_title(parent_title: &str, sessions: &[SessionMetadata]) -> String {
@@ -3449,6 +3476,7 @@ pub struct AgentStore {
     live: HashMap<String, Entity<AgentSession>>,
     released: HashMap<String, WeakEntity<AgentSession>>,
     idle_watch: Option<Task<()>>,
+    auto_archive_watch: Option<Task<()>>,
     languages: Arc<LanguageRegistry>,
     harnesses: HashMap<AgentKind, Arc<dyn Harness>>,
     catalogs: HashMap<AgentKind, ModelCatalog>,
@@ -3718,6 +3746,7 @@ impl AgentStore {
             live: HashMap::default(),
             released: HashMap::default(),
             idle_watch: None,
+            auto_archive_watch: None,
             languages,
             harnesses: HashMap::default(),
             catalogs: HashMap::default(),
@@ -3746,7 +3775,8 @@ impl AgentStore {
         })
         .detach();
         cx.observe_global::<settings::SettingsStore>(|store, cx| {
-            store.update_idle_sleep_guard(cx)
+            store.update_idle_sleep_guard(cx);
+            store.auto_archive_stale(cx);
         })
         .detach();
         if AgentChatSettings::get_global(cx).enabled {
@@ -3915,6 +3945,8 @@ impl AgentStore {
                         }
                     }
                     this.sort();
+                    this.auto_archive_stale(cx);
+                    this.watch_auto_archive(cx);
                     cx.notify();
                 })
                 .log_err();
@@ -4467,6 +4499,7 @@ impl AgentStore {
                     working: live.is_some_and(|session| session.is_working()),
                     needs_input: live.is_some_and(|session| !session.pending_questions.is_empty()),
                     pinned: metadata.pinned,
+                    archived: metadata.archived,
                     parent_id: metadata.parent_id.clone(),
                     side_chat: metadata.side_chat,
                     outcome: metadata.outcome,
@@ -4605,6 +4638,76 @@ impl AgentStore {
 
     pub fn set_pinned(&mut self, id: &str, pinned: bool, cx: &mut Context<Self>) {
         self.update_session_metadata(id, |metadata| metadata.pinned = pinned, cx);
+    }
+
+    /// Side chats follow their parent, so a side chat never shows up alone under a chat that is archived.
+    pub fn set_archived(&mut self, ids: &[String], archived: bool, cx: &mut Context<Self>) {
+        let changing: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|metadata| {
+                let listed = ids.contains(&metadata.id)
+                    || (metadata.side_chat
+                        && metadata
+                            .parent_id
+                            .as_ref()
+                            .is_some_and(|parent| ids.contains(parent)));
+                listed && metadata.archived != archived
+            })
+            .map(|metadata| metadata.id.clone())
+            .collect();
+        let unarchived_at = now();
+        for id in changing {
+            self.update_session_metadata(
+                &id,
+                |metadata| {
+                    metadata.archived = archived;
+                    if !archived {
+                        metadata.unarchived_at = Some(unarchived_at);
+                    }
+                },
+                cx,
+            );
+        }
+    }
+
+    /// A chat held in memory is open in a tab, running, or waiting for an answer, and the store only releases it once none of that applies.
+    fn auto_archive_stale(&mut self, cx: &mut Context<Self>) {
+        let days = AgentChatSettings::get_global(cx).archive_inactive_days;
+        let now = now();
+        // Chats don't belong to groups yet, so none is protected by one.
+        let stale: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|metadata| {
+                !metadata.archived
+                    && should_auto_archive(
+                        metadata,
+                        now,
+                        days,
+                        self.loaded_session(&metadata.id).is_some(),
+                        false,
+                    )
+            })
+            .map(|metadata| metadata.id.clone())
+            .collect();
+        if !stale.is_empty() {
+            self.set_archived(&stale, true, cx);
+        }
+    }
+
+    fn watch_auto_archive(&mut self, cx: &mut Context<Self>) {
+        self.auto_archive_watch = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUTO_ARCHIVE_INTERVAL).await;
+                if this
+                    .update(cx, |this, cx| this.auto_archive_stale(cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }));
     }
 
     pub fn fork_session(
@@ -7907,6 +8010,118 @@ done
         });
     }
 
+    #[test]
+    fn auto_archive_rules() {
+        const DAY: i64 = 86_400;
+        let now = 100 * DAY;
+        let chat = |age_in_days: i64, change: fn(&mut SessionMetadata)| {
+            let mut metadata = SessionMetadata::new(
+                AgentKind::Claude,
+                PathBuf::from("/tmp"),
+                RunSettings::default(),
+            );
+            metadata.updated_at = now - age_in_days * DAY;
+            change(&mut metadata);
+            metadata
+        };
+        let rules: [(&str, SessionMetadata, u32, bool, bool, bool); 10] = [
+            ("older than the limit", chat(15, |_| {}), 14, false, false, true),
+            ("exactly at the limit", chat(14, |_| {}), 14, false, false, true),
+            ("newer than the limit", chat(13, |_| {}), 14, false, false, false),
+            ("open", chat(15, |_| {}), 14, true, false, false),
+            ("unseen", chat(15, |metadata| metadata.unseen = true), 14, false, false, false),
+            ("pinned", chat(15, |metadata| metadata.pinned = true), 14, false, false, false),
+            ("grouped", chat(15, |_| {}), 14, false, true, false),
+            ("turned off", chat(500, |_| {}), 0, false, false, false),
+            (
+                "unarchived yesterday",
+                chat(30, |metadata| metadata.unarchived_at = Some(100 * DAY - DAY)),
+                14,
+                false,
+                false,
+                false,
+            ),
+            (
+                "unarchived long ago",
+                chat(30, |metadata| metadata.unarchived_at = Some(80 * DAY)),
+                14,
+                false,
+                false,
+                true,
+            ),
+        ];
+        for (name, metadata, days, is_open, is_grouped, expected) in rules {
+            assert_eq!(
+                should_auto_archive(&metadata, now, days, is_open, is_grouped),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn archiving_is_saved_follows_side_chats_and_unarchiving_resets_the_clock(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let (parent_id, side_id) = store.update(cx, |store, cx| {
+            let mut ids = Vec::new();
+            for _ in 0..2 {
+                let session =
+                    store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx);
+                session.update(cx, |session, cx| session.touch(cx));
+                ids.push(session.read(cx).metadata().id.clone());
+            }
+            (ids.remove(0), ids.remove(0))
+        });
+        store.update(cx, |store, cx| {
+            store.live.clear();
+            let parent = parent_id.clone();
+            store.update_session_metadata(
+                &side_id,
+                |metadata| {
+                    metadata.side_chat = true;
+                    metadata.parent_id = Some(parent);
+                },
+                cx,
+            );
+            store.set_archived(std::slice::from_ref(&parent_id), true, cx);
+        });
+        cx.run_until_parked();
+        let archived_flags = |store: &Entity<AgentStore>, cx: &mut TestAppContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .sessions_metadata()
+                    .map(|metadata| {
+                        (
+                            metadata.id.clone(),
+                            metadata.archived,
+                            metadata.unarchived_at,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let reopened = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        let flags = archived_flags(&reopened, cx);
+        assert_eq!(flags.len(), 2);
+        assert!(
+            flags
+                .iter()
+                .all(|(_, archived, unarchived_at)| *archived && unarchived_at.is_none())
+        );
+
+        reopened.update(cx, |store, cx| store.set_archived(&[side_id.clone()], false, cx));
+        cx.run_until_parked();
+        let flags = archived_flags(&reopened, cx);
+        for (id, archived, unarchived_at) in flags {
+            assert_eq!(archived, id == parent_id);
+            assert_eq!(unarchived_at.is_some(), id == side_id);
+        }
+    }
+
     #[gpui::test]
     async fn saved_messages_toggle_persist_and_leave_with_their_chat(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -7974,7 +8189,7 @@ done
     }
 
     #[test]
-    fn chats_and_list_settings_saved_with_sections_or_archived_still_load() {
+    fn legacy_archived_flag_still_loads() {
         let metadata: SessionMetadata = serde_json::from_value(serde_json::json!({
             "id": "a",
             "kind": "claude",
@@ -7989,6 +8204,8 @@ done
         }))
         .expect("old metadata loads");
         assert_eq!(metadata.id, "a");
+        assert!(metadata.archived);
+        assert_eq!(metadata.unarchived_at, None);
         let prefs: ChatListPrefs = serde_json::from_value(serde_json::json!({
             "sections": [{ "id": "old-section", "name": "Later" }],
             "compact_rows": true,

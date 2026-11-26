@@ -1199,8 +1199,73 @@ pub struct AgentChatSettingsContent {
     ///
     /// Default: true
     pub show_fix_actions: Option<bool>,
+    /// Archive chats you haven't touched for this many days (0 turns it off, otherwise 1, 2, 7 or 14). Open, pinned, unread and running chats are kept.
+    ///
+    /// Default: 14
+    pub archive_inactive_sessions: Option<AgentChatArchiveAfter>,
     /// How the Git panel writes commit messages.
     pub commit_message: Option<AgentChatCommitMessageContent>,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    Default,
+    PartialEq,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(try_from = "u32", into = "u32")]
+#[schemars(with = "u32")]
+pub enum AgentChatArchiveAfter {
+    Never,
+    #[strum(serialize = "After 1 day")]
+    OneDay,
+    #[strum(serialize = "After 2 days")]
+    TwoDays,
+    #[strum(serialize = "After 7 days")]
+    OneWeek,
+    #[default]
+    #[strum(serialize = "After 14 days")]
+    TwoWeeks,
+}
+
+impl AgentChatArchiveAfter {
+    pub fn days(self) -> u32 {
+        u32::from(self)
+    }
+}
+
+impl From<AgentChatArchiveAfter> for u32 {
+    fn from(after: AgentChatArchiveAfter) -> Self {
+        match after {
+            AgentChatArchiveAfter::Never => 0,
+            AgentChatArchiveAfter::OneDay => 1,
+            AgentChatArchiveAfter::TwoDays => 2,
+            AgentChatArchiveAfter::OneWeek => 7,
+            AgentChatArchiveAfter::TwoWeeks => 14,
+        }
+    }
+}
+
+impl TryFrom<u32> for AgentChatArchiveAfter {
+    type Error = String;
+
+    fn try_from(days: u32) -> Result<Self, Self::Error> {
+        match days {
+            0 => Ok(Self::Never),
+            1 => Ok(Self::OneDay),
+            2 => Ok(Self::TwoDays),
+            7 => Ok(Self::OneWeek),
+            14 => Ok(Self::TwoWeeks),
+            other => Err(format!("{other} is not one of 0, 1, 2, 7 or 14")),
+        }
+    }
 }
 
 #[with_fallible_options]

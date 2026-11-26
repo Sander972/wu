@@ -475,6 +475,7 @@ impl AgentPanel {
         let id: SharedString = session.id.clone().into();
         let title = session.title.clone();
         let pinned = session.pinned;
+        let archived = session.archived;
         let native_id = session.native_session_id.clone();
         let panel = cx.entity().downgrade();
         let menu = ContextMenu::build(window, cx, move |menu, _, _| {
@@ -493,6 +494,11 @@ impl AgentPanel {
                 tc!("chat", "Unpin")
             } else {
                 tc!("chat", "Pin")
+            };
+            let archive_label = if archived {
+                t!("Unarchive")
+            } else {
+                t!("Archive")
             };
             let menu = menu
                 .entry(t!("Rename"), None, {
@@ -517,6 +523,17 @@ impl AgentPanel {
                             panel
                                 .store
                                 .update(cx, |store, cx| store.set_pinned(&id, !pinned, cx))
+                        }),
+                    )
+                })
+                .entry(archive_label, None, {
+                    let id = id.clone();
+                    action(
+                        &panel,
+                        Box::new(move |panel, _, cx| {
+                            panel.store.update(cx, |store, cx| {
+                                store.set_archived(&[id.to_string()], !archived, cx)
+                            })
                         }),
                     )
                 })
@@ -899,6 +916,20 @@ impl AgentPanel {
                 false,
                 if pinned { colors.text } else { text_muted },
             ),
+            RowAction::Archive => (
+                "archive",
+                IconName::Archive,
+                t!("Archive"),
+                false,
+                text_muted,
+            ),
+            RowAction::Unarchive => (
+                "unarchive",
+                IconName::BoxOpen,
+                t!("Unarchive"),
+                false,
+                text_muted,
+            ),
         };
         let rest = wash(0.10, cx);
         let pressed = wash(0.18, cx);
@@ -940,6 +971,8 @@ impl AgentPanel {
                 this.hovered_row = None;
                 this.store.update(cx, |store, cx| match action {
                     RowAction::Pin { pinned } => store.set_pinned(&id, !pinned, cx),
+                    RowAction::Archive => store.set_archived(&[id.to_string()], true, cx),
+                    RowAction::Unarchive => store.set_archived(&[id.to_string()], false, cx),
                 });
             }))
             .tooltip(Tooltip::text(text))
@@ -997,14 +1030,21 @@ impl AgentPanel {
             h_flex()
                 .gap(px(4.))
                 .when(!compact, |this| this.mr(px(-4.)))
-                .child(self.row_action(
-                    &id,
-                    RowAction::Pin {
-                        pinned: session.pinned,
-                    },
-                    compact,
-                    cx,
-                ))
+                .children(if session.archived {
+                    vec![self.row_action(&id, RowAction::Unarchive, compact, cx)]
+                } else {
+                    vec![
+                        self.row_action(
+                            &id,
+                            RowAction::Pin {
+                                pinned: session.pinned,
+                            },
+                            compact,
+                            cx,
+                        ),
+                        self.row_action(&id, RowAction::Archive, compact, cx),
+                    ]
+                })
                 .into_any_element()
         } else {
             match status.label() {
@@ -1165,6 +1205,24 @@ impl AgentPanel {
             .cursor_pointer()
             .child(label_element)
             .child(div().flex_1())
+            .when(!group.unarchive_ids.is_empty(), |this| {
+                let ids = group.unarchive_ids.clone();
+                this.child(
+                    div()
+                        .id("agent-unarchive-all")
+                        .cursor_pointer()
+                        .text_size(ui(11.))
+                        .text_color(faint)
+                        .hover(|style| style.text_color(colors.text))
+                        .child(t!("Unarchive all"))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.store
+                                .update(cx, |store, cx| store.set_archived(&ids, false, cx));
+                        })),
+                )
+            })
             .child(disclosure_chevron(!collapsed, faint))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let key = key.to_string();
@@ -1216,9 +1274,11 @@ impl AgentPanel {
             .filter(|session| Self::matches_search(session, &query))
             .map(Rc::new)
             .collect();
-        let groups: Vec<GroupModel> = layout_list(&sessions, prefs, searching)
+        let layout = layout_list(&sessions, prefs, searching);
+        let groups: Vec<GroupModel> = layout
             .active
             .into_iter()
+            .chain(layout.archived)
             .enumerate()
             .map(|(index, group)| GroupModel::new(group, index > 0, now))
             .collect();
@@ -1363,6 +1423,7 @@ struct GroupModel {
     collapsed: bool,
     top_gap: bool,
     rows: Vec<RowModel>,
+    unarchive_ids: Vec<String>,
 }
 
 impl GroupModel {
@@ -1384,6 +1445,21 @@ impl GroupModel {
                 disclosure_label(&t!("Chats"), collapsed, group.total),
                 follows_group,
             ),
+            GroupKind::Archived => (
+                ARCHIVED_KEY.into(),
+                disclosure_label(&t!("Archived"), collapsed, group.total),
+                true,
+            ),
+        };
+        let unarchive_ids = if group.kind == GroupKind::Archived {
+            group
+                .rows
+                .iter()
+                .filter(|row| !row.nested)
+                .map(|row| row.session.id.clone())
+                .collect()
+        } else {
+            Vec::new()
         };
         Self {
             section_id: format!("{key}-section").into(),
@@ -1397,6 +1473,7 @@ impl GroupModel {
                 .into_iter()
                 .map(|row| RowModel::new(row.session.clone(), row.nested, now))
                 .collect(),
+            unarchive_ids,
         }
     }
 }
@@ -1437,6 +1514,7 @@ enum GroupKind {
     Pinned,
     Project(PathBuf),
     Chats,
+    Archived,
 }
 
 struct ListGroup<'a> {
@@ -1453,6 +1531,7 @@ struct ListRow<'a> {
 
 struct ListLayout<'a> {
     active: Vec<ListGroup<'a>>,
+    archived: Option<ListGroup<'a>>,
 }
 
 fn needs_attention(session: &SessionSummary) -> bool {
@@ -1469,6 +1548,7 @@ fn layout_list<'a>(
     let mut side_chats: HashMap<&str, Vec<&'a Rc<SessionSummary>>> = HashMap::default();
     let mut pinned = Vec::new();
     let mut rest = Vec::new();
+    let mut archived = Vec::new();
     for session in sessions {
         let shown_parent = session
             .parent_id
@@ -1476,6 +1556,7 @@ fn layout_list<'a>(
             .filter(|parent| session.side_chat && ids.contains(parent));
         match shown_parent {
             Some(parent) => side_chats.entry(parent).or_default().push(session),
+            None if session.archived => archived.push(session),
             None if session.pinned => pinned.push(session),
             None => rest.push(session),
         }
@@ -1537,11 +1618,20 @@ fn layout_list<'a>(
     } else if !rest.is_empty() {
         active.push(group(GroupKind::Chats, rest, is_collapsed(CHATS_KEY)));
     }
-    ListLayout { active }
+    let archived = (!archived.is_empty()).then(|| {
+        // The section starts collapsed, so its key being saved means the user opened it.
+        let mut group = group(GroupKind::Archived, archived, !is_collapsed(ARCHIVED_KEY));
+        if group.collapsed {
+            group.rows.clear();
+        }
+        group
+    });
+    ListLayout { active, archived }
 }
 
 const PINNED_KEY: &str = "agent-pinned";
 const CHATS_KEY: &str = "agent-chats";
+const ARCHIVED_KEY: &str = "agent-archived";
 
 fn project_key(project: &Path) -> String {
     format!("agent-project:{}", project.to_string_lossy())
@@ -1669,6 +1759,8 @@ impl RowStatus {
 #[derive(Clone, Copy)]
 enum RowAction {
     Pin { pinned: bool },
+    Archive,
+    Unarchive,
 }
 
 fn glyph_rows(cx: &App) -> [Hsla; 3] {
@@ -2180,6 +2272,7 @@ mod tests {
             working: false,
             needs_input: false,
             pinned: false,
+            archived: false,
             parent_id: None,
             side_chat: false,
             outcome: None,
@@ -2237,6 +2330,58 @@ mod tests {
         };
         assert!(!chats.collapsed);
         assert_eq!(row_ids(chats), ["working", "idle", "waiting", "unseen"]);
+    }
+
+    #[test]
+    fn archived_sessions_move_to_their_own_section_and_back() {
+        let archived = |id: &str| SessionSummary {
+            archived: true,
+            ..session(id, "/a")
+        };
+        let side_chat = SessionSummary {
+            side_chat: true,
+            parent_id: Some("old".to_string()),
+            archived: true,
+            ..session("old-side", "/a")
+        };
+        let pinned_and_archived = SessionSummary {
+            pinned: true,
+            ..archived("old-pinned")
+        };
+        let sessions = shared(vec![
+            session("live", "/a"),
+            archived("old"),
+            side_chat,
+            pinned_and_archived,
+        ]);
+        let prefs = ChatListPrefs::default();
+
+        let layout = layout_list(&sessions, &prefs, false);
+        let [chats] = layout.active.as_slice() else {
+            panic!("expected only the Chats group");
+        };
+        assert_eq!(row_ids(chats), ["live"]);
+        let archived_group = layout.archived.as_ref().expect("an Archived section");
+        assert_eq!(archived_group.kind, GroupKind::Archived);
+        assert_eq!(archived_group.total, 2);
+        assert!(archived_group.collapsed);
+        assert!(archived_group.rows.is_empty());
+
+        let opened = ChatListPrefs {
+            collapsed_sections: vec![ARCHIVED_KEY.to_string()],
+            ..ChatListPrefs::default()
+        };
+        let layout = layout_list(&sessions, &opened, false);
+        let archived_group = layout.archived.as_ref().expect("an Archived section");
+        assert!(!archived_group.collapsed);
+        assert_eq!(row_ids(archived_group), ["old", "old-side", "old-pinned"]);
+        let layout = layout_list(&sessions, &prefs, true);
+        assert!(layout.archived.is_some_and(|group| !group.collapsed));
+
+        let restored = shared(vec![session("old", "/a")]);
+        let layout = layout_list(&restored, &prefs, false);
+        assert!(layout.archived.is_none());
+        assert_eq!(row_ids(&layout.active[0]), ["old"]);
     }
 
     #[test]

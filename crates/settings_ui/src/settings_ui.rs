@@ -591,6 +591,7 @@ fn init_renderers(cx: &mut App) {
         .add_dropdown_renderer::<settings::AgentChatSendKey>()
         .add_dropdown_renderer::<settings::AgentChatModelPickerLayout>()
         .add_dropdown_renderer::<settings::AgentChatWhileWorking>()
+        .add_dropdown_renderer::<settings::AgentChatArchiveAfter>()
         .add_dropdown_renderer::<settings::AgentChatDefaultEffort>()
         .add_dropdown_renderer::<settings::ClaudeCodePermissionDefault>()
         .add_dropdown_renderer::<settings::CodexPermissionDefault>()
