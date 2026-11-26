@@ -264,8 +264,8 @@ impl OpenRequest {
         let prompt = parameter("prompt").filter(|prompt| !prompt.is_empty());
         if let Some(prompt) = &prompt {
             anyhow::ensure!(
-                prompt.chars().count() <= agent_chat::MAX_LINK_PROMPT_CHARS,
-                "invalid agent url: prompt longer than {} characters",
+                agent_chat::link_prompt_is_valid(prompt),
+                "invalid agent url: prompt longer than {} characters or with control characters",
                 agent_chat::MAX_LINK_PROMPT_CHARS
             );
         }
@@ -282,9 +282,21 @@ impl OpenRequest {
                 .filter(|value| !value.is_empty())
         };
         let plugin = parameter("plugin").context("invalid agent url: missing plugin")?;
+        let marketplace = parameter("marketplace");
+        // A leading dash would read as a `claude plugin install` option once the user confirms.
+        let is_valid = |value: &str| {
+            !value.starts_with('-')
+                && !value
+                    .chars()
+                    .any(|character| character.is_whitespace() || character.is_control())
+        };
+        anyhow::ensure!(
+            is_valid(&plugin) && marketplace.as_deref().is_none_or(is_valid),
+            "invalid agent url: unsafe plugin or marketplace"
+        );
         self.kind = Some(OpenRequestKind::AgentInstallPlugin {
             plugin,
-            marketplace: parameter("marketplace"),
+            marketplace,
         });
         Ok(())
     }
@@ -329,6 +341,7 @@ impl OpenRequest {
 }
 
 fn agent_link_query(rest: &str) -> Result<&str> {
+    let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
     let rest = rest.strip_prefix('/').unwrap_or(rest);
     if rest.is_empty() {
         return Ok(rest);
@@ -1654,6 +1667,19 @@ mod tests {
 
         let long_prompt = "x".repeat(agent_chat::MAX_LINK_PROMPT_CHARS + 1);
         assert!(parse_url(&format!("wu://agent/open?prompt={long_prompt}"), cx).is_err());
+        for prompt in ["a%00b", "a%0Db", "a%1B%5B2Jb", "a%7Fb"] {
+            let url = format!("wu://agent/open?prompt={prompt}");
+            assert!(parse_url(&url, cx).is_err(), "{url}");
+        }
+        match parse_url("wu://agent/open?prompt=one%0Atwo%09three#ignored", cx)
+            .unwrap()
+            .kind
+        {
+            Some(OpenRequestKind::AgentOpen { prompt, .. }) => {
+                assert_eq!(prompt.as_deref(), Some("one\ntwo\tthree"))
+            }
+            kind => panic!("expected AgentOpen, got {kind:?}"),
+        }
     }
 
     #[gpui::test]
@@ -1685,8 +1711,29 @@ mod tests {
             }
             kind => panic!("expected AgentInstallPlugin, got {kind:?}"),
         }
+        match parse_url("wu://agent/install-plugin?plugin=humanizer#fragment", cx)
+            .unwrap()
+            .kind
+        {
+            Some(OpenRequestKind::AgentInstallPlugin { plugin, .. }) => {
+                assert_eq!(plugin, "humanizer")
+            }
+            kind => panic!("expected AgentInstallPlugin, got {kind:?}"),
+        }
         assert!(parse_url("wu://agent/install-plugin?marketplace=ponytail", cx).is_err());
         assert!(parse_url("wu://agent/install-plugin?plugin=", cx).is_err());
+        for query in [
+            "plugin=--help",
+            "plugin=a%20b",
+            "plugin=a%0Ab",
+            "plugin=a%00b",
+            "plugin=ok&marketplace=-x",
+            "plugin=ok&marketplace=a%09b",
+        ] {
+            let url = format!("wu://agent/install-plugin?{query}");
+            let error = parse_url(&url, cx).expect_err(&url);
+            assert!(error.to_string().contains("unsafe plugin"), "{url}");
+        }
     }
 
     #[gpui::test]

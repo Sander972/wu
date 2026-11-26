@@ -4250,7 +4250,7 @@ impl AgentStore {
         })
     }
 
-    /// Opens the chat a link names by Wu's id or Claude's session id, else continues Claude's own saved chat with that id in `cwd`.
+    /// Opens the chat a link names by Wu's id or Claude's session id, else continues Claude's own saved chat with that id in `cwd`. It never resumes a cut-off turn.
     pub fn open_linked_session(
         &mut self,
         session_id: String,
@@ -4268,7 +4268,7 @@ impl AgentStore {
                         || metadata.native_session_id.as_deref() == Some(session_id.as_str())
                 });
                 match known.map(|metadata| metadata.id.clone()) {
-                    Some(id) => this.open_session(&id, cx),
+                    Some(id) => this.load_session(&id, false, cx),
                     None => {
                         let external = ExternalSession {
                             id: session_id,
@@ -5477,6 +5477,16 @@ impl AgentStore {
         id: &str,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<AgentSession>>> {
+        self.load_session(id, true, cx)
+    }
+
+    /// `continue_cut_off_turn` is false when a link opens the chat, since a link must never start a run.
+    fn load_session(
+        &mut self,
+        id: &str,
+        continue_cut_off_turn: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<AgentSession>>> {
         if let Some(session) = self.loaded_session(id) {
             return Task::ready(Ok(session));
         }
@@ -5522,7 +5532,9 @@ impl AgentStore {
                     session
                 });
                 this.track(session.clone(), cx);
-                session.update(cx, |session, cx| session.continue_cut_off_turn(cx));
+                if continue_cut_off_turn {
+                    session.update(cx, |session, cx| session.continue_cut_off_turn(cx));
+                }
                 Ok(session)
             })?
         })
@@ -7926,6 +7938,25 @@ done
         session.read_with(cx, |session, _| {
             assert!(!session.is_working());
             assert_eq!(session.metadata().interrupted_at, None);
+        });
+        assert!(user_texts(&session, cx).is_empty());
+    }
+
+    #[gpui::test]
+    async fn a_link_never_resumes_a_cut_off_turn(cx: &mut TestAppContext) {
+        let (directory, store, id) = chat_cut_off(0, cx);
+        update_chat_settings(cx, |settings| settings.continue_after_reload = Some(true));
+        let session = store
+            .update(cx, |store, cx| {
+                store.open_linked_session("sess-cut-off".into(), directory.path().into(), cx)
+            })
+            .await
+            .expect("the link opens the chat by Claude's session id");
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.metadata().id, id);
+            assert!(!session.is_working() && !session.has_live_run());
+            assert!(session.metadata().interrupted_at.is_some());
         });
         assert!(user_texts(&session, cx).is_empty());
     }

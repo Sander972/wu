@@ -381,6 +381,7 @@ impl ChatView {
             completion_token(&editor.text(cx), cursor)
         });
         self.dismissed_command = token.map(|(_, token)| token);
+        self.command_menu = None;
         window.focus(&self.composer.focus_handle(cx), cx);
     }
 
