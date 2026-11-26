@@ -93,6 +93,15 @@ impl HeadlessTerminal {
     }
 }
 
+/// Variables a crate that `terminal` can't depend on adds to every new local terminal, read when the terminal starts.
+struct ExtraEnv(fn(&App) -> Vec<(String, String)>);
+
+impl gpui::Global for ExtraEnv {}
+
+pub fn set_extra_env(extra_env: fn(&App) -> Vec<(String, String)>, cx: &mut App) {
+    cx.set_global(ExtraEnv(extra_env));
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Scroll {
     Delta(i32),
@@ -1099,6 +1108,12 @@ impl TerminalBuilder {
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
         // When set, run the command as a plain subprocess instead.
         let no_pty = HeadlessTerminal::is_enabled(cx);
+        // The variables describe this machine, so a shell on a remote host doesn't get them.
+        let extra_env = cx
+            .try_global::<ExtraEnv>()
+            .filter(|_| !is_remote_terminal)
+            .map(|extra_env| (extra_env.0)(cx))
+            .unwrap_or_default();
         #[cfg(not(windows))]
         let child_signal_mask = match current_child_signal_mask()
             .context("failed to capture terminal child signal mask")
@@ -1132,6 +1147,7 @@ impl TerminalBuilder {
             }
 
             insert_zed_terminal_env(&mut env, &version);
+            env.extend(extra_env);
 
             #[derive(Default)]
             struct ShellParams {
@@ -4199,6 +4215,33 @@ mod tests {
             content_after.contains("from_injection"),
             "expected injected output to appear, got: {content_after}"
         );
+    }
+
+    #[gpui::test]
+    async fn extra_env_is_applied_to_new_terminals(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            set_extra_env(
+                |_| vec![("WU_EXTRA_ENV_TEST".to_string(), "from_the_hook".to_string())],
+                cx,
+            )
+        });
+
+        let (program, arguments) = if cfg!(windows) {
+            ("cmd", ["/C", "echo %WU_EXTRA_ENV_TEST%"])
+        } else {
+            ("sh", ["-c", "echo $WU_EXTRA_ENV_TEST"])
+        };
+        let terminal = build_test_terminal_with_arguments(
+            cx,
+            program.to_string(),
+            arguments.map(String::from).to_vec(),
+        )
+        .await;
+        let exit_status =
+            terminal.read_with(cx, |terminal, cx| terminal.wait_for_completed_task(cx));
+        assert_eq!(exit_status.await, Some(ExitStatus::default()));
+        assert_content_eventually(&terminal, "from_the_hook", cx).await;
     }
 
     #[cfg(unix)]

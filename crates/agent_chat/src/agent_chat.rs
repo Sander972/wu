@@ -170,7 +170,9 @@ fn insert_mention(workspace: &mut Workspace, window: &mut Window, cx: &mut Conte
     if !agent_panel::agent_chat_enabled(cx) {
         return;
     }
-    // Where a mention goes besides the chat composer (a terminal running `claude`) branches here, on what is focused.
+    if ide_server::mention_in_terminal(workspace, window, cx) {
+        return;
+    }
     let Some((path, lines)) = chat_view::mention_target(workspace, cx) else {
         return;
     };
@@ -294,6 +296,7 @@ fn watch_enabled(cx: &mut App) {
         }
         enabled = now;
         show_commands(now, cx);
+        ide_server::set_running(now, cx);
         if now {
             session::load_saved_chats(cx);
         } else {

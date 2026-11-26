@@ -12,6 +12,7 @@ use gpui::{
 use i18n::t;
 use language::{Buffer, DiagnosticSeverity, File as _, LanguageServerId, Point};
 use project::{CodeAction, LspAction, Project, ProjectTransaction};
+use serde_json::{Value, json};
 use settings::Settings as _;
 use std::{
     ops::Range,
@@ -108,6 +109,10 @@ fn context_editor(workspace: &Workspace, cx: &App) -> Option<Entity<Editor>> {
         return active.act_as::<Editor>(cx);
     }
     // A chat open as a tab is the active item while you type in it, so use the editor you were in before. Only plain editors count there: resolving a wrapped one would read the chat being updated.
+    previous_editor(workspace, cx)
+}
+
+fn previous_editor(workspace: &Workspace, cx: &App) -> Option<Entity<Editor>> {
     workspace
         .panes()
         .iter()
@@ -131,12 +136,7 @@ fn shown_context(workspace: &Workspace, cx: &App) -> Option<ShownContext> {
     let buffer = editor.active_buffer(cx)?;
     let file = project::File::from_dyn(buffer.read(cx).file())?;
     let absolute_path = file.as_local()?.abs_path(cx);
-    // Excluded files have no worktree entry; private ones are the `private_files` setting's matches, such as `.env`.
-    let path_only = file
-        .worktree
-        .read(cx)
-        .entry_for_path(&file.path)
-        .is_none_or(|entry| entry.is_ignored || entry.is_private);
+    let path_only = is_path_only(file, cx);
     let selection = (settings.attach_selection && !path_only)
         .then(|| selected_lines(editor, cx))
         .flatten();
@@ -151,12 +151,62 @@ fn shown_context(workspace: &Workspace, cx: &App) -> Option<ShownContext> {
     })
 }
 
+/// Excluded files have no worktree entry; private ones are the `private_files` setting's matches, such as `.env`.
+fn is_path_only(file: &project::File, cx: &App) -> bool {
+    file.worktree
+        .read(cx)
+        .entry_for_path(&file.path)
+        .is_none_or(|entry| entry.is_ignored || entry.is_private)
+}
+
+/// The editor's newest selection as Claude Code's `selection_changed` reports it: 0-based lines and UTF-16 columns. When selections aren't attached, or the file is private, the selection is reported empty at its start.
+pub(crate) fn selection_json(editor: &Editor, cx: &App) -> Option<Value> {
+    let buffer = editor.active_buffer(cx)?;
+    let file = project::File::from_dyn(buffer.read(cx).file())?;
+    let absolute_path = file.as_local()?.abs_path(cx);
+    let file_url = lsp::Uri::from_file_path(&absolute_path).ok()?.to_string();
+    let snapshot = editor.buffer().read(cx).snapshot(cx);
+    let anchors = editor.selections.newest_anchor().range();
+    let range = anchors.start.to_point(&snapshot)..anchors.end.to_point(&snapshot);
+    let (buffer_snapshot, mut range) = snapshot.range_to_buffer_range(range)?;
+    if is_path_only(file, cx) || !AgentChatSettings::get_global(cx).attach_selection {
+        range.end = range.start;
+    }
+    let start = buffer_snapshot.point_to_point_utf16(range.start);
+    let end = buffer_snapshot.point_to_point_utf16(range.end);
+    Some(json!({
+        "text": buffer_snapshot.text_for_range(range.clone()).collect::<String>(),
+        "filePath": absolute_path.to_string_lossy(),
+        "fileUrl": file_url,
+        "selection": {
+            "start": { "line": start.row, "character": start.column },
+            "end": { "line": end.row, "character": end.column },
+            "isEmpty": range.is_empty(),
+        },
+    }))
+}
+
 /// The file and 1-based inclusive lines Alt+K mentions: the active editor's, or the one before it when the composer has focus.
 pub(crate) fn mention_target(
     workspace: &Workspace,
     cx: &App,
 ) -> Option<(PathBuf, Option<(u32, u32)>)> {
-    let editor_entity = context_editor(workspace, cx)?;
+    editor_mention(&context_editor(workspace, cx)?, cx)
+}
+
+/// Like `mention_target`, for a terminal that has focus: a terminal open as a tab is the active item, so the editor before it counts.
+pub(crate) fn terminal_mention_target(
+    workspace: &Workspace,
+    cx: &App,
+) -> Option<(PathBuf, Option<(u32, u32)>)> {
+    let editor = context_editor(workspace, cx).or_else(|| previous_editor(workspace, cx))?;
+    editor_mention(&editor, cx)
+}
+
+fn editor_mention(
+    editor_entity: &Entity<Editor>,
+    cx: &App,
+) -> Option<(PathBuf, Option<(u32, u32)>)> {
     let editor = editor_entity.read(cx);
     let buffer = editor.active_buffer(cx)?;
     let file = project::File::from_dyn(buffer.read(cx).file())?;

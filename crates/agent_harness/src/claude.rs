@@ -226,6 +226,8 @@ impl ClaudeHarness {
         cmd.args(permission_args(request.permission));
         // Lets `rewind_files` restore files to how they were before a given prompt.
         cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
+        // A wu started from an IDE's terminal inherits that IDE's port, and a chat must not connect to it.
+        cmd.env_remove("CLAUDE_CODE_SSE_PORT");
         // Headless sessions only connect the Chrome extension when asked to.
         cmd.arg(if request.chrome {
             "--chrome"
@@ -2193,6 +2195,35 @@ mod tests {
             .find(|(key, _)| *key == "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING")
             .and_then(|(_, value)| value);
         assert_eq!(value, Some(std::ffi::OsStr::new("true")));
+    }
+
+    #[test]
+    fn chat_runs_never_inherit_an_ide_port() {
+        let request = RunRequest {
+            prompt: "hi".into(),
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            permission: PermissionMode::Ask,
+            resume: None,
+            fork: None,
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            auto_compact_tokens: None,
+            chrome: false,
+            drop_prompt: None,
+            ephemeral: false,
+            context: Vec::new(),
+        };
+        let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
+        assert!(
+            command
+                .as_std()
+                .get_envs()
+                .any(|(key, value)| key == "CLAUDE_CODE_SSE_PORT" && value.is_none()),
+            "the port is removed from the inherited environment"
+        );
     }
 
     #[test]

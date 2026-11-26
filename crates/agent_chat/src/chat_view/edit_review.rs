@@ -8,13 +8,16 @@ use buffer_diff::DiffHunkStatus;
 use collections::HashSet;
 use editor::{Anchor, DiffHunkRenderer, Editor, SplittableEditor};
 use fs::Fs;
+use futures::channel::oneshot;
 use git_ui_core::file_diff_view::{FileDiffView, build_buffer_diff};
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, Render, SharedString, Subscription, Task, WeakEntity, Window,
+    AnyElement, App, AppContext as _, AsyncWindowContext, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, IntoElement, Render, SharedString, Subscription, Task, WeakEntity,
+    Window,
 };
 use i18n::t;
 use language::{Buffer, LineEnding};
+use project::Project;
 use serde_json::{Value, json};
 use std::{
     any::TypeId,
@@ -26,7 +29,7 @@ use theme::ActiveTheme as _;
 use ui::{Button, ButtonStyle, Icon, IconName, prelude::*};
 use util::ResultExt as _;
 use workspace::{
-    Workspace,
+    MultiWorkspace, Workspace,
     item::{Item, ItemEvent},
     notifications::NotifyTaskExt as _,
 };
@@ -37,6 +40,8 @@ const CANCEL_WRITE: &str = "User cancelled the write";
 const STALE_ON_DISK: &str =
     "The file changed on disk while the edit was being reviewed. Read it again before editing.";
 const MAX_HUNKS_WITH_BUTTONS: usize = 100;
+const FILE_SAVED: &str = "FILE_SAVED";
+const DIFF_REJECTED: &str = "DIFF_REJECTED";
 
 pub(crate) fn is_reviewable(prompt: &PermissionPrompt) -> bool {
     matches!(prompt.tool_name.as_str(), "Edit" | "Write")
@@ -71,6 +76,22 @@ fn is_pending(session: &AgentSession, question_id: &str) -> bool {
         .any(|pending| pending.id() == question_id)
 }
 
+/// Who waits for the review's outcome.
+enum Requester {
+    /// A chat asking permission for an `Edit` or `Write`.
+    Chat {
+        session: Entity<AgentSession>,
+        question_id: String,
+        tool_name: String,
+        input: Value,
+    },
+    /// A `claude` in the terminal waiting on `openDiff`, which returns two texts: `FILE_SAVED` and the final contents, or `DIFF_REJECTED` and the tab name.
+    Terminal {
+        tab_name: String,
+        answer: Option<oneshot::Sender<[String; 2]>>,
+    },
+}
+
 pub(crate) fn open_review(
     session: Entity<AgentSession>,
     question_id: String,
@@ -89,103 +110,205 @@ pub(crate) fn open_review(
                 .context("the proposed change has no `file_path`")?,
         );
         let project = workspace.read_with(cx, |workspace, _| workspace.project().clone())?;
-        let (fs, languages) = project.read_with(cx, |project, _| {
-            (project.fs().clone(), project.languages().clone())
-        });
+        let fs = project.read_with(cx, |project, _| project.fs().clone());
         let original = read_disk_text(fs.as_ref(), &path).await?;
         let proposed = proposed_text(&tool_name, &input, &original)?;
-        let language = languages.load_language_for_file_path(&path).await.ok();
-        let (old_buffer, new_buffer) = project.update(cx, |project, cx| {
-            (
-                project.create_local_buffer(&original, language.clone(), false, cx),
-                project.create_local_buffer(&proposed, language, false, cx),
-            )
-        });
-        let diff = build_buffer_diff(&old_buffer, &new_buffer, cx).await?;
-        workspace.update_in(cx, |workspace, window, cx| {
-            if !is_pending(session.read(cx), &question_id) {
-                return Ok(());
-            }
-            let open = workspace
-                .items_of_type::<ProposedEditReview>(cx)
-                .find(|review| review.read(cx).question_id == question_id);
-            if let Some(review) = open {
-                workspace.activate_item(&review, true, focus, window, cx);
-                return Ok(());
-            }
-            let workspace_entity = cx.entity();
-            let weak_workspace = workspace_entity.downgrade();
-            let diff_view = cx.new(|cx| {
-                FileDiffView::new(
-                    old_buffer,
-                    new_buffer.clone(),
-                    diff,
-                    project,
-                    workspace_entity,
-                    window,
-                    cx,
-                )
-            });
-            let splittable = diff_view
-                .read(cx)
-                .act_as_type(TypeId::of::<SplittableEditor>(), &diff_view, cx)
-                .and_then(|editor| editor.downcast::<SplittableEditor>().ok())
-                .context("the diff view has no editor")?;
-            let file_name = path
-                .file_name()
-                .map_or_else(|| path.to_string_lossy(), |name| name.to_string_lossy())
-                .into_owned();
-            let review = cx.new(|cx| {
-                let renderer = Arc::new(ProposedHunkRenderer {
-                    review: cx.weak_entity(),
-                });
-                splittable.update(cx, |splittable, cx| {
-                    splittable.set_diff_hunk_renderer(Some(renderer), cx)
-                });
-                ProposedEditReview {
-                    _subscriptions: vec![
-                        cx.observe(&session, |this: &mut ProposedEditReview, session, cx| {
-                            if !is_pending(session.read(cx), &this.question_id) {
-                                cx.emit(ItemEvent::CloseItem);
-                            }
-                        }),
-                        // Closing the tab without answering must not leave the agent waiting.
-                        cx.on_release(|this: &mut ProposedEditReview, cx| {
-                            this.decide(cancel_decision(&this.tool_name), cx)
-                        }),
-                    ],
-                    title: t!("{file} (proposed)", file = file_name),
-                    session,
-                    question_id,
-                    tool_name,
-                    input,
-                    path,
-                    original,
-                    proposed,
-                    new_buffer,
-                    diff_view,
-                    splittable,
-                    decided_hunks: HashSet::default(),
-                    fs,
-                    workspace: weak_workspace,
-                }
-            });
-            // An auto-opened review must neither take focus nor cover the chat tab being typed in (the pane would then hand focus to the review): keys meant for the chat would become a hand-edit that Accept sends.
-            let pane = workspace.active_pane().clone();
-            let activate = focus || !pane.focus_handle(cx).contains_focused(window, cx);
-            pane.update(cx, |pane, cx| {
-                pane.add_item_inner(Box::new(review), false, focus, activate, None, window, cx)
-            });
-            Ok(())
-        })?
+        let file_name = path
+            .file_name()
+            .map_or_else(|| path.to_string_lossy(), |name| name.to_string_lossy())
+            .into_owned();
+        let requester = Requester::Chat {
+            session,
+            question_id,
+            tool_name,
+            input,
+        };
+        let title = t!("{file} (proposed)", file = file_name);
+        open_review_tab(
+            requester, path, original, proposed, title, focus, project, workspace, cx,
+        )
+        .await?;
+        Ok(())
     })
 }
 
+/// Opens `openDiff`'s tab: the file on disk at `old_path` against `new_contents`. The receiver gets the two texts `openDiff` returns.
+pub(crate) fn open_diff_review(
+    old_path: PathBuf,
+    new_path: PathBuf,
+    new_contents: String,
+    tab_name: String,
+    workspace: WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Task<
+    Result<(
+        WeakEntity<ProposedEditReview>,
+        oneshot::Receiver<[String; 2]>,
+    )>,
+> {
+    window.spawn(cx, async move |cx| {
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone())?;
+        let fs = project.read_with(cx, |project, _| project.fs().clone());
+        let original = read_disk_text(fs.as_ref(), &old_path).await?;
+        let (answer, answered) = oneshot::channel();
+        let requester = Requester::Terminal {
+            tab_name: tab_name.clone(),
+            answer: Some(answer),
+        };
+        let review = open_review_tab(
+            requester,
+            new_path,
+            original,
+            new_contents,
+            tab_name.into(),
+            false,
+            project,
+            workspace,
+            cx,
+        )
+        .await?
+        .context("the diff tab didn't open")?;
+        Ok((review.downgrade(), answered))
+    })
+}
+
+/// Shows `original` against `proposed` in a new tab named `title`. `path` picks the language and is the tab's tooltip.
+async fn open_review_tab(
+    requester: Requester,
+    path: PathBuf,
+    original: String,
+    proposed: String,
+    title: SharedString,
+    focus: bool,
+    project: Entity<Project>,
+    workspace: WeakEntity<Workspace>,
+    cx: &mut AsyncWindowContext,
+) -> Result<Option<Entity<ProposedEditReview>>> {
+    let (fs, languages) = project.read_with(cx, |project, _| {
+        (project.fs().clone(), project.languages().clone())
+    });
+    let language = languages.load_language_for_file_path(&path).await.ok();
+    let (old_buffer, new_buffer) = project.update(cx, |project, cx| {
+        (
+            project.create_local_buffer(&original, language.clone(), false, cx),
+            project.create_local_buffer(&proposed, language, false, cx),
+        )
+    });
+    let diff = build_buffer_diff(&old_buffer, &new_buffer, cx).await?;
+    workspace.update_in(cx, |workspace, window, cx| {
+        if let Requester::Chat {
+            session,
+            question_id,
+            ..
+        } = &requester
+        {
+            if !is_pending(session.read(cx), question_id) {
+                return Ok(None);
+            }
+            let open = workspace
+                .items_of_type::<ProposedEditReview>(cx)
+                .find(|review| review.read(cx).answers_question(question_id));
+            if let Some(review) = open {
+                workspace.activate_item(&review, true, focus, window, cx);
+                return Ok(None);
+            }
+        }
+        let workspace_entity = cx.entity();
+        let weak_workspace = workspace_entity.downgrade();
+        let diff_view = cx.new(|cx| {
+            FileDiffView::new(
+                old_buffer,
+                new_buffer.clone(),
+                diff,
+                project,
+                workspace_entity,
+                window,
+                cx,
+            )
+        });
+        let splittable = diff_view
+            .read(cx)
+            .act_as_type(TypeId::of::<SplittableEditor>(), &diff_view, cx)
+            .and_then(|editor| editor.downcast::<SplittableEditor>().ok())
+            .context("the diff view has no editor")?;
+        let review = cx.new(|cx| {
+            let renderer = Arc::new(ProposedHunkRenderer {
+                review: cx.weak_entity(),
+            });
+            splittable.update(cx, |splittable, cx| {
+                splittable.set_diff_hunk_renderer(Some(renderer), cx)
+            });
+            // Closing the tab without answering must not leave the agent waiting.
+            let mut subscriptions =
+                vec![cx.on_release(|this: &mut ProposedEditReview, cx| this.reject_all(cx))];
+            if let Requester::Chat { session, .. } = &requester {
+                subscriptions.push(cx.observe(
+                    session,
+                    |this: &mut ProposedEditReview, session, cx| {
+                        if let Requester::Chat { question_id, .. } = &this.requester
+                            && !is_pending(session.read(cx), question_id)
+                        {
+                            cx.emit(ItemEvent::CloseItem);
+                        }
+                    },
+                ));
+            }
+            ProposedEditReview {
+                _subscriptions: subscriptions,
+                title,
+                requester,
+                path,
+                original,
+                proposed,
+                new_buffer,
+                diff_view,
+                splittable,
+                decided_hunks: HashSet::default(),
+                fs,
+                workspace: weak_workspace,
+            }
+        });
+        // An auto-opened review must neither take focus nor cover the chat tab being typed in (the pane would then hand focus to the review): keys meant for the chat would become a hand-edit that Accept sends.
+        let pane = workspace.active_pane().clone();
+        let activate = focus || !pane.focus_handle(cx).contains_focused(window, cx);
+        pane.update(cx, |pane, cx| {
+            pane.add_item_inner(
+                Box::new(review.clone()),
+                false,
+                focus,
+                activate,
+                None,
+                window,
+                cx,
+            )
+        });
+        Ok(Some(review))
+    })?
+}
+
+/// Closes the `openDiff` tabs whose tab name `matches`, in every window, and returns how many.
+pub(crate) fn close_diff_reviews(matches: impl Fn(&str) -> bool, cx: &mut App) -> usize {
+    let reviews = cx
+        .windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<MultiWorkspace>())
+        .filter_map(|window| window.read(cx).ok())
+        .flat_map(|multi| multi.workspaces())
+        .flat_map(|workspace| workspace.read(cx).items_of_type::<ProposedEditReview>(cx))
+        .filter(|review| match &review.read(cx).requester {
+            Requester::Terminal { tab_name, .. } => matches(tab_name),
+            Requester::Chat { .. } => false,
+        })
+        .collect::<Vec<_>>();
+    for review in &reviews {
+        review.update(cx, |_, cx| cx.emit(ItemEvent::CloseItem));
+    }
+    reviews.len()
+}
+
 pub(crate) struct ProposedEditReview {
-    session: Entity<AgentSession>,
-    question_id: String,
-    tool_name: String,
-    input: Value,
+    requester: Requester,
     path: PathBuf,
     original: String,
     proposed: String,
@@ -201,16 +324,39 @@ pub(crate) struct ProposedEditReview {
 }
 
 impl ProposedEditReview {
+    fn answers_question(&self, id: &str) -> bool {
+        matches!(&self.requester, Requester::Chat { question_id, .. } if question_id == id)
+    }
+
     fn accept(&mut self, _: &AcceptProposedChanges, window: &mut Window, cx: &mut Context<Self>) {
-        let final_text = self.new_buffer.read(cx).text();
+        let buffer = self.new_buffer.read(cx);
+        let final_text = buffer.text();
+        if let Requester::Terminal { answer, .. } = &mut self.requester {
+            // The buffer keeps only `\n`, so the contents go back with the line endings `claude` sent.
+            let final_text = if buffer.line_ending() == LineEnding::Windows {
+                final_text.replace('\n', "\r\n")
+            } else {
+                final_text
+            };
+            if let Some(answer) = answer.take() {
+                answer.send([FILE_SAVED.into(), final_text]).ok();
+            }
+            return;
+        }
         let fs = self.fs.clone();
         let path = self.path.clone();
         cx.spawn(async move |this, cx| {
             let disk_text = read_disk_text(fs.as_ref(), &path).await?;
             this.update(cx, |this, cx| {
+                let Requester::Chat {
+                    tool_name, input, ..
+                } = &this.requester
+                else {
+                    return;
+                };
                 let decision = review_decision(
-                    &this.tool_name,
-                    &this.input,
+                    tool_name,
+                    input,
                     &this.original,
                     &this.proposed,
                     &final_text,
@@ -223,7 +369,21 @@ impl ProposedEditReview {
     }
 
     fn reject(&mut self, _: &RejectProposedChanges, _: &mut Window, cx: &mut Context<Self>) {
-        self.decide(cancel_decision(&self.tool_name), cx);
+        self.reject_all(cx);
+    }
+
+    fn reject_all(&mut self, cx: &mut App) {
+        match &mut self.requester {
+            Requester::Chat { tool_name, .. } => {
+                let decision = cancel_decision(tool_name);
+                self.decide(decision, cx);
+            }
+            Requester::Terminal { tab_name, answer } => {
+                if let Some(answer) = answer.take() {
+                    answer.send([DIFF_REJECTED.into(), tab_name.clone()]).ok();
+                }
+            }
+        }
     }
 
     fn accept_change_at_cursor(
@@ -298,9 +458,16 @@ impl ProposedEditReview {
     }
 
     fn decide(&self, decision: PermissionDecision, cx: &mut App) {
-        self.session.update(cx, |session, cx| {
-            session.decide_permission(&self.question_id, decision, cx)
-        });
+        if let Requester::Chat {
+            session,
+            question_id,
+            ..
+        } = &self.requester
+        {
+            session.update(cx, |session, cx| {
+                session.decide_permission(question_id, decision, cx)
+            });
+        }
     }
 }
 

@@ -2575,9 +2575,11 @@ impl AgentSession {
                         project: self.project.as_ref().and_then(WeakEntity::upgrade),
                         cx,
                     };
-                    reply
-                        .send(crate::ide_server::handle_mcp_message(&message, &tools))
-                        .ok();
+                    let response = crate::ide_server::handle_mcp_message(&message, &tools);
+                    cx.background_spawn(async move {
+                        reply.send(response.await).ok();
+                    })
+                    .detach();
                 }
                 RunInput::Ended => return ControlFlow::Break(()),
             }

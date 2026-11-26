@@ -1830,6 +1830,21 @@ impl Item for TerminalView {
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(ItemEvent)) {
         f(*event)
     }
+
+    fn act_as_type<'a>(
+        &'a self,
+        type_id: std::any::TypeId,
+        self_handle: &'a Entity<Self>,
+        _: &'a App,
+    ) -> Option<gpui::AnyEntity> {
+        if type_id == std::any::TypeId::of::<Self>() {
+            Some(self_handle.clone().into())
+        } else if type_id == std::any::TypeId::of::<Terminal>() {
+            Some(self.terminal.clone().into())
+        } else {
+            None
+        }
+    }
 }
 
 impl SerializableItem for TerminalView {
