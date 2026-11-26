@@ -1704,7 +1704,6 @@ impl AgentSession {
         }
         if self.run_is_quiet() {
             self.run = None;
-            self.remote_control_url = None;
             self.capabilities.clear();
             self.prompt_requests.clear();
             cx.notify();
@@ -4309,8 +4308,9 @@ impl AgentStore {
             });
             let allowed = chat_settings.allowed_permission(kind, permission);
             if allowed != permission {
+                // Not `pin_settings`: the next turn must relaunch, since a CLI that refuses the live switch keeps the bypass flag it started with.
                 session.update(cx, |session, cx| {
-                    session.pin_settings(|settings| settings.permission = allowed, cx)
+                    session.change_settings(|settings| settings.permission = allowed, cx)
                 });
             }
         }
@@ -7008,9 +7008,16 @@ pub(crate) mod tests {
         cx.run_until_parked();
 
         assert_eq!(*live_permission.borrow_and_update(), PermissionMode::Auto);
-        session.read_with(cx, |session, _| {
+        session.update(cx, |session, cx| {
             assert_eq!(session.settings().permission, PermissionMode::Auto);
             assert!(session.run.is_some(), "the run keeps going");
+            assert_eq!(session.runs_started(), 0);
+            session.hand_to_agent("next".into(), true, cx);
+            assert_eq!(
+                session.runs_started(),
+                1,
+                "the next turn relaunches without the bypass flag"
+            );
         });
     }
 
