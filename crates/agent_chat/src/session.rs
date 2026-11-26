@@ -3331,9 +3331,22 @@ pub struct ChatListPrefs {
     pub favorite_models: Vec<String>,
     pub dictation_device: Option<String>,
     pub permission_destination: Option<String>,
+    /// Custom chat groups, keyed by the project root their chats belong to.
+    pub groups: HashMap<String, Vec<ChatGroup>>,
     /// 1.1.11 kept saved messages here; they now live in their own file.
     #[serde(rename = "saved_messages", skip_serializing)]
     pub(crate) legacy_saved_messages: Vec<SavedMessage>,
+}
+
+pub const MAX_GROUPS_PER_PROJECT: usize = 100;
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatGroup {
+    pub id: String,
+    pub name: String,
+    pub collapsed: bool,
+    pub session_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -3354,6 +3367,26 @@ impl ChatListPrefs {
     pub fn is_favorite(&self, kind: AgentKind, model_id: &str) -> bool {
         self.favorite_models
             .contains(&Self::favorite_key(kind, model_id))
+    }
+
+    pub fn is_grouped(&self, session_id: &str) -> bool {
+        self.groups
+            .values()
+            .flatten()
+            .any(|group| group.session_ids.iter().any(|id| id == session_id))
+    }
+
+    fn remove_from_groups(&mut self, session_ids: &[String]) {
+        for group in self.groups.values_mut().flatten() {
+            group.session_ids.retain(|id| !session_ids.contains(id));
+        }
+    }
+
+    pub fn group_mut(&mut self, group_id: &str) -> Option<&mut ChatGroup> {
+        self.groups
+            .values_mut()
+            .flatten()
+            .find(|group| group.id == group_id)
     }
 }
 
@@ -4671,11 +4704,119 @@ impl AgentStore {
         }
     }
 
+    /// Only chats of the group's project can join it, because groups are listed per project.
+    fn chats_in_project(&self, ids: &[String], project_key: &str) -> Vec<String> {
+        ids.iter()
+            .filter(|id| {
+                self.sessions.iter().any(|metadata| {
+                    metadata.id == **id && metadata.project_root().to_string_lossy() == project_key
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Returns the new group's id, or `None` when the name is empty or the project already has the maximum number of groups.
+    pub fn create_group(
+        &mut self,
+        project_root: &Path,
+        name: &str,
+        ids: &[String],
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let name = name.trim();
+        let project_key = project_root.to_string_lossy().into_owned();
+        let full = self
+            .list_prefs
+            .groups
+            .get(&project_key)
+            .is_some_and(|groups| groups.len() >= MAX_GROUPS_PER_PROJECT);
+        if name.is_empty() || full {
+            return None;
+        }
+        let group_id = uuid::Uuid::new_v4().to_string();
+        let session_ids = self.chats_in_project(ids, &project_key);
+        let group = ChatGroup {
+            id: group_id.clone(),
+            name: name.to_string(),
+            collapsed: false,
+            session_ids,
+        };
+        self.update_list_prefs(
+            |prefs| {
+                prefs.remove_from_groups(&group.session_ids);
+                prefs.groups.entry(project_key).or_default().push(group);
+            },
+            cx,
+        );
+        Some(group_id)
+    }
+
+    pub fn rename_group(&mut self, group_id: &str, name: &str, cx: &mut Context<Self>) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.update_list_prefs(
+            |prefs| {
+                if let Some(group) = prefs.group_mut(group_id) {
+                    group.name = name.to_string();
+                }
+            },
+            cx,
+        );
+    }
+
+    /// The group's chats stay in the list, ungrouped.
+    pub fn delete_group(&mut self, group_id: &str, cx: &mut Context<Self>) {
+        self.update_list_prefs(
+            |prefs| {
+                for groups in prefs.groups.values_mut() {
+                    groups.retain(|group| group.id != group_id);
+                }
+                prefs.groups.retain(|_, groups| !groups.is_empty());
+            },
+            cx,
+        );
+    }
+
+    /// Moves chats into the group, taking them out of any other one, or out of every group when `group_id` is `None`.
+    pub fn move_to_group(
+        &mut self,
+        ids: &[String],
+        group_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let session_ids = match group_id {
+            Some(group_id) => {
+                let Some(project_key) = self
+                    .list_prefs
+                    .groups
+                    .iter()
+                    .find(|(_, groups)| groups.iter().any(|group| group.id == group_id))
+                    .map(|(project_key, _)| project_key.clone())
+                else {
+                    return;
+                };
+                self.chats_in_project(ids, &project_key)
+            }
+            None => ids.to_vec(),
+        };
+        self.update_list_prefs(
+            |prefs| {
+                prefs.remove_from_groups(&session_ids);
+                if let Some(group) = group_id.and_then(|group_id| prefs.group_mut(group_id)) {
+                    group.session_ids.extend(session_ids);
+                }
+            },
+            cx,
+        );
+    }
+
     /// A chat held in memory is open in a tab, running, or waiting for an answer, and the store only releases it once none of that applies.
     fn auto_archive_stale(&mut self, cx: &mut Context<Self>) {
         let days = AgentChatSettings::get_global(cx).archive_inactive_days;
         let now = now();
-        // Chats don't belong to groups yet, so none is protected by one.
         let stale: Vec<String> = self
             .sessions
             .iter()
@@ -4686,7 +4827,7 @@ impl AgentStore {
                         now,
                         days,
                         self.loaded_session(&metadata.id).is_some(),
-                        false,
+                        self.list_prefs.is_grouped(&metadata.id),
                     )
             })
             .map(|metadata| metadata.id.clone())
@@ -5016,6 +5157,9 @@ impl AgentStore {
             .any(|message| message.chat_id == id)
         {
             self.update_saved_messages(|saved| saved.retain(|message| message.chat_id != id), cx);
+        }
+        if self.list_prefs.is_grouped(id) {
+            self.update_list_prefs(|prefs| prefs.remove_from_groups(&[id.to_string()]), cx);
         }
         let id = id.to_string();
         let directory = self.directory.clone();
@@ -8120,6 +8264,203 @@ done
             assert_eq!(archived, id == parent_id);
             assert_eq!(unarchived_at.is_some(), id == side_id);
         }
+    }
+
+    fn new_chats(
+        store: &Entity<AgentStore>,
+        directory: &Path,
+        count: usize,
+        cx: &mut TestAppContext,
+    ) -> Vec<String> {
+        store.update(cx, |store, cx| {
+            (0..count)
+                .map(|_| {
+                    let session =
+                        store.create_session(AgentKind::Claude, directory.to_path_buf(), cx);
+                    session.read(cx).metadata().id.clone()
+                })
+                .collect()
+        })
+    }
+
+    fn group_members(
+        store: &Entity<AgentStore>,
+        cx: &mut TestAppContext,
+    ) -> Vec<(String, Vec<String>)> {
+        store.read_with(cx, |store, _| {
+            store
+                .list_prefs()
+                .groups
+                .values()
+                .flatten()
+                .map(|group| (group.name.clone(), group.session_ids.clone()))
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn moving_a_chat_between_groups_removes_it_from_the_old_one(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let ids = new_chats(&store, directory.path(), 3, cx);
+        let (first, second) = store.update(cx, |store, cx| {
+            let first = store
+                .create_group(directory.path(), "First", &ids[..2], cx)
+                .expect("first group");
+            let second = store
+                .create_group(directory.path(), "Second", &ids[1..2], cx)
+                .expect("second group");
+            (first, second)
+        });
+        assert_eq!(
+            group_members(&store, cx),
+            [
+                ("First".to_string(), vec![ids[0].clone()]),
+                ("Second".to_string(), vec![ids[1].clone()]),
+            ]
+        );
+
+        store.update(cx, |store, cx| {
+            store.move_to_group(&ids[..2], Some(&first), cx);
+            store.move_to_group(&ids[2..], Some(&second), cx);
+        });
+        assert_eq!(
+            group_members(&store, cx),
+            [
+                ("First".to_string(), vec![ids[0].clone(), ids[1].clone()]),
+                ("Second".to_string(), vec![ids[2].clone()]),
+            ]
+        );
+
+        store.update(cx, |store, cx| {
+            store.move_to_group(&ids[1..2], None, cx);
+            store.move_to_group(&ids[..1], Some("no such group"), cx);
+        });
+        cx.run_until_parked();
+        let expected = [
+            ("First".to_string(), vec![ids[0].clone()]),
+            ("Second".to_string(), vec![ids[2].clone()]),
+        ];
+        assert_eq!(group_members(&store, cx), expected);
+        let reopened = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        assert_eq!(group_members(&reopened, cx), expected);
+    }
+
+    #[gpui::test]
+    async fn chats_only_join_groups_of_their_own_project(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let other = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let here = new_chats(&store, directory.path(), 1, cx);
+        let there = new_chats(&store, other.path(), 1, cx);
+        let ids = [here.clone(), there.clone()].concat();
+        store.update(cx, |store, cx| {
+            let group = store
+                .create_group(directory.path(), "Here", &ids, cx)
+                .expect("group");
+            store.move_to_group(&there, Some(&group), cx);
+        });
+        assert_eq!(group_members(&store, cx), [("Here".to_string(), here)]);
+    }
+
+    #[gpui::test]
+    async fn deleting_a_group_keeps_its_chats(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let ids = new_chats(&store, directory.path(), 2, cx);
+        let group = store.update(cx, |store, cx| {
+            store
+                .create_group(directory.path(), "Doomed", &ids, cx)
+                .expect("group")
+        });
+        store.update(cx, |store, cx| store.delete_group(&group, cx));
+        cx.run_until_parked();
+        assert!(group_members(&store, cx).is_empty());
+        store.read_with(cx, |store, cx| {
+            assert_eq!(
+                store
+                    .sessions_in(&[directory.path().to_path_buf()], cx)
+                    .len(),
+                2
+            );
+            assert!(!store.list_prefs().is_grouped(&ids[0]));
+        });
+    }
+
+    #[gpui::test]
+    async fn group_limit_is_100(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let created = store.update(cx, |store, cx| {
+            (0..MAX_GROUPS_PER_PROJECT + 1)
+                .map(|number| {
+                    store.create_group(directory.path(), &format!("Group {number}"), &[], cx)
+                })
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            created[..MAX_GROUPS_PER_PROJECT]
+                .iter()
+                .all(Option::is_some)
+        );
+        assert!(created[MAX_GROUPS_PER_PROJECT].is_none());
+        assert_eq!(group_members(&store, cx).len(), MAX_GROUPS_PER_PROJECT);
+
+        let first = created[0].clone().expect("first group");
+        store.update(cx, |store, cx| store.delete_group(&first, cx));
+        let again = store.update(cx, |store, cx| {
+            store.create_group(directory.path(), "Again", &[], cx)
+        });
+        assert!(again.is_some());
+    }
+
+    #[gpui::test]
+    async fn deleted_chats_are_dropped_from_groups(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let ids = new_chats(&store, directory.path(), 2, cx);
+        store.update(cx, |store, cx| {
+            store.create_group(directory.path(), "Mixed", &ids, cx)
+        });
+        store.update(cx, |store, cx| store.delete_session(&ids[0], cx));
+        cx.run_until_parked();
+        assert_eq!(
+            group_members(&store, cx),
+            [("Mixed".to_string(), vec![ids[1].clone()])]
+        );
+        let reopened = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        assert_eq!(
+            group_members(&reopened, cx),
+            [("Mixed".to_string(), vec![ids[1].clone()])]
+        );
+    }
+
+    #[gpui::test]
+    async fn grouped_chats_are_never_auto_archived(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let ids = new_chats(&store, directory.path(), 2, cx);
+        store.update(cx, |store, cx| {
+            store.live.clear();
+            for id in &ids {
+                store.update_session_metadata(id, |metadata| metadata.updated_at = 1, cx);
+            }
+            store.create_group(directory.path(), "Keep", &ids[..1], cx);
+            store.auto_archive_stale(cx);
+        });
+        cx.run_until_parked();
+        store.read_with(cx, |store, _| {
+            let archived = |id: &String| {
+                store
+                    .sessions_metadata()
+                    .find(|metadata| metadata.id == *id)
+                    .map(|metadata| metadata.archived)
+            };
+            assert_eq!(archived(&ids[0]), Some(false));
+            assert_eq!(archived(&ids[1]), Some(true));
+        });
     }
 
     #[gpui::test]

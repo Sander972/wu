@@ -3,7 +3,10 @@ use crate::{
     NewCodexChat, NewOpencodeChat, ToggleFocus,
     chat_style::{accent, ink, selected_row, text_faint, ui, wash, working_animation},
     chat_view::ChatView,
-    session::{AgentSession, AgentStore, ChatListPrefs, ChatOutcome, SessionSummary},
+    session::{
+        AgentSession, AgentStore, ChatListPrefs, ChatOutcome, MAX_GROUPS_PER_PROJECT,
+        SessionSummary,
+    },
 };
 use anyhow::Result;
 use collections::{HashMap, HashSet};
@@ -12,10 +15,10 @@ use gpui::{
     Action, AnimationExt as _, AnyElement, App, AsyncWindowContext, Bounds, ClickEvent,
     ClipboardItem, Context, CursorStyle, DismissEvent, EdgeFade, Element, ElementId, Entity,
     EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, PromptButton,
-    PromptLevel, Render, RenderOnce, ScrollHandle, SharedString, Styled, Subscription, Svg,
-    TextStyleRefinement, Transformation, WeakEntity, Window, anchored, deferred, div, percentage,
-    point, px, rgb, svg,
+    IntoElement, LayoutId, Modifiers, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
+    PromptButton, PromptLevel, Render, RenderOnce, ScrollHandle, SharedString, Styled,
+    Subscription, Svg, TextStyleRefinement, Transformation, WeakEntity, Window, anchored, deferred,
+    div, percentage, point, px, rgb, svg,
 };
 use i18n::{n, t, tc};
 use project::Project;
@@ -226,6 +229,70 @@ fn open_chat_in(
 
 enum Renaming {
     Chat(SharedString),
+    Group(SharedString),
+}
+
+#[derive(Default)]
+struct Selection {
+    ids: Vec<SharedString>,
+    anchor: Option<SharedString>,
+}
+
+impl Selection {
+    fn contains(&self, id: &SharedString) -> bool {
+        self.ids.contains(id)
+    }
+
+    fn clear(&mut self) {
+        self.ids.clear();
+        self.anchor = None;
+    }
+
+    /// Returns whether the click only changed the selection, rather than being a plain click that opens the chat.
+    fn click(
+        &mut self,
+        visible: &[SharedString],
+        clicked: &SharedString,
+        modifiers: Modifiers,
+    ) -> bool {
+        if modifiers.shift {
+            let anchor = self.anchor.get_or_insert_with(|| clicked.clone());
+            let position = |wanted: &SharedString| visible.iter().position(|id| id == wanted);
+            self.ids = match (position(anchor), position(clicked)) {
+                (Some(from), Some(to)) => visible
+                    .get(from.min(to)..=from.max(to))
+                    .unwrap_or_default()
+                    .to_vec(),
+                _ => vec![clicked.clone()],
+            };
+            true
+        } else if modifiers.secondary() {
+            match self.ids.iter().position(|id| id == clicked) {
+                Some(position) => {
+                    self.ids.remove(position);
+                }
+                None => self.ids.push(clicked.clone()),
+            }
+            self.anchor = Some(clicked.clone());
+            true
+        } else {
+            self.ids.clear();
+            self.anchor = Some(clicked.clone());
+            false
+        }
+    }
+}
+
+fn menu_action(
+    panel: &WeakEntity<AgentPanel>,
+    handler: Box<dyn Fn(&mut AgentPanel, &mut Window, &mut Context<AgentPanel>)>,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    let panel = panel.clone();
+    move |window: &mut Window, cx: &mut App| {
+        panel
+            .update(cx, |panel, cx| handler(panel, window, cx))
+            .log_err();
+    }
 }
 
 struct RenameField {
@@ -249,6 +316,7 @@ pub struct AgentPanel {
     renaming: Option<RenameField>,
     row_menu: Option<RowMenu>,
     hovered_row: Option<SharedString>,
+    selection: Selection,
     list_scroll: ScrollHandle,
     list_model: Option<ListModel>,
     showing_saved: bool,
@@ -320,6 +388,7 @@ impl AgentPanel {
             renaming: None,
             row_menu: None,
             hovered_row: None,
+            selection: Selection::default(),
             list_scroll: ScrollHandle::new(),
             list_model: None,
             showing_saved: false,
@@ -382,17 +451,26 @@ impl AgentPanel {
 
     fn confirm_delete(
         &mut self,
-        id: SharedString,
+        ids: Vec<String>,
         title: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let (message, detail) = if ids.len() == 1 {
+            (
+                t!("Delete \"{title}\"?", title = title),
+                t!("The chat and its history are removed from Wu. This can't be undone."),
+            )
+        } else {
+            (
+                t!("Delete {count} chats?", count = ids.len()),
+                t!("The chats and their history are removed from Wu. This can't be undone."),
+            )
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
-            &t!("Delete \"{title}\"?", title = title),
-            Some(&t!(
-                "The chat and its history are removed from Wu. This can't be undone."
-            )),
+            &message,
+            Some(&detail),
             &[
                 PromptButton::new(t!("Delete")),
                 PromptButton::cancel(t!("Cancel")),
@@ -404,13 +482,62 @@ impl AgentPanel {
                 return;
             }
             this.update_in(cx, |this, window, cx| {
-                this.close_views(&id, window, cx);
-                this.store
-                    .update(cx, |store, cx| store.delete_session(&id, cx));
+                this.selection.clear();
+                for id in &ids {
+                    this.close_views(id, window, cx);
+                    this.store
+                        .update(cx, |store, cx| store.delete_session(id, cx));
+                }
             })
             .log_err();
         })
         .detach();
+    }
+
+    fn move_to_group(&mut self, ids: &[String], group_id: Option<&str>, cx: &mut Context<Self>) {
+        self.selection.clear();
+        self.store
+            .update(cx, |store, cx| store.move_to_group(ids, group_id, cx));
+    }
+
+    fn create_group(
+        &mut self,
+        project_root: &Path,
+        ids: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selection.clear();
+        let name = t!("New group");
+        let created = self.store.update(cx, |store, cx| {
+            store.create_group(project_root, &name, ids, cx)
+        });
+        match created {
+            Some(group_id) => self.start_rename(
+                Renaming::Group(group_id.into()),
+                name.to_string(),
+                window,
+                cx,
+            ),
+            None => {
+                self.workspace
+                    .update(cx, |workspace, cx| {
+                        workspace.show_toast(
+                            Toast::new(
+                                NotificationId::unique::<AgentPanel>(),
+                                t!(
+                                    "A project can have at most {count} groups.",
+                                    count = MAX_GROUPS_PER_PROJECT
+                                )
+                                .to_string(),
+                            )
+                            .autohide(),
+                            cx,
+                        )
+                    })
+                    .log_err();
+            }
+        }
     }
 
     fn start_rename(
@@ -422,6 +549,7 @@ impl AgentPanel {
     ) {
         let font_size = match target {
             Renaming::Chat(_) => ui(13.),
+            Renaming::Group(_) => ui(12.),
         };
         let editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
@@ -459,6 +587,7 @@ impl AgentPanel {
             let text = field.editor.read(cx).text(cx);
             self.store.update(cx, |store, cx| match &field.target {
                 Renaming::Chat(id) => store.rename_session(id, text, cx),
+                Renaming::Group(id) => store.rename_group(id, &text, cx),
             });
         }
         window.focus(&self.focus_handle, cx);
@@ -477,19 +606,32 @@ impl AgentPanel {
         let pinned = session.pinned;
         let archived = session.archived;
         let native_id = session.native_session_id.clone();
+        let project_root = session.project_root.clone();
+        let groupable = !session.side_chat;
+        if !(self.selection.ids.len() > 1 && self.selection.contains(&id)) {
+            self.selection.clear();
+        }
+        let ids: Vec<String> = if self.selection.ids.is_empty() {
+            vec![session.id.clone()]
+        } else {
+            self.selection.ids.iter().map(ToString::to_string).collect()
+        };
+        let multiple = ids.len() > 1;
+        let prefs = self.store.read(cx).list_prefs();
+        let any_grouped = ids.iter().any(|id| prefs.is_grouped(id));
+        let groups: Vec<(String, SharedString)> = prefs
+            .groups
+            .get(project_root.to_string_lossy().as_ref())
+            .map(|groups| {
+                groups
+                    .iter()
+                    .map(|group| (group.id.clone(), group.name.clone().into()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let panel = cx.entity().downgrade();
         let menu = ContextMenu::build(window, cx, move |menu, _, _| {
-            let action = |panel: &WeakEntity<AgentPanel>,
-                          handler: Box<
-                dyn Fn(&mut AgentPanel, &mut Window, &mut Context<AgentPanel>),
-            >| {
-                let panel = panel.clone();
-                move |window: &mut Window, cx: &mut App| {
-                    panel
-                        .update(cx, |panel, cx| handler(panel, window, cx))
-                        .log_err();
-                }
-            };
+            let action = menu_action;
             let pin_label = if pinned {
                 tc!("chat", "Unpin")
             } else {
@@ -500,8 +642,10 @@ impl AgentPanel {
             } else {
                 t!("Archive")
             };
-            let menu = menu
-                .entry(t!("Rename"), None, {
+            let menu = if multiple {
+                menu
+            } else {
+                menu.entry(t!("Rename"), None, {
                     let (id, title) = (id.clone(), title.clone());
                     action(
                         &panel,
@@ -515,52 +659,161 @@ impl AgentPanel {
                         }),
                     )
                 })
+            };
+            let menu = menu
                 .entry(pin_label, None, {
-                    let id = id.clone();
+                    let ids = ids.clone();
                     action(
                         &panel,
                         Box::new(move |panel, _, cx| {
-                            panel
-                                .store
-                                .update(cx, |store, cx| store.set_pinned(&id, !pinned, cx))
-                        }),
-                    )
-                })
-                .entry(archive_label, None, {
-                    let id = id.clone();
-                    action(
-                        &panel,
-                        Box::new(move |panel, _, cx| {
+                            panel.selection.clear();
                             panel.store.update(cx, |store, cx| {
-                                store.set_archived(&[id.to_string()], !archived, cx)
+                                for id in &ids {
+                                    store.set_pinned(id, !pinned, cx);
+                                }
                             })
                         }),
                     )
                 })
-                .separator()
-                .entry(t!("Fork Chat"), None, {
+                .entry(archive_label, None, {
+                    let ids = ids.clone();
+                    action(
+                        &panel,
+                        Box::new(move |panel, _, cx| {
+                            panel.selection.clear();
+                            panel
+                                .store
+                                .update(cx, |store, cx| store.set_archived(&ids, !archived, cx))
+                        }),
+                    )
+                });
+            let menu = if groupable {
+                menu.submenu(t!("Move to group"), {
+                    let (ids, groups, project_root, panel) = (
+                        ids.clone(),
+                        groups.clone(),
+                        project_root.clone(),
+                        panel.clone(),
+                    );
+                    move |mut menu, _, _| {
+                        for (group_id, name) in &groups {
+                            menu = menu.entry(name.clone(), None, {
+                                let (ids, group_id) = (ids.clone(), group_id.clone());
+                                action(
+                                    &panel,
+                                    Box::new(move |panel, _, cx| {
+                                        panel.move_to_group(&ids, Some(&group_id), cx)
+                                    }),
+                                )
+                            });
+                        }
+                        if !groups.is_empty() {
+                            menu = menu.separator();
+                        }
+                        menu = menu.entry(t!("New group…"), None, {
+                            let (ids, project_root) = (ids.clone(), project_root.clone());
+                            action(
+                                &panel,
+                                Box::new(move |panel, window, cx| {
+                                    panel.create_group(&project_root, &ids, window, cx)
+                                }),
+                            )
+                        });
+                        if any_grouped {
+                            menu = menu.entry(t!("Remove from group"), None, {
+                                let ids = ids.clone();
+                                action(
+                                    &panel,
+                                    Box::new(move |panel, _, cx| {
+                                        panel.move_to_group(&ids, None, cx)
+                                    }),
+                                )
+                            });
+                        }
+                        menu
+                    }
+                })
+            } else {
+                menu
+            };
+            let menu = if multiple {
+                menu
+            } else {
+                let menu = menu.separator().entry(t!("Fork Chat"), None, {
                     let id = id.clone();
                     action(
                         &panel,
                         Box::new(move |panel, window, cx| panel.fork(id.clone(), window, cx)),
                     )
                 });
-            let menu = match native_id.clone() {
-                Some(native_id) => menu.entry(t!("Copy Agent Session ID"), None, move |_, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(native_id.clone()))
-                }),
-                None => menu,
+                match native_id.clone() {
+                    Some(native_id) => {
+                        menu.entry(t!("Copy Agent Session ID"), None, move |_, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(native_id.clone()))
+                        })
+                    }
+                    None => menu,
+                }
             };
             menu.separator().entry(t!("Delete…"), None, {
-                let (id, title) = (id.clone(), title.clone());
+                let (ids, title) = (ids.clone(), title.clone());
                 action(
                     &panel,
                     Box::new(move |panel, window, cx| {
-                        panel.confirm_delete(id.clone(), title.clone(), window, cx)
+                        panel.confirm_delete(ids.clone(), title.clone(), window, cx)
                     }),
                 )
             })
         });
+        self.present_menu(menu, position, window, cx);
+    }
+
+    fn show_group_menu(
+        &mut self,
+        group_id: SharedString,
+        name: SharedString,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panel = cx.entity().downgrade();
+        let menu = ContextMenu::build(window, cx, move |menu, _, _| {
+            menu.entry(t!("Rename"), None, {
+                let group_id = group_id.clone();
+                menu_action(
+                    &panel,
+                    Box::new(move |panel, window, cx| {
+                        panel.start_rename(
+                            Renaming::Group(group_id.clone()),
+                            name.to_string(),
+                            window,
+                            cx,
+                        )
+                    }),
+                )
+            })
+            .entry(t!("Delete group"), None, {
+                let group_id = group_id.clone();
+                menu_action(
+                    &panel,
+                    Box::new(move |panel, _, cx| {
+                        panel
+                            .store
+                            .update(cx, |store, cx| store.delete_group(&group_id, cx))
+                    }),
+                )
+            })
+        });
+        self.present_menu(menu, position, window, cx);
+    }
+
+    fn present_menu(
+        &mut self,
+        menu: Entity<ContextMenu>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let dismiss = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _, cx| {
             this.row_menu = None;
             cx.notify();
@@ -988,6 +1241,7 @@ impl AgentPanel {
     ) -> AnyElement {
         let session = &row.session;
         let id = row.id.clone();
+        let selected = selected || self.selection.contains(&id);
         let colors = cx.theme().colors();
         let text = colors.text;
         let subline = colors.text_muted.opacity(0.5);
@@ -1122,7 +1376,16 @@ impl AgentPanel {
             }))
             .on_click(cx.listener({
                 let id = id.clone();
-                move |this, _, window, cx| this.open_session(id.clone(), window, cx)
+                move |this, event: &ClickEvent, window, cx| {
+                    let visible = this
+                        .list_model
+                        .as_ref()
+                        .map_or(&[][..], |model| model.row_ids.as_slice());
+                    if !this.selection.click(visible, &id, event.modifiers()) {
+                        this.open_session(id.clone(), window, cx);
+                    }
+                    cx.notify();
+                }
             }))
             .on_mouse_down(
                 MouseButton::Right,
@@ -1188,21 +1451,44 @@ impl AgentPanel {
         let faint = colors.text_muted.opacity(0.5);
         let key = group.key.clone();
         let collapsed = group.collapsed;
-        let label_element = faded_label(
-            group.label_id.clone(),
-            false,
-            div()
-                .text_size(ui(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(faint)
-                .child(group.label.clone()),
-        );
+        let renaming = group.custom.as_ref().and_then(|(group_id, _)| {
+            self.renaming.as_ref().filter(|field| {
+                matches!(&field.target, Renaming::Group(renaming_id) if renaming_id == group_id)
+            })
+        });
+        let label_element = match renaming {
+            Some(field) => self.rename_field(&field.editor, cx),
+            None => faded_label(
+                group.label_id.clone(),
+                false,
+                div()
+                    .text_size(ui(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(faint)
+                    .child(group.label.clone()),
+            )
+            .into_any_element(),
+        };
         h_flex()
             .id(key.clone())
             .h(px(DISCLOSURE_HEADER_HEIGHT))
             .px(px(SPACE_SM))
             .gap(px(SPACE_SM))
             .cursor_pointer()
+            .when_some(group.custom.clone(), |this, (group_id, name)| {
+                this.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.show_group_menu(
+                            group_id.clone(),
+                            name.clone(),
+                            event.position,
+                            window,
+                            cx,
+                        )
+                    }),
+                )
+            })
             .child(label_element)
             .child(div().flex_1())
             .when(!group.unarchive_ids.is_empty(), |this| {
@@ -1224,22 +1510,29 @@ impl AgentPanel {
                 )
             })
             .child(disclosure_chevron(!collapsed, faint))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let key = key.to_string();
-                this.store.update(cx, |store, cx| {
-                    store.update_list_prefs(
-                        |prefs| {
-                            if let Some(position) =
-                                prefs.collapsed_sections.iter().position(|id| *id == key)
-                            {
-                                prefs.collapsed_sections.remove(position);
-                            } else {
-                                prefs.collapsed_sections.push(key);
-                            }
-                        },
-                        cx,
-                    )
-                })
+            .on_click(cx.listener({
+                let custom_id = group.custom.as_ref().map(|(group_id, _)| group_id.clone());
+                move |this, _, _, cx| {
+                    let key = key.to_string();
+                    this.store.update(cx, |store, cx| {
+                        store.update_list_prefs(
+                            |prefs| {
+                                if let Some(group_id) = &custom_id {
+                                    if let Some(group) = prefs.group_mut(group_id) {
+                                        group.collapsed = !group.collapsed;
+                                    }
+                                } else if let Some(position) =
+                                    prefs.collapsed_sections.iter().position(|id| *id == key)
+                                {
+                                    prefs.collapsed_sections.remove(position);
+                                } else {
+                                    prefs.collapsed_sections.push(key);
+                                }
+                            },
+                            cx,
+                        )
+                    })
+                }
             }))
             .into_any_element()
     }
@@ -1274,7 +1567,16 @@ impl AgentPanel {
             .filter(|session| Self::matches_search(session, &query))
             .map(Rc::new)
             .collect();
-        let layout = layout_list(&sessions, prefs, searching);
+        // Groups are per project, so only those of the projects being listed take part in the layout.
+        let mut layout_prefs = prefs.clone();
+        if !prefs.all_projects {
+            layout_prefs.groups.retain(|project_key, _| {
+                roots
+                    .iter()
+                    .any(|root| root.to_string_lossy() == project_key.as_str())
+            });
+        }
+        let layout = layout_list(&sessions, &layout_prefs, searching);
         let groups: Vec<GroupModel> = layout
             .active
             .into_iter()
@@ -1282,7 +1584,7 @@ impl AgentPanel {
             .enumerate()
             .map(|(index, group)| GroupModel::new(group, index > 0, now))
             .collect();
-        let row_ids = groups
+        let row_ids: Vec<SharedString> = groups
             .iter()
             .flat_map(|group| group.rows.iter().map(|row| row.id.clone()))
             .collect();
@@ -1317,6 +1619,7 @@ impl AgentPanel {
         {
             self.hovered_row = None;
         }
+        self.selection.ids.retain(|id| model.row_ids.contains(id));
     }
 
     fn render_list(&self, model: &ListModel, cx: &Context<Self>) -> AnyElement {
@@ -1400,7 +1703,7 @@ struct ListModel {
     searching: bool,
     compact: bool,
     groups: Vec<GroupModel>,
-    row_ids: HashSet<SharedString>,
+    row_ids: Vec<SharedString>,
 }
 
 impl ListModel {
@@ -1424,6 +1727,8 @@ struct GroupModel {
     top_gap: bool,
     rows: Vec<RowModel>,
     unarchive_ids: Vec<String>,
+    /// The id and name of a custom group.
+    custom: Option<(SharedString, SharedString)>,
 }
 
 impl GroupModel {
@@ -1450,6 +1755,15 @@ impl GroupModel {
                 disclosure_label(&t!("Archived"), collapsed, group.total),
                 true,
             ),
+            GroupKind::Custom { id, name } => (
+                format!("agent-group:{id}").into(),
+                disclosure_label(name, collapsed, group.total),
+                true,
+            ),
+        };
+        let custom = match &group.kind {
+            GroupKind::Custom { id, name } => Some((id.clone().into(), name.clone().into())),
+            _ => None,
         };
         let unarchive_ids = if group.kind == GroupKind::Archived {
             group
@@ -1474,6 +1788,7 @@ impl GroupModel {
                 .map(|row| RowModel::new(row.session.clone(), row.nested, now))
                 .collect(),
             unarchive_ids,
+            custom,
         }
     }
 }
@@ -1515,6 +1830,7 @@ enum GroupKind {
     Project(PathBuf),
     Chats,
     Archived,
+    Custom { id: String, name: String },
 }
 
 struct ListGroup<'a> {
@@ -1546,7 +1862,19 @@ fn layout_list<'a>(
     let is_collapsed = |key: &str| prefs.collapsed_sections.iter().any(|id| id == key);
     let ids: HashSet<&str> = sessions.iter().map(|session| session.id.as_str()).collect();
     let mut side_chats: HashMap<&str, Vec<&'a Rc<SessionSummary>>> = HashMap::default();
+    let group_of: HashMap<&str, &str> = prefs
+        .groups
+        .values()
+        .flatten()
+        .flat_map(|group| {
+            group
+                .session_ids
+                .iter()
+                .map(|id| (id.as_str(), group.id.as_str()))
+        })
+        .collect();
     let mut pinned = Vec::new();
+    let mut grouped: HashMap<&str, Vec<&'a Rc<SessionSummary>>> = HashMap::default();
     let mut rest = Vec::new();
     let mut archived = Vec::new();
     for session in sessions {
@@ -1554,11 +1882,15 @@ fn layout_list<'a>(
             .parent_id
             .as_deref()
             .filter(|parent| session.side_chat && ids.contains(parent));
+        let custom_group = group_of.get(session.id.as_str());
         match shown_parent {
             Some(parent) => side_chats.entry(parent).or_default().push(session),
             None if session.archived => archived.push(session),
             None if session.pinned => pinned.push(session),
-            None => rest.push(session),
+            None => match custom_group {
+                Some(group_id) => grouped.entry(group_id).or_default().push(session),
+                None => rest.push(session),
+            },
         }
     }
     let group = |kind: GroupKind, members: Vec<&'a Rc<SessionSummary>>, collapsed: bool| {
@@ -1594,6 +1926,25 @@ fn layout_list<'a>(
     let mut active = Vec::new();
     if !pinned.is_empty() {
         active.push(group(GroupKind::Pinned, pinned, is_collapsed(PINNED_KEY)));
+    }
+    let mut projects_with_groups: Vec<_> = prefs.groups.iter().collect();
+    projects_with_groups.sort_by_key(|(project_key, _)| *project_key);
+    for custom in projects_with_groups
+        .into_iter()
+        .flat_map(|(_, groups)| groups)
+    {
+        let members = grouped.remove(custom.id.as_str()).unwrap_or_default();
+        if searching && members.is_empty() {
+            continue;
+        }
+        active.push(group(
+            GroupKind::Custom {
+                id: custom.id.clone(),
+                name: custom.name.clone(),
+            },
+            members,
+            custom.collapsed,
+        ));
     }
     if prefs.group_by_project && !rest.is_empty() {
         let mut project_positions: HashMap<&Path, usize> = HashMap::default();
@@ -2382,6 +2733,103 @@ mod tests {
         let layout = layout_list(&restored, &prefs, false);
         assert!(layout.archived.is_none());
         assert_eq!(row_ids(&layout.active[0]), ["old"]);
+    }
+
+    #[test]
+    fn shift_click_selects_a_range_and_ctrl_click_toggles() {
+        let id = |id: &str| SharedString::from(id.to_string());
+        let visible: Vec<SharedString> = ["a", "b", "c", "d", "e"].into_iter().map(id).collect();
+        let selected = |selection: &Selection| {
+            selection
+                .ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        };
+        let mut selection = Selection::default();
+
+        assert!(!selection.click(&visible, &id("b"), Modifiers::default()));
+        assert!(selected(&selection).is_empty());
+        assert!(selection.click(&visible, &id("d"), Modifiers::shift()));
+        assert_eq!(selected(&selection), ["b", "c", "d"]);
+        assert!(selection.click(&visible, &id("a"), Modifiers::shift()));
+        assert_eq!(selected(&selection), ["a", "b"]);
+
+        assert!(selection.click(&visible, &id("e"), Modifiers::secondary_key()));
+        assert_eq!(selected(&selection), ["a", "b", "e"]);
+        assert!(selection.click(&visible, &id("a"), Modifiers::secondary_key()));
+        assert_eq!(selected(&selection), ["b", "e"]);
+        assert!(selection.click(&visible, &id("c"), Modifiers::shift()));
+        assert_eq!(selected(&selection), ["a", "b", "c"]);
+
+        assert!(!selection.click(&visible, &id("d"), Modifiers::default()));
+        assert!(selected(&selection).is_empty());
+        assert!(selection.click(&visible, &id("gone"), Modifiers::shift()));
+        assert_eq!(selected(&selection), ["gone"]);
+    }
+
+    #[test]
+    fn custom_groups_sit_after_pinned_and_keep_their_chats_out_of_the_rest() {
+        let pinned = SessionSummary {
+            pinned: true,
+            ..session("pinned", "/a")
+        };
+        let archived = SessionSummary {
+            archived: true,
+            ..session("archived", "/a")
+        };
+        let sessions = shared(vec![
+            session("loose", "/a"),
+            session("kept", "/a"),
+            pinned,
+            archived,
+        ]);
+        let group = |id: &str, collapsed: bool, session_ids: &[&str]| crate::session::ChatGroup {
+            id: id.to_string(),
+            name: id.to_string(),
+            collapsed,
+            session_ids: session_ids.iter().map(|id| id.to_string()).collect(),
+        };
+        let mut prefs = ChatListPrefs::default();
+        prefs.groups.insert(
+            "/a".to_string(),
+            vec![
+                group("work", false, &["kept", "pinned", "archived"]),
+                group("empty", false, &[]),
+            ],
+        );
+
+        let layout = layout_list(&sessions, &prefs, false);
+        let shown: Vec<(String, Vec<String>)> = layout
+            .active
+            .iter()
+            .map(|group| {
+                let name = match &group.kind {
+                    GroupKind::Custom { name, .. } => name.clone(),
+                    kind => format!("{kind:?}"),
+                };
+                (name, row_ids(group))
+            })
+            .collect();
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            shown,
+            [
+                ("Pinned".to_string(), ids(&["pinned"])),
+                ("work".to_string(), ids(&["kept"])),
+                ("empty".to_string(), ids(&[])),
+                ("Chats".to_string(), ids(&["loose"])),
+            ]
+        );
+        assert_eq!(layout.archived.map(|group| group.total), Some(1));
+
+        let searching = layout_list(&sessions, &prefs, true);
+        let names: Vec<_> = searching.active.iter().map(|group| &group.kind).collect();
+        assert!(
+            !names
+                .iter()
+                .any(|kind| matches!(kind, GroupKind::Custom { name, .. } if name == "empty"))
+        );
     }
 
     #[test]
