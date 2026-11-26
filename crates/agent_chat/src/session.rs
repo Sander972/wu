@@ -1268,6 +1268,9 @@ pub struct AgentSession {
     restart_on_next_send: bool,
     unsent_settings: bool,
     runs_started: u64,
+    /// Control requests that started a one-off agent process because no run was live.
+    #[cfg(test)]
+    pub(crate) one_off_controls: usize,
     native_fork_prompt: Option<Prompt>,
     native_fork_failed: bool,
     native_fork_errors: Vec<String>,
@@ -1359,6 +1362,8 @@ impl AgentSession {
             restart_on_next_send: false,
             unsent_settings: false,
             runs_started: 0,
+            #[cfg(test)]
+            one_off_controls: 0,
             native_fork_prompt: None,
             native_fork_failed: false,
             title_requested: false,
@@ -2530,6 +2535,10 @@ impl AgentSession {
                 })
             }
             None => {
+                #[cfg(test)]
+                {
+                    self.one_off_controls += 1;
+                }
                 let harness = self.harness.clone();
                 let cwd = self.metadata.cwd.clone();
                 let resume = self.metadata.native_session_id.clone();
@@ -8672,6 +8681,14 @@ done
             });
             receiver
         })
+    }
+
+    /// Ends the live run the way an idle release does.
+    pub(crate) fn drop_live_run(session: &Entity<AgentSession>, cx: &mut TestAppContext) {
+        session.update(cx, |session, cx| {
+            session.run = None;
+            cx.notify();
+        });
     }
 
     pub(crate) fn feed_stopped_turn(

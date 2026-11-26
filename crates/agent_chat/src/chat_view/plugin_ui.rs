@@ -452,6 +452,8 @@ pub(crate) struct PluginUi {
     /// A pane appeared or another one was shown: the next frame opens the side pane for it.
     pub reveal_panes: bool,
     pub pane_offsets: HashMap<String, u32>,
+    /// Panes with a `ui_scroll` in flight, with the rows scrolled since it was sent.
+    pending_scrolls: HashMap<String, i32>,
     pub rem: Pixels,
     cache: HashMap<Site, Rendered>,
     /// Invalidated drawings: still shown, so the row keeps its height, until the new one arrives.
@@ -487,6 +489,7 @@ impl PluginUi {
             focus_requested: None,
             reveal_panes: false,
             pane_offsets: HashMap::default(),
+            pending_scrolls: HashMap::default(),
             rem: px(16.),
             cache: HashMap::default(),
             stale: HashSet::default(),
@@ -571,6 +574,7 @@ impl PluginUi {
         self.focused_pane = None;
         self.focus_requested = None;
         self.pane_offsets.clear();
+        self.pending_scrolls.clear();
         let attachment = std::mem::replace(&mut self.attachment, Attachment::Detached);
         // A pending attach is detached too: the agent handles both in the order they were sent.
         if !matches!(attachment, Attachment::Attached | Attachment::Pending(_)) {
@@ -603,7 +607,7 @@ impl PluginUi {
         cx: &mut Context<ChatView>,
     ) -> Option<&Rendered> {
         let key = (component.to_owned(), instance_id.to_owned());
-        if !self.may_ask(&key) || !self.outdated(&key, &props) {
+        if !self.may_ask(&key) || !self.can_send(session, cx) || !self.outdated(&key, &props) {
             return self.cache.get(&key);
         }
         self.requests_sent += 1;
@@ -768,13 +772,21 @@ impl PluginUi {
                 true
             }
             "ui_panes" => {
-                let panes = event["panes"]
+                let mut panes: Vec<PaneInfo> = Vec::new();
+                for pane in event["panes"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .filter_map(PaneInfo::from_roster)
-                    .take(MAX_PANES)
-                    .collect::<Vec<_>>();
+                {
+                    if panes.len() == MAX_PANES {
+                        break;
+                    }
+                    // A repeated id keeps its first entry, so every tab names one pane.
+                    if panes.iter().all(|kept| kept.id != pane.id) {
+                        panes.push(pane);
+                    }
+                }
                 let shown = event["shown_id"].as_str().map(str::to_owned);
                 // The CLI sends the roster again after every attach; only a change opens the side pane.
                 self.reveal_panes |= panes
@@ -791,6 +803,10 @@ impl PluginUi {
         }
     }
 
+    fn is_attached_or_has_panes(&self) -> bool {
+        self.attachment != Attachment::Detached || !self.panes.is_empty()
+    }
+
     /// The pane `shown_id` names, or the first one when it names none of them.
     pub fn visible_pane(&self) -> Option<&PaneInfo> {
         self.panes
@@ -805,35 +821,44 @@ impl PluginUi {
             .map_or(0, |rendered| rows_of(&rendered.tree))
     }
 
-    /// Sends a pane request and applies its answer, unless the chat detached or started another run meanwhile.
+    fn can_send(&self, session: &Entity<AgentSession>, cx: &App) -> bool {
+        // Without a live run a control request would start a one-off agent process.
+        self.attachment == Attachment::Attached && session.read(cx).has_live_run()
+    }
+
+    /// Sends a pane request and applies its answer (`None` when it failed), unless the chat detached or started another run meanwhile; false when nothing was sent.
     fn pane_request(
         &self,
         session: &Entity<AgentSession>,
         request: Value,
         cx: &mut Context<ChatView>,
-        apply: impl FnOnce(&mut PluginUi, &Value) + 'static,
-    ) {
-        if self.attachment != Attachment::Attached {
-            return;
+        apply: impl FnOnce(&mut ChatView, Option<&Value>, &mut Context<ChatView>) + 'static,
+    ) -> bool {
+        if !self.can_send(session, cx) {
+            return false;
         }
         let run = self.run;
         let answer = session.update(cx, |session, cx| session.control(request, cx));
         cx.spawn(async move |this, cx| {
-            let answer = answer.await?;
+            let answer = answer.await;
             this.update(cx, |view, cx| {
                 if view.plugin_ui.run == run && view.plugin_ui.attachment == Attachment::Attached {
-                    apply(&mut view.plugin_ui, &answer);
+                    apply(view, answer.as_ref().ok(), cx);
                     cx.notify();
                 }
-            })
+            })?;
+            answer.map(|_| ())
         })
         .detach_and_log_err(cx);
+        true
     }
 
     pub fn show_pane(&self, session: &Entity<AgentSession>, id: &str, cx: &mut Context<ChatView>) {
         let request = json!({ "subtype": "ui_pane_show", "id": id, "surface": SURFACE, "client_id": self.client_id });
-        self.pane_request(session, request, cx, |plugin_ui, answer| {
-            plugin_ui.shown_pane = answer["shown_id"].as_str().map(str::to_owned);
+        self.pane_request(session, request, cx, |view, answer, _| {
+            if let Some(answer) = answer {
+                view.plugin_ui.shown_pane = answer["shown_id"].as_str().map(str::to_owned);
+            }
         });
     }
 
@@ -845,8 +870,10 @@ impl PluginUi {
         cx: &mut Context<ChatView>,
     ) {
         let request = json!({ "subtype": "ui_pane_focus", "id": id, "surface": SURFACE, "client_id": self.client_id });
-        self.pane_request(session, request, cx, |plugin_ui, answer| {
-            plugin_ui.focused_pane = answer["focused_id"].as_str().map(str::to_owned);
+        self.pane_request(session, request, cx, |view, answer, _| {
+            if let Some(answer) = answer {
+                view.plugin_ui.focused_pane = answer["focused_id"].as_str().map(str::to_owned);
+            }
         });
     }
 
@@ -854,10 +881,11 @@ impl PluginUi {
     pub fn close_pane(&self, session: &Entity<AgentSession>, id: &str, cx: &mut Context<ChatView>) {
         let request = json!({ "subtype": "ui_close", "id": id, "client_id": self.client_id });
         let id = id.to_owned();
-        self.pane_request(session, request, cx, move |plugin_ui, answer| {
-            if answer["closed"] != true {
+        self.pane_request(session, request, cx, move |view, answer, _| {
+            if answer.is_none_or(|answer| answer["closed"] != true) {
                 return;
             }
+            let plugin_ui = &mut view.plugin_ui;
             plugin_ui.panes.retain(|pane| pane.id != id);
             if plugin_ui.shown_pane.as_ref() == Some(&id) {
                 plugin_ui.shown_pane = None;
@@ -868,8 +896,9 @@ impl PluginUi {
         });
     }
 
+    /// One scroll per pane is in flight at a time: steps taken meanwhile are added up and sent from the offset its answer brings.
     pub fn scroll_pane(
-        &self,
+        &mut self,
         session: &Entity<AgentSession>,
         id: &str,
         by: i32,
@@ -877,6 +906,13 @@ impl PluginUi {
         content_rows: u32,
         cx: &mut Context<ChatView>,
     ) {
+        if by == 0 || content_rows <= body_rows {
+            return;
+        }
+        if let Some(pending) = self.pending_scrolls.get_mut(id) {
+            *pending = pending.saturating_add(by);
+            return;
+        }
         let request = json!({
             "subtype": "ui_scroll",
             "surface": SURFACE,
@@ -888,19 +924,25 @@ impl PluginUi {
             "body_rows": body_rows,
             "content_rows": content_rows,
         });
-        let id = id.to_owned();
-        self.pane_request(session, request, cx, move |plugin_ui, answer| {
+        let answered_id = id.to_owned();
+        let sent = self.pane_request(session, request, cx, move |view, answer, cx| {
+            let id = answered_id;
+            let more = view.plugin_ui.pending_scrolls.remove(&id).unwrap_or(0);
             // A refused scroll leaves the pane where it was.
-            if answer["deny"].is_string() {
-                return;
-            }
-            if let Some(offset) = answer["offset"]
-                .as_u64()
-                .and_then(|offset| u32::try_from(offset).ok())
+            if let Some(answer) = answer
+                && !answer["deny"].is_string()
+                && let Some(offset) = answer["offset"]
+                    .as_u64()
+                    .and_then(|offset| u32::try_from(offset).ok())
             {
-                plugin_ui.pane_offsets.insert(id, offset);
+                view.plugin_ui.pane_offsets.insert(id.clone(), offset);
             }
+            view.plugin_ui
+                .scroll_pane(&view.session, &id, more, body_rows, content_rows, cx);
         });
+        if sent {
+            self.pending_scrolls.insert(id.to_owned(), 0);
+        }
     }
 
     /// Drops the toasts whose time is up at `now`; true when any went.
@@ -930,6 +972,10 @@ impl ChatView {
         self.plugin_ui
             .follow_run(self.session.read(cx).runs_started());
         self.plugin_ui.rem = window.rem_size();
+        // The session drops its run when idle, stopped or failed: what was drawn in it goes, as on a detach.
+        if !self.session.read(cx).has_live_run() && self.plugin_ui.is_attached_or_has_panes() {
+            self.plugin_ui.detach(&self.session, cx);
+        }
         self.sync_plugin_panes(window, cx);
         if !self.plugin_ui.wants_attach(self.session.read(cx)) {
             return;
@@ -1273,6 +1319,9 @@ impl ChatView {
                 )
             }
         };
+        if !self.plugin_ui.can_send(&self.session, cx) {
+            return;
+        }
         let mut request = json!({
             "subtype": subtype,
             "surface": SURFACE,
@@ -2120,12 +2169,14 @@ mod tests {
                     { "plugin": "p", "title": "no id" },
                     { "id": "f", "title": "no plugin" },
                     "junk",
+                    { "id": "a", "plugin": "duplicate" },
                 ]),
                 json!(42),
             ),
             Instant::now(),
         );
         assert_eq!(pane_ids(&plugin_ui), ["a", "b", "c", "d", "e"]);
+        assert_eq!(plugin_ui.panes[0].plugin, "p", "a repeated id keeps its first entry");
         let backgrounds = plugin_ui
             .panes
             .iter()

@@ -19,6 +19,8 @@ const MIN_WIDTH: f32 = 380.;
 const FALLBACK_AVAILABLE_WIDTH: f32 = 960.;
 const HEADER_HEIGHT: f32 = 36.;
 const PLUGIN_PANE_PADDING: f32 = 12.;
+/// Long titles are cut so every tab stays on screen.
+const MAX_TAB_TITLE_CHARS: usize = 24;
 
 pub(super) enum SidePaneContent {
     Subagent {
@@ -372,14 +374,14 @@ impl ChatView {
             self.side_pane_content(),
             Some(SidePaneContent::PluginPanes { .. })
         );
-        let reveal = std::mem::take(&mut self.plugin_ui.reveal_panes);
         if self.plugin_ui.panes.is_empty() {
             if showing {
                 self.close_side_pane(window, cx);
             }
             return;
         }
-        if reveal && !showing && !self.docked {
+        // A docked chat has no side pane: the reveal waits until it is undocked.
+        if !self.docked && std::mem::take(&mut self.plugin_ui.reveal_panes) && !showing {
             let focus_handle = cx.focus_handle();
             self.show_in_side_pane(SidePaneContent::PluginPanes { focus_handle }, window, cx);
         }
@@ -450,7 +452,7 @@ impl ChatView {
                 div().debug_selector(|| selector).child(
                     Button::new(
                         SharedString::from(format!("plugin-ui-pane-tab-{id}")),
-                        pane.title.clone(),
+                        util::truncate_and_trailoff(&pane.title, MAX_TAB_TITLE_CHARS),
                     )
                     .label_size(LabelSize::Small)
                     .toggle_state(visible.as_ref() == Some(&id))

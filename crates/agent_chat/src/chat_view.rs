@@ -7371,6 +7371,51 @@ mod tests {
             .expect("the chat waits for the reply");
         cx.run_until_parked();
         assert_eq!(offset(cx), Some(3), "a denied scroll keeps the offset");
+
+        let take_scrolls = |receiver: &mut tokio::sync::mpsc::Receiver<agent_harness::Steer>| {
+            drain_controls(receiver)
+                .into_iter()
+                .filter(|call| call.request["subtype"] == "ui_scroll")
+                .collect::<Vec<_>>()
+        };
+        scroll(2, cx);
+        scroll(4, cx);
+        scroll(-1, cx);
+        let mut calls = take_scrolls(&mut receiver);
+        assert_eq!(calls.len(), 1, "one scroll per pane is in flight");
+        let call = calls.remove(0);
+        assert_eq!(
+            (&call.request["offset"], &call.request["by"]),
+            (&3.into(), &2.into())
+        );
+        call.reply
+            .send(Ok(serde_json::json!({ "moved": true, "offset": 5 })))
+            .expect("the chat waits for the reply");
+        cx.run_until_parked();
+        let mut calls = take_scrolls(&mut receiver);
+        assert_eq!(calls.len(), 1);
+        let call = calls.remove(0);
+        assert_eq!(
+            (&call.request["offset"], &call.request["by"]),
+            (&5.into(), &3.into()),
+            "the steps taken meanwhile go out together from the new offset"
+        );
+        call.reply
+            .send(Ok(serde_json::json!({ "moved": true, "offset": 8 })))
+            .expect("the chat waits for the reply");
+        cx.run_until_parked();
+        assert_eq!(offset(cx), Some(8));
+        assert!(take_scrolls(&mut receiver).is_empty());
+
+        view.update(cx, |view, cx| {
+            view.plugin_ui
+                .scroll_pane(&view.session, PANE, 1, 10, 10, cx)
+        });
+        cx.run_until_parked();
+        assert!(
+            take_scrolls(&mut receiver).is_empty(),
+            "a drawing that fits isn't scrolled"
+        );
     }
 
     #[gpui::test]
@@ -7421,6 +7466,59 @@ mod tests {
         draw_plugin_chat(cx);
         push_roster(&view, panes_fixture(), cx);
         assert!(shows_plugin_panes(&view, cx), "the pane returns");
+    }
+
+    #[gpui::test]
+    async fn panes_vanish_when_the_run_ends(cx: &mut TestAppContext) {
+        let (view, _receiver, _calls, cx) = plugin_pane_chat(cx).await;
+        let session = view.read_with(cx, |view, _| view.session.clone());
+        crate::session::tests::drop_live_run(&session, cx);
+        draw_plugin_chat(cx);
+        assert!(view.read_with(cx, |view, _| view.plugin_ui.panes.is_empty()));
+        assert!(!shows_plugin_panes(&view, cx));
+        assert!(
+            cx.debug_bounds("plugin-ui-pane-tab-wu-draw-test-pane")
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
+    async fn plugin_requests_without_a_live_run_send_nothing(cx: &mut TestAppContext) {
+        let (view, _receiver, _calls, cx) = plugin_pane_chat(cx).await;
+        let session = view.read_with(cx, |view, _| view.session.clone());
+        crate::session::tests::drop_live_run(&session, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.plugin_ui.show_pane(&view.session, PANE, cx);
+            view.plugin_ui.focus_pane(&view.session, Some(PANE), cx);
+            view.plugin_ui.close_pane(&view.session, PANE, cx);
+            view.plugin_ui
+                .scroll_pane(&view.session, PANE, 3, 10, 30, cx);
+            view.plugin_ui.render(
+                &view.session,
+                "ToolUse",
+                "toolu_1",
+                serde_json::json!({}),
+                window,
+                cx,
+            );
+            let target = plugin_ui::Target {
+                plugin: "wu-draw-test".into(),
+                handle: 1.into(),
+                key: Some("ping".into()),
+            };
+            view.plugin_ui_action(
+                ("Pane".into(), PANE.into()),
+                plugin_ui::UiAction::Press { target, href: None },
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            session.read_with(cx, |session, _| session.one_off_controls),
+            0,
+            "no request starts a one-off agent process"
+        );
     }
 
     #[gpui::test]
