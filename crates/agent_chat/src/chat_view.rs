@@ -176,8 +176,8 @@ pub struct ChatView {
     side_pane: Option<side_pane::SidePane>,
     side_pane_openings: usize,
     _side_pane_load: Task<()>,
-    pending_side_question: Option<side_pane::PendingSideQuestion>,
-    _side_question: Task<()>,
+    pending_side_questions: Vec<(u64, side_pane::PendingSideQuestion)>,
+    side_questions_asked: u64,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     store: Entity<AgentStore>,
@@ -388,8 +388,8 @@ impl ChatView {
             side_pane: None,
             side_pane_openings: 0,
             _side_pane_load: Task::ready(()),
-            pending_side_question: None,
-            _side_question: Task::ready(()),
+            pending_side_questions: Vec::new(),
+            side_questions_asked: 0,
             workspace,
             focus_handle: cx.focus_handle(),
             store,
@@ -6478,7 +6478,7 @@ mod tests {
                 view.side_pane_content(),
                 Some(side_pane::SidePaneContent::SideQuestions)
             ));
-            assert!(view.pending_side_question.is_none());
+            assert!(view.pending_side_questions.is_empty());
         });
         session.update(cx, |session, cx| {
             for number in 0..20 {
@@ -6505,6 +6505,40 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_second_btw_keeps_the_first_answer(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (view, session, cx) = side_question_view(directory.path(), cx).await;
+        for question in ["first", "second"] {
+            view.update_in(cx, |view, window, cx| {
+                view.run_app_command(
+                    AppCommand::Btw {
+                        question: Some(question.into()),
+                    },
+                    window,
+                    cx,
+                )
+            });
+        }
+        assert_eq!(
+            view.read_with(cx, |view, _| view.pending_side_questions.len()),
+            2
+        );
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| session.side_answers().len() == 2)
+        });
+        session.read_with(cx, |session, _| {
+            let mut asked: Vec<&str> = session
+                .side_answers()
+                .iter()
+                .map(|(question, _)| question.as_str())
+                .collect();
+            asked.sort();
+            assert_eq!(asked, ["first", "second"]);
+        });
+        assert!(view.read_with(cx, |view, _| view.pending_side_questions.is_empty()));
+    }
+
+    #[gpui::test]
     async fn btw_without_text_opens_the_pane(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().expect("temporary directory");
         let (view, session, cx) = side_question_view(directory.path(), cx).await;
@@ -6516,7 +6550,7 @@ mod tests {
                 view.side_pane_content(),
                 Some(side_pane::SidePaneContent::SideQuestions)
             ));
-            assert!(view.pending_side_question.is_none());
+            assert!(view.pending_side_questions.is_empty());
         });
         assert!(session.read_with(cx, |session, _| session.side_answers().is_empty()));
     }
@@ -6537,8 +6571,8 @@ mod tests {
         run_until(cx, |cx| {
             view.read_with(cx, |view, _| {
                 matches!(
-                    view.pending_side_question,
-                    Some(side_pane::PendingSideQuestion::Failed { .. })
+                    view.pending_side_questions.as_slice(),
+                    [(_, side_pane::PendingSideQuestion::Failed { .. })]
                 )
             })
         });

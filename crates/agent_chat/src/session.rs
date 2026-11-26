@@ -35,6 +35,15 @@ const TOOL_OUTPUT_MAX_CHARS: usize = 200_000;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const STOP_IN_PLACE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+/// A side question is answered by the model, like the extension's own five minute wait.
+const SIDE_QUESTION_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn control_timeout(request: &serde_json::Value) -> Duration {
+    match request["subtype"].as_str() {
+        Some("side_question") => SIDE_QUESTION_TIMEOUT,
+        _ => CONTROL_TIMEOUT,
+    }
+}
 const REWIND_STOP_GRACE: Duration = Duration::from_secs(5);
 const REWIND_IDLE_POLL: Duration = Duration::from_millis(100);
 const SAVE_INTERVAL_WHILE_WORKING: Duration = Duration::from_secs(5);
@@ -2243,6 +2252,7 @@ impl AgentSession {
         cx: &mut Context<Self>,
     ) -> Task<Result<serde_json::Value>> {
         let stopped = || anyhow::anyhow!(t!("The agent stopped before it answered.").to_string());
+        let timeout = control_timeout(&request);
         let answer = match &self.run {
             Some(run) => {
                 let (reply, answer) = tokio::sync::oneshot::channel();
@@ -2270,7 +2280,7 @@ impl AgentSession {
                 cx.background_spawn(async move { Ok(work.await??) })
             }
         };
-        let answer = answer.with_timeout(CONTROL_TIMEOUT, cx.background_executor());
+        let answer = answer.with_timeout(timeout, cx.background_executor());
         cx.background_spawn(async move {
             answer
                 .await
@@ -5209,6 +5219,17 @@ pub(crate) mod tests {
         feed_events(&session, reported("default"), cx);
         feed_events(&session, reported("default"), cx);
         assert_eq!(notices(cx), 1);
+    }
+
+    #[test]
+    fn side_questions_wait_longer_than_other_control_requests() {
+        let timeout = |subtype| control_timeout(&serde_json::json!({ "subtype": subtype }));
+        assert_eq!(timeout("side_question"), Duration::from_secs(300));
+        assert_eq!(timeout("get_plan"), Duration::from_secs(30));
+        assert_eq!(
+            control_timeout(&serde_json::json!({})),
+            Duration::from_secs(30)
+        );
     }
 
     #[gpui::test]

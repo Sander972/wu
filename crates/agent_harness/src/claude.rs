@@ -2089,6 +2089,10 @@ fn flag_settings(request: &RunRequest) -> serde_json::Map<String, Value> {
     if option_is_on(&request.model_options, "fastMode") {
         settings.insert("fastMode".into(), Value::Bool(true));
     }
+    // A stored "on" must beat a user `alwaysThinkingEnabled: false`, which flag settings override.
+    if option_is_on(&request.model_options, catalog::THINKING_OPTION) {
+        settings.insert("alwaysThinkingEnabled".into(), Value::Bool(true));
+    }
     if request.reasoning == Some(ReasoningLevel::Ultracode) {
         settings.insert("ultracode".into(), Value::Bool(true));
     }
@@ -2103,6 +2107,36 @@ fn flag_settings(request: &RunRequest) -> serde_json::Map<String, Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_stored_thinking_on_is_forced_at_launch() {
+        let settings = |options: serde_json::Value| {
+            let launch = RunRequest {
+                prompt: String::new(),
+                model: None,
+                reasoning: None,
+                model_options: options.as_object().cloned().unwrap_or_default(),
+                cwd: String::new(),
+                permission: PermissionMode::default(),
+                resume: None,
+                fork: None,
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                auto_compact_tokens: None,
+                chrome: false,
+                drop_prompt: None,
+                ephemeral: false,
+                context: Vec::new(),
+            };
+            flag_settings(&launch).get("alwaysThinkingEnabled").cloned()
+        };
+        assert_eq!(
+            settings(json!({ "thinking": "on" })),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(settings(json!({ "thinking": "off" })), None);
+        assert_eq!(settings(json!({})), None);
+    }
 
     #[test]
     fn pasted_code_is_split_at_hash() {

@@ -206,22 +206,28 @@ impl ChatView {
         let Some(question) = question else {
             return;
         };
-        self.pending_side_question = Some(PendingSideQuestion::Asking(question.clone()));
+        self.side_questions_asked += 1;
+        let id = self.side_questions_asked;
+        self.pending_side_questions
+            .retain(|(_, pending)| matches!(pending, PendingSideQuestion::Asking(_)));
+        self.pending_side_questions
+            .push((id, PendingSideQuestion::Asking(question.clone())));
         let reply = self.session.update(cx, |session, cx| {
             session.control(
                 serde_json::json!({ "subtype": "side_question", "question": question }),
                 cx,
             )
         });
-        self._side_question = cx.spawn(async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let outcome = reply.await;
             this.update(cx, |this, cx| {
                 let answer = outcome
                     .as_ref()
                     .ok()
                     .and_then(|reply| reply["response"].as_str());
+                this.pending_side_questions
+                    .retain(|(pending_id, _)| *pending_id != id);
                 if let Some(answer) = answer {
-                    this.pending_side_question = None;
                     this.session.update(cx, |session, cx| {
                         session.push_side_answer(question, answer.to_string(), cx)
                     });
@@ -230,13 +236,14 @@ impl ChatView {
                         Ok(_) => t!("The agent had no answer to that question."),
                         Err(error) => error.to_string().into(),
                     };
-                    this.pending_side_question =
-                        Some(PendingSideQuestion::Failed { question, message });
+                    this.pending_side_questions
+                        .push((id, PendingSideQuestion::Failed { question, message }));
                 }
                 cx.notify();
             })
             .log_err();
-        });
+        })
+        .detach();
     }
 
     fn render_side_questions(&self, cx: &Context<Self>) -> AnyElement {
@@ -260,23 +267,27 @@ impl ChatView {
                         }))
                 }))
         };
-        let pending = self.pending_side_question.as_ref().map(|pending| {
-            let (question, note) = match pending {
-                PendingSideQuestion::Asking(question) => (
-                    question.clone(),
-                    Label::new(t!("Waiting for an answer…")).color(Color::Muted),
-                ),
-                PendingSideQuestion::Failed { question, message } => (
-                    question.clone(),
-                    Label::new(message.clone()).color(Color::Error),
-                ),
-            };
-            v_flex()
-                .gap(px(4.))
-                .child(question_row(question, None))
-                .child(note)
-        });
-        let empty = pending.is_none() && answers.is_empty();
+        let pending = self
+            .pending_side_questions
+            .iter()
+            .rev()
+            .map(|(_, pending)| {
+                let (question, note) = match pending {
+                    PendingSideQuestion::Asking(question) => (
+                        question.clone(),
+                        Label::new(t!("Waiting for an answer…")).color(Color::Muted),
+                    ),
+                    PendingSideQuestion::Failed { question, message } => (
+                        question.clone(),
+                        Label::new(message.clone()).color(Color::Error),
+                    ),
+                };
+                v_flex()
+                    .gap(px(4.))
+                    .child(question_row(question, None))
+                    .child(note)
+            });
+        let empty = self.pending_side_questions.is_empty() && answers.is_empty();
         v_flex()
             .id("agent-side-questions")
             .size_full()
