@@ -12,8 +12,11 @@ Build a release .tar.gz for Linux.
 Options:
   -h, --help     Display this help and exit.
   --flatpak      Set ZED_BUNDLE_TYPE=flatpak so that this can be included in system info
+  --channel <c>  Release channel to build (dev or stable), defaults to crates/wu/RELEASE_CHANNEL
   "
 }
+
+channel=""
 
 # Parse all arguments manually
 while [[ $# -gt 0 ]]; do
@@ -25,6 +28,11 @@ while [[ $# -gt 0 ]]; do
         --flatpak)
             export ZED_BUNDLE_TYPE=flatpak
             shift
+            ;;
+        --channel)
+            # The binary only accepts a lowercase channel name.
+            channel="$(echo "${2:?--channel needs a value}" | tr '[:upper:]' '[:lower:]')"
+            shift 2
             ;;
         --)
             shift
@@ -45,7 +53,20 @@ done
 
 export ZED_BUNDLE=true
 
-channel=$(<crates/wu/RELEASE_CHANNEL)
+if [[ -z "$channel" ]]; then
+    channel=$(<crates/wu/RELEASE_CHANNEL)
+fi
+case "$channel" in
+    dev|stable) ;;
+    *)
+        echo "Invalid channel: $channel (expected dev or stable)." >&2
+        exit 1
+        ;;
+esac
+# ZED_RELEASE_CHANNEL is compiled into the binaries in place of crates/wu/RELEASE_CHANNEL;
+# RELEASE_CHANNEL picks the app icon in crates/wu/build.rs.
+export ZED_RELEASE_CHANNEL="$channel"
+export RELEASE_CHANNEL="$channel"
 target_dir="${CARGO_TARGET_DIR:-target}"
 
 version="$(script/get-crate-version wu)"
