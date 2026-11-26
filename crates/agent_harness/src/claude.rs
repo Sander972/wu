@@ -365,6 +365,7 @@ const HIDDEN_COMMANDS: &[&str] = &[
     "color",
     "config",
     "context",
+    "copy",
     "cost",
     "design",
     "design-consent",

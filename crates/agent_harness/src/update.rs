@@ -102,10 +102,16 @@ async fn run(
     crate::compose_child_path(&mut command, executable);
     let exchange = async {
         let mut child = command.spawn()?;
-        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
-            stdin.write_all(input.as_bytes()).await?;
+        let written = match (input, child.stdin.take()) {
+            (Some(input), Some(mut stdin)) => stdin.write_all(input.as_bytes()).await,
+            _ => Ok(()),
+        };
+        let output = child.wait_with_output().await?;
+        // A CLI that refuses early closes its stdin, and its stderr says why where the broken pipe does not.
+        match written {
+            Err(error) if output.status.success() => Err(error),
+            _ => Ok(output),
         }
-        child.wait_with_output().await
     };
     tokio::time::timeout(timeout, exchange)
         .await
@@ -258,5 +264,21 @@ exit 1",
             std::fs::read_to_string(record).expect("recorded input"),
             "{\"op\":\"add\"}"
         );
+    }
+
+    #[tokio::test]
+    async fn run_cli_reports_why_a_cli_that_exits_without_reading_its_input() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let cli = fake_cli(
+            dir.path(),
+            "1.0.0",
+            "echo 'refusing to run' >&2
+exit 2",
+        );
+        let input = "x".repeat(8 * 1024 * 1024);
+        let error = run_cli(&cli, &[], dir.path(), Some(&input))
+            .await
+            .expect_err("fails");
+        assert_eq!(error.0, "refusing to run");
     }
 }

@@ -558,6 +558,7 @@ impl ChatView {
             .and_then(|state| state.usage.as_ref())
             .and_then(|usage| usage.used_fraction());
         let store = self.store.clone();
+        let session_entity = self.session.clone();
         let ring_hover = ink(0.05, cx);
         h_flex()
             .h(px(24.))
@@ -612,7 +613,10 @@ impl ChatView {
                             )
                             .hover_background(ring_hover),
                         )
-                        .menu(move |_, cx| Some(cx.new(|cx| ContextCard::new(context, cx))))
+                        .menu(move |_, cx| {
+                            let session = session_entity.clone();
+                            Some(cx.new(|cx| ContextCard::new(context, Some(session), cx)))
+                        })
                         .anchor(Anchor::BottomRight)
                         .attach(Anchor::TopRight)
                         .offset(point(px(0.), px(-6.))),

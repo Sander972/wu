@@ -1,17 +1,20 @@
 use crate::{
     AgentKind,
     chat_style::{accent, hairline, popover_card, selected_row, text_faint, ui, wash},
-    session::{AgentStore, ContextSnapshot},
+    chat_view::{DialogSection, context_sections},
+    session::{AgentSession, AgentStore, ContextSnapshot},
 };
 use agent_harness::usage::UsageWindow;
 use gpui::{
     AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, Hsla, IntoElement, ParentElement, PathBuilder, Render, SharedString, Styled,
-    Subscription, Window, canvas, div, point, px, relative,
+    Subscription, Task, Window, canvas, div, point, px, relative,
 };
 use i18n::t;
+use serde_json::json;
 use theme::ActiveTheme as _;
 use ui::prelude::*;
+use util::ResultExt as _;
 
 const CONTEXT_WARNING: f32 = 0.75;
 const CONTEXT_DANGER: f32 = 0.9;
@@ -130,7 +133,7 @@ pub(crate) fn usage_chip(fraction: Option<f32>, cx: &App) -> gpui::Div {
     ring_chip_content(fraction, arc, text, cx)
 }
 
-fn with_separators(count: u64) -> String {
+pub(crate) fn with_separators(count: u64) -> String {
     let digits = count.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
@@ -277,8 +280,11 @@ fn meta_line(fragments: Vec<AnyElement>, cx: &App) -> gpui::Div {
     line
 }
 
-fn resets_in(resets_at: chrono::DateTime<chrono::Utc>) -> Option<String> {
-    let minutes = (resets_at - chrono::Utc::now()).num_minutes();
+pub(crate) fn resets_in(
+    resets_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let minutes = (resets_at - now).num_minutes();
     if minutes <= 0 {
         return None;
     }
@@ -300,15 +306,74 @@ fn resets_in(resets_at: chrono::DateTime<chrono::Utc>) -> Option<String> {
 
 pub struct ContextCard {
     details: String,
+    breakdown: Vec<DialogSection>,
     focus_handle: FocusHandle,
+    _breakdown_task: Task<()>,
 }
 
 impl ContextCard {
-    pub fn new(context: Option<ContextSnapshot>, cx: &mut Context<Self>) -> Self {
+    /// A Claude session also lists what fills its context window.
+    pub fn new(
+        context: Option<ContextSnapshot>,
+        session: Option<Entity<AgentSession>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let breakdown = session
+            .filter(|session| session.read(cx).kind() == AgentKind::Claude)
+            .map(|session| {
+                session.update(cx, |session, cx| {
+                    session.control(json!({ "subtype": "get_context_usage" }), cx)
+                })
+            });
         Self {
             details: context_details(context),
+            breakdown: Vec::new(),
             focus_handle: cx.focus_handle(),
+            _breakdown_task: cx.spawn(async move |this, cx| {
+                let Some(response) = breakdown else {
+                    return;
+                };
+                if let Some(response) = response.await.log_err() {
+                    this.update(cx, |this, cx| {
+                        this.breakdown = context_sections(&response);
+                        cx.notify();
+                    })
+                    .log_err();
+                }
+            }),
         }
+    }
+
+    fn render_breakdown(&self, cx: &App) -> Vec<AnyElement> {
+        let muted = cx.theme().colors().text_muted;
+        let mut elements = Vec::new();
+        for section in &self.breakdown {
+            elements.push(menu_heading(&section.title, cx).into_any_element());
+            elements.extend(section.rows.iter().map(|row| {
+                h_flex()
+                    .px(px(8.))
+                    .gap(px(8.))
+                    .text_size(ui(11.5))
+                    .line_height(ui(16.))
+                    .text_color(muted)
+                    .child(div().flex_1().min_w_0().truncate().child(row.label.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(text_faint(cx))
+                            .children(row.detail.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(USAGE_PERCENT_WIDTH + 14.))
+                            .flex_none()
+                            .text_right()
+                            .children(row.badge.clone()),
+                    )
+                    .into_any_element()
+            }));
+        }
+        elements
     }
 }
 
@@ -342,6 +407,12 @@ impl Render for ContextCard {
                             .map(|line| div().child(SharedString::from(line.to_string()))),
                     ),
             )
+            .when(!self.breakdown.is_empty(), |this| {
+                this.w(px(USAGE_CARD_WIDTH))
+                    .child(menu_separator(cx))
+                    .children(self.render_breakdown(cx))
+                    .child(div().h(px(6.)))
+            })
     }
 }
 
@@ -404,7 +475,9 @@ impl Render for UsageCard {
                             .flat_map(|usage| usage.windows.iter())
                             .map(|window| {
                                 usage_meter(window, cx).when_some(
-                                    window.resets_at.and_then(resets_in),
+                                    window
+                                        .resets_at
+                                        .and_then(|at| resets_in(at, chrono::Utc::now())),
                                     |this, resets| {
                                         this.child(
                                             div()
@@ -579,7 +652,7 @@ mod tests {
                         PopoverMenu::new("context")
                             .with_handle(self.card.clone())
                             .trigger(Button::new("context-trigger", "Context"))
-                            .menu(|_, cx| Some(cx.new(|cx| ContextCard::new(None, cx)))),
+                            .menu(|_, cx| Some(cx.new(|cx| ContextCard::new(None, None, cx)))),
                     ),
                 )
                 .child(div().w(px(600.)))

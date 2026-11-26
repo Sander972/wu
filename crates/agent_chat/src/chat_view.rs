@@ -17,6 +17,7 @@ mod search;
 mod side_pane;
 mod todo_panel;
 
+pub(crate) use claude_dialogs::{DialogSection, context_sections};
 pub(crate) use edit_review::{ProposedEditReview, close_diff_reviews, open_diff_review};
 pub(crate) use editor_context::{
     FixWithClaude, mention_target, selection_json, terminal_mention_target,

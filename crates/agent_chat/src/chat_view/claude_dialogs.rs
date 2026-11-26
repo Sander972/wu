@@ -1,16 +1,18 @@
 use super::{ChatView, composer::open_path};
 use crate::{
-    session::{AgentSession, AgentStore},
+    session::{AgentSession, AgentStore, Entry},
     slash_commands::AppCommand,
+    usage_rings::{resets_in, with_separators},
 };
 use editor::Editor;
 use gpui::{
-    App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, PromptButton,
-    PromptLevel, Render, ScrollHandle, SharedString, Task, WeakEntity, Window, rems,
+    App, AppContext as _, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Task, WeakEntity,
+    Window, rems,
 };
 use i18n::t;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use ui::{
     Modal, ModalFooter, ModalHeader, Section, SectionHeader, Switch, ToggleButtonGroup,
     ToggleButtonSimple, ToggleState, prelude::*,
@@ -282,11 +284,184 @@ pub(crate) fn sandbox_sections(response: &Value) -> Vec<DialogSection> {
     sections
 }
 
-const MCP_TRANSPORTS: &[&str] = &["http", "sse", "stdio"];
-const MCP_SCOPES: &[&str] = &["local", "user", "project"];
-const RULE_BEHAVIORS: &[&str] = &["allow", "ask", "deny"];
-const RULE_SOURCES: &[&str] = &["userSettings", "localSettings"];
-const PLUGIN_SCOPES: &[&str] = &["user", "project", "local"];
+fn dollars(cost: f64) -> String {
+    if cost > 0.0 && cost < 0.01 {
+        format!("${cost:.4}")
+    } else {
+        format!("${cost:.2}")
+    }
+}
+
+fn duration_text(milliseconds: u64) -> String {
+    let seconds = milliseconds / 1000;
+    match (seconds / 3600, seconds / 60 % 60, seconds % 60) {
+        (0, 0, seconds) => format!("{seconds}s"),
+        (0, minutes, seconds) => format!("{minutes}m {seconds}s"),
+        (hours, minutes, seconds) => format!("{hours}h {minutes}m {seconds}s"),
+    }
+}
+
+pub(crate) fn usage_sections(response: &Value) -> Vec<DialogSection> {
+    usage_sections_at(response, chrono::Utc::now())
+}
+
+fn usage_sections_at(response: &Value, now: chrono::DateTime<chrono::Utc>) -> Vec<DialogSection> {
+    let windows = [
+        ("five_hour", t!("Session (5 hours)")),
+        ("seven_day", t!("Weekly")),
+        ("seven_day_opus", t!("Weekly (Opus)")),
+        ("seven_day_sonnet", t!("Weekly (Sonnet)")),
+        ("seven_day_oauth_apps", t!("Weekly (OAuth apps)")),
+    ];
+    let mut limits: Vec<DialogRow> = windows
+        .into_iter()
+        .filter_map(|(key, label)| {
+            let window = &response["rate_limits"][key];
+            let used = window["utilization"].as_f64()?;
+            Some(DialogRow {
+                badge: Some(format!("{used:.0}%").into()),
+                detail: window["resets_at"]
+                    .as_str()
+                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                    .and_then(|at| resets_in(at.into(), now))
+                    .map(SharedString::from),
+                ..DialogRow::new(label)
+            })
+        })
+        .collect();
+    if limits.is_empty() {
+        limits.push(DialogRow::new(t!(
+            "Plan limits are not available for this login method."
+        )));
+    }
+    let mut sections = vec![DialogSection {
+        title: t!("Plan limits"),
+        rows: limits,
+    }];
+    let session = &response["session"];
+    if session.is_object() {
+        let count = |key: &str| session[key].as_u64().unwrap_or_default();
+        sections.push(DialogSection {
+            title: t!("Session"),
+            rows: [
+                (
+                    t!("Estimated cost"),
+                    dollars(session["total_cost_usd"].as_f64().unwrap_or_default()).into(),
+                ),
+                (
+                    t!("Duration"),
+                    duration_text(count("total_duration_ms")).into(),
+                ),
+                (
+                    t!("Code changes"),
+                    t!(
+                        "{added} lines added, {removed} lines removed",
+                        added = count("total_lines_added"),
+                        removed = count("total_lines_removed")
+                    ),
+                ),
+            ]
+            .map(|(label, detail)| DialogRow {
+                detail: Some(detail),
+                ..DialogRow::new(label)
+            })
+            .into(),
+        });
+        let models: Vec<DialogRow> = session["model_usage"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(model, usage)| {
+                let tokens = |key: &str| with_separators(usage[key].as_u64().unwrap_or_default());
+                DialogRow {
+                    badge: Some(dollars(usage["costUSD"].as_f64().unwrap_or_default()).into()),
+                    detail: Some(t!(
+                        "{input} in, {output} out, {read} cache read, {write} cache write",
+                        input = tokens("inputTokens"),
+                        output = tokens("outputTokens"),
+                        read = tokens("cacheReadInputTokens"),
+                        write = tokens("cacheCreationInputTokens")
+                    )),
+                    ..DialogRow::new(
+                        text(usage, "canonicalModel").unwrap_or_else(|| model.clone().into()),
+                    )
+                }
+            })
+            .collect();
+        if !models.is_empty() {
+            sections.push(DialogSection {
+                title: t!("Usage by model"),
+                rows: models,
+            });
+        }
+    }
+    sections
+}
+
+/// Deferred, buffer and free categories are not part of `totalTokens`, so they get a section of their own.
+pub(crate) fn context_sections(response: &Value) -> Vec<DialogSection> {
+    let capacity = response["rawMaxTokens"]
+        .as_u64()
+        .or_else(|| response["maxTokens"].as_u64())
+        .filter(|capacity| *capacity > 0);
+    let row = |label: SharedString, tokens: u64, badge: Option<SharedString>| DialogRow {
+        detail: Some(t!("{count} tokens", count = with_separators(tokens))),
+        badge: badge.or_else(|| {
+            capacity
+                .map(|capacity| format!("{:.1}%", tokens as f64 * 100.0 / capacity as f64).into())
+        }),
+        ..DialogRow::new(label)
+    };
+    let (counted, other): (Vec<&Value>, Vec<&Value>) = items(response, "categories")
+        .partition(|category| category["kind"].as_str().is_none_or(|kind| kind == "used"));
+    let category_rows = |categories: Vec<&Value>| -> Vec<DialogRow> {
+        categories
+            .into_iter()
+            .filter_map(|category| {
+                Some(row(
+                    text(category, "name")?,
+                    category["tokens"].as_u64().unwrap_or_default(),
+                    None,
+                ))
+            })
+            .collect()
+    };
+    let memory_files: Vec<DialogRow> = items(response, "memoryFiles")
+        .filter_map(|file| {
+            let path = file["path"].as_str()?;
+            let name = Path::new(path).file_name().map_or_else(
+                || path.to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            Some(row(
+                name.into(),
+                file["tokens"].as_u64().unwrap_or_default(),
+                Some(text(file, "type").unwrap_or_default()),
+            ))
+        })
+        .collect();
+    [
+        (t!("In context"), category_rows(counted)),
+        (t!("Reserved and free"), category_rows(other)),
+        (t!("Memory files"), memory_files),
+    ]
+    .into_iter()
+    .filter(|(_, rows)| !rows.is_empty())
+    .map(|(title, rows)| DialogSection { title, rows })
+    .collect()
+}
+
+/// `render_form` draws a choice as a button group of a fixed size, so any other option count fails the build.
+const fn choice_options(options: &'static [&'static str]) -> &'static [&'static str] {
+    assert!(options.len() == 2 || options.len() == 3);
+    options
+}
+
+const MCP_TRANSPORTS: &[&str] = choice_options(&["http", "sse", "stdio"]);
+const MCP_SCOPES: &[&str] = choice_options(&["local", "user", "project"]);
+const RULE_BEHAVIORS: &[&str] = choice_options(&["allow", "ask", "deny"]);
+const RULE_SOURCES: &[&str] = choice_options(&["userSettings", "localSettings"]);
+const PLUGIN_SCOPES: &[&str] = choice_options(&["user", "project", "local"]);
 const EDIT_RULES: [&str; 2] = ["edit-permission-rules", "--json"];
 const RELOAD_ATTEMPTS: usize = 8;
 const RELOAD_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
@@ -1588,7 +1763,157 @@ impl Render for ClaudeDialog {
     }
 }
 
+fn show_toast<C: gpui::AppContext>(
+    workspace: &WeakEntity<Workspace>,
+    message: impl Into<String>,
+    cx: &mut C,
+) {
+    let message = message.into();
+    workspace
+        .update(cx, |workspace, cx| {
+            workspace.show_toast(
+                Toast::new(NotificationId::unique::<ClaudeDialog>(), message).autohide(),
+                cx,
+            )
+        })
+        .log_err();
+}
+
+/// Resolves `file` against the chat's folder and refuses anything that ends up outside it, without following symlinks.
+fn export_destination(root: &Path, file: &str) -> anyhow::Result<PathBuf> {
+    let mut resolved = PathBuf::new();
+    for component in root.join(file).components() {
+        match component {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            component => resolved.push(component),
+        }
+    }
+    anyhow::ensure!(
+        resolved.starts_with(root) && resolved != root,
+        t!("{file} is outside the project folder.", file = file).to_string()
+    );
+    Ok(resolved)
+}
+
+/// Never replaces a file: `create_new` fails if the path is taken, even when it was created after a check would have passed.
+fn write_new_file(path: &Path, text: &str) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => Ok(file.write_all(text.as_bytes())?),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(anyhow::anyhow!(
+            t!("{path} already exists.", path = path.display()).to_string()
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn nth_reply(entries: &[Entry], nth: usize, cx: &App) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .filter_map(|entry| match entry {
+            Entry::Assistant { markdown, .. } => Some(markdown.read(cx).source().to_string()),
+            _ => None,
+        })
+        .nth(nth.saturating_sub(1))
+}
+
 impl ChatView {
+    pub(super) fn export_conversation(
+        &mut self,
+        file: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.session.read(cx).metadata().cwd.clone();
+        let destination = match file
+            .map(|file| export_destination(&root, &file))
+            .transpose()
+        {
+            Ok(destination) => destination,
+            Err(error) => {
+                show_toast(&self.workspace, error.to_string(), cx);
+                return;
+            }
+        };
+        let answer = self.session.update(cx, |session, cx| {
+            session.control(json!({ "subtype": "export_conversation" }), cx)
+        });
+        let workspace = self.workspace.clone();
+        window
+            .spawn(cx, async move |cx| {
+                let exported = async {
+                    let response = answer.await?;
+                    let transcript = response["text"].as_str().unwrap_or_default().to_string();
+                    anyhow::ensure!(
+                        !transcript.is_empty(),
+                        t!("Nothing to export yet.").to_string()
+                    );
+                    // The platform's save dialog asks before replacing a file.
+                    let (path, replace) = match destination {
+                        Some(path) => (path, false),
+                        None => {
+                            let name = text(&response, "default_filename");
+                            let chosen =
+                                cx.update(|_, cx| cx.prompt_for_new_path(&root, name.as_deref()))?;
+                            match chosen.await?? {
+                                Some(path) => (path, true),
+                                None => return Ok(None),
+                            }
+                        }
+                    };
+                    let target = path.clone();
+                    cx.background_spawn(async move {
+                        if replace {
+                            Ok(std::fs::write(&target, transcript)?)
+                        } else {
+                            write_new_file(&target, &transcript)
+                        }
+                    })
+                    .await?;
+                    anyhow::Ok(Some(path))
+                }
+                .await;
+                match exported {
+                    Ok(Some(path)) => show_toast(
+                        &workspace,
+                        t!("Exported to {path}.", path = path.display()).to_string(),
+                        cx,
+                    ),
+                    Ok(None) => {}
+                    Err(error) => show_toast(
+                        &workspace,
+                        t!("Couldn't export the conversation: {error}", error = error).to_string(),
+                        cx,
+                    ),
+                }
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+    }
+
+    pub(super) fn copy_reply(&mut self, nth: Option<usize>, cx: &mut Context<Self>) {
+        let reply = nth_reply(self.entries(cx), nth.unwrap_or(1), cx);
+        let message = match reply {
+            Some(reply) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(reply));
+                t!("Copied the reply to the clipboard.")
+            }
+            None => t!("There is no reply to copy."),
+        };
+        show_toast(&self.workspace, message.to_string(), cx);
+    }
+
     /// Opens the plugins dialog, with the install form filled in when `install` names a plugin.
     pub(crate) fn show_plugins_dialog(
         &mut self,
@@ -1649,6 +1974,7 @@ impl ChatView {
             AppCommand::OutputStyle => Box::new(ClaudeDialog::output_styles),
             AppCommand::Mcp => Box::new(ClaudeDialog::mcp),
             AppCommand::Permissions => Box::new(ClaudeDialog::permissions),
+            AppCommand::Usage => control(t!("Usage"), "get_usage", usage_sections),
             AppCommand::Plugins => return self.show_plugins_dialog(None, window, cx),
             AppCommand::Model
             | AppCommand::New
@@ -1660,7 +1986,9 @@ impl ChatView {
             | AppCommand::Stop
             | AppCommand::Plan { .. }
             | AppCommand::Fork { .. }
-            | AppCommand::Rewind => return,
+            | AppCommand::Rewind
+            | AppCommand::Export { .. }
+            | AppCommand::Copy { .. } => return,
         };
         let session = self.session.clone();
         let weak_workspace = self.workspace.clone();
@@ -2279,6 +2607,171 @@ mod tests {
         assert!(plugin_input_error("ponytail@ponytail", "empty".into()).is_none());
         assert!(plugin_input_error("", "empty".into()).is_some());
         assert!(plugin_input_error("--scope", "empty".into()).is_some());
+    }
+
+    #[test]
+    fn usage_rows_show_percent_and_reset() {
+        let response = json!({
+            "rate_limits": {
+                "five_hour": { "utilization": 7, "resets_at": "2026-11-26T11:39:59.841243+00:00" },
+                "seven_day": { "utilization": 45.4, "resets_at": "2026-12-01T00:59:59+00:00" },
+                "seven_day_opus": null
+            },
+            "session": {
+                "total_cost_usd": 0.0042,
+                "total_duration_ms": 3_725_000,
+                "total_lines_added": 12,
+                "total_lines_removed": 3,
+                "model_usage": {
+                    "claude-opus-5-5": {
+                        "inputTokens": 1200, "outputTokens": 340, "cacheReadInputTokens": 50000,
+                        "cacheCreationInputTokens": 0, "costUSD": 0.0042
+                    }
+                }
+            }
+        });
+        let now = "2026-11-26T09:30:00+00:00"
+            .parse()
+            .expect("a valid timestamp");
+        let sections = usage_sections_at(&response, now);
+        let limits = &sections[0].rows;
+        assert_eq!(limits.len(), 2);
+        assert_eq!(limits[0].label, "Session (5 hours)");
+        assert_eq!(limits[0].badge.as_deref(), Some("7%"));
+        assert_eq!(limits[0].detail.as_deref(), Some("Resets in 2h 9m"));
+        assert_eq!(limits[1].badge.as_deref(), Some("45%"));
+        assert_eq!(limits[1].detail.as_deref(), Some("Resets in 4d 15h"));
+        let session: Vec<(&str, &str)> = sections[1]
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.label.as_ref(),
+                    row.detail.as_deref().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            session,
+            [
+                ("Estimated cost", "$0.0042"),
+                ("Duration", "1h 2m 5s"),
+                ("Code changes", "12 lines added, 3 lines removed")
+            ]
+        );
+        let model = &sections[2].rows[0];
+        assert_eq!(model.label, "claude-opus-5-5");
+        assert_eq!(model.badge.as_deref(), Some("$0.0042"));
+        assert_eq!(
+            model.detail.as_deref(),
+            Some("1,200 in, 340 out, 50,000 cache read, 0 cache write")
+        );
+
+        let unavailable = usage_sections_at(&json!({ "rate_limits": null }), now);
+        assert_eq!(unavailable.len(), 1);
+        assert_eq!(unavailable[0].rows.len(), 1);
+    }
+
+    #[test]
+    fn context_rows_sum_to_total() {
+        let response = json!({
+            "totalTokens": 3000,
+            "rawMaxTokens": 100_000,
+            "categories": [
+                { "name": "System prompt", "tokens": 2000, "kind": "used" },
+                { "name": "Messages", "tokens": 1000, "kind": "used" },
+                { "name": "Autocompact buffer", "tokens": 33000, "kind": "buffer" },
+                { "name": "Free space", "tokens": 64000, "kind": "free" }
+            ],
+            "memoryFiles": [
+                { "path": "/home/me/.claude/CLAUDE.md", "type": "User", "tokens": 700 }
+            ]
+        });
+        let sections = context_sections(&response);
+        let titles: Vec<&str> = sections
+            .iter()
+            .map(|section| section.title.as_ref())
+            .collect();
+        assert_eq!(titles, ["In context", "Reserved and free", "Memory files"]);
+        let tokens = |row: &DialogRow| -> u64 {
+            row.detail
+                .as_deref()
+                .and_then(|detail| detail.split_whitespace().next())
+                .and_then(|count| count.replace(',', "").parse().ok())
+                .expect("a token count")
+        };
+        assert_eq!(sections[0].rows.iter().map(tokens).sum::<u64>(), 3000);
+        assert_eq!(sections[0].rows[0].badge.as_deref(), Some("2.0%"));
+        assert_eq!(sections[1].rows[1].badge.as_deref(), Some("64.0%"));
+        assert_eq!(sections[2].rows[0].label, "CLAUDE.md");
+        assert_eq!(sections[2].rows[0].badge.as_deref(), Some("User"));
+        assert_eq!(context_sections(&json!({})), []);
+    }
+
+    #[test]
+    fn export_writes_the_returned_text() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let root = directory.path();
+        let path = export_destination(root, "notes/chat.md").expect("inside the project");
+        assert_eq!(path, root.join("notes").join("chat.md"));
+        write_new_file(&path, "# Chat\n").expect("writes");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("exported file"),
+            "# Chat\n"
+        );
+        let error = write_new_file(&path, "other").expect_err("never replaces a file");
+        assert!(error.to_string().contains("already exists"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("exported file"),
+            "# Chat\n"
+        );
+        assert_eq!(
+            export_destination(root, "./a/../b.md").expect("inside the project"),
+            root.join("b.md")
+        );
+    }
+
+    #[test]
+    fn export_refuses_paths_outside_the_project() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let root = directory.path();
+        let elsewhere = tempfile::tempdir().expect("temporary directory");
+        let absolute = elsewhere.path().join("x.md");
+        for file in [
+            "../x.md",
+            "notes/../../x.md",
+            absolute.to_str().expect("a UTF-8 path"),
+            ".",
+            "",
+        ] {
+            let error = export_destination(root, file).expect_err(file);
+            assert!(error.to_string().contains("outside"), "{file}: {error}");
+        }
+        assert!(export_destination(root, &root.join("x.md").to_string_lossy()).is_ok());
+    }
+
+    #[gpui::test]
+    fn copy_nth_picks_the_right_reply(cx: &mut TestAppContext) {
+        let entries = cx.update(|cx| {
+            ["first", "second", "third"]
+                .map(|text| Entry::Assistant {
+                    markdown: cx.new(|cx| markdown::Markdown::new(text.into(), None, None, cx)),
+                    at: 0,
+                })
+                .into_iter()
+                .chain([Entry::Notice {
+                    text: "note".into(),
+                    is_error: false,
+                }])
+                .collect::<Vec<_>>()
+        });
+        cx.update(|cx| {
+            assert_eq!(nth_reply(&entries, 1, cx).as_deref(), Some("third"));
+            assert_eq!(nth_reply(&entries, 2, cx).as_deref(), Some("second"));
+            assert_eq!(nth_reply(&entries, 3, cx).as_deref(), Some("first"));
+            assert_eq!(nth_reply(&entries, 4, cx), None);
+            assert_eq!(nth_reply(&[], 1, cx), None);
+        });
     }
 
     #[gpui::test]

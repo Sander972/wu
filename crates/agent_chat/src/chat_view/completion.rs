@@ -239,6 +239,8 @@ impl ChatView {
                             | AppCommand::Mcp
                             | AppCommand::Permissions
                             | AppCommand::Plugins
+                            | AppCommand::Usage
+                            | AppCommand::Export { .. }
                     )
                 )
             });
@@ -810,7 +812,10 @@ impl ChatView {
             | AppCommand::OutputStyle
             | AppCommand::Mcp
             | AppCommand::Permissions
-            | AppCommand::Plugins => self.show_claude_dialog(&command, window, cx),
+            | AppCommand::Plugins
+            | AppCommand::Usage => self.show_claude_dialog(&command, window, cx),
+            AppCommand::Export { file } => self.export_conversation(file, window, cx),
+            AppCommand::Copy { nth } => self.copy_reply(nth, cx),
             AppCommand::Settings | AppCommand::Diff | AppCommand::Files | AppCommand::Terminal => {
                 let Some(name) = command.action_name() else {
                     return;

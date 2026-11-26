@@ -100,10 +100,13 @@ pub(crate) enum AppCommand {
     Mcp,
     Permissions,
     Plugins,
+    Usage,
+    Export { file: Option<String> },
+    Copy { nth: Option<usize> },
 }
 
 impl AppCommand {
-    const ALL: [AppCommand; 20] = [
+    const ALL: [AppCommand; 23] = [
         AppCommand::Model,
         AppCommand::New,
         AppCommand::Resume,
@@ -127,6 +130,9 @@ impl AppCommand {
         AppCommand::Mcp,
         AppCommand::Permissions,
         AppCommand::Plugins,
+        AppCommand::Usage,
+        AppCommand::Export { file: None },
+        AppCommand::Copy { nth: None },
     ];
 
     fn name(&self) -> &'static str {
@@ -151,6 +157,9 @@ impl AppCommand {
             AppCommand::Mcp => "mcp",
             AppCommand::Permissions => "permissions",
             AppCommand::Plugins => "plugins",
+            AppCommand::Usage => "usage",
+            AppCommand::Export { .. } => "export",
+            AppCommand::Copy { .. } => "copy",
         }
     }
 
@@ -176,6 +185,9 @@ impl AppCommand {
             AppCommand::Mcp => t!("Wu: manage MCP servers"),
             AppCommand::Permissions => t!("Wu: manage permission rules"),
             AppCommand::Plugins => t!("Wu: manage plugins and marketplaces"),
+            AppCommand::Usage => t!("Wu: show plan usage and session cost"),
+            AppCommand::Export { .. } => t!("Wu: save the conversation to a file"),
+            AppCommand::Copy { .. } => t!("Wu: copy a reply to the clipboard"),
         }
     }
 
@@ -201,7 +213,10 @@ impl AppCommand {
             | AppCommand::OutputStyle
             | AppCommand::Mcp
             | AppCommand::Permissions
-            | AppCommand::Plugins => None,
+            | AppCommand::Plugins
+            | AppCommand::Usage
+            | AppCommand::Export { .. }
+            | AppCommand::Copy { .. } => None,
         }
     }
 }
@@ -285,6 +300,18 @@ pub(crate) fn app_command_for_text(text: &str, items: &[CommandItem]) -> Option<
             Some(AppCommand::Fork {
                 text: (!argument.is_empty()).then(|| argument.to_string()),
             })
+        }
+        CommandTarget::App(AppCommand::Export { .. }) if item.name == name => {
+            Some(AppCommand::Export {
+                file: (!argument.is_empty()).then(|| argument.to_string()),
+            })
+        }
+        CommandTarget::App(AppCommand::Copy { .. }) if item.name == name => {
+            let nth = match argument {
+                "" => None,
+                number => Some(number.parse::<usize>().ok().filter(|nth| *nth > 0)?),
+            };
+            Some(AppCommand::Copy { nth })
         }
         CommandTarget::App(command) if item.name == name && argument.is_empty() => {
             Some(command.clone())
@@ -406,6 +433,23 @@ mod tests {
             app_command_for_text("/rewind", &items),
             Some(AppCommand::Rewind)
         );
+    }
+
+    #[test]
+    fn export_takes_a_file_and_copy_a_reply_number() {
+        let items = command_items(&[]);
+        let parse = |text| app_command_for_text(text, &items);
+        assert_eq!(parse("/export"), Some(AppCommand::Export { file: None }));
+        assert_eq!(
+            parse("/export notes/chat 1.md"),
+            Some(AppCommand::Export {
+                file: Some("notes/chat 1.md".into())
+            })
+        );
+        assert_eq!(parse("/copy"), Some(AppCommand::Copy { nth: None }));
+        assert_eq!(parse("/copy 2"), Some(AppCommand::Copy { nth: Some(2) }));
+        assert_eq!(parse("/copy 0"), None);
+        assert_eq!(parse("/copy two"), None);
     }
 
     #[test]
