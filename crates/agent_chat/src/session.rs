@@ -1443,6 +1443,11 @@ impl AgentSession {
         self.working
     }
 
+    /// Without a live run, a control request goes to a one-off process, so session-scoped changes are lost.
+    pub fn has_live_run(&self) -> bool {
+        self.run.is_some()
+    }
+
     fn listed_state(&self) -> ListedState {
         ListedState {
             working: self.working,

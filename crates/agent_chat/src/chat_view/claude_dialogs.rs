@@ -28,7 +28,10 @@ pub(crate) struct DialogRow {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[expect(dead_code, reason = "OpenUrl and Shell rows come with the dialogs that need them")]
+#[expect(
+    dead_code,
+    reason = "OpenUrl and Shell rows come with the dialogs that need them"
+)]
 pub(crate) enum RowAction {
     OpenPath(PathBuf),
     OpenUrl(String),
@@ -131,7 +134,7 @@ pub(crate) fn memory_sections(response: &Value) -> Vec<DialogSection> {
             .into_iter()
             .collect()
     };
-    let files = items(response, "files")
+    let files: Vec<DialogRow> = items(response, "files")
         .map(|file| DialogRow {
             detail: text(file, "description"),
             badge: (file["exists"] == false).then(|| t!("Not created yet")),
@@ -143,10 +146,13 @@ pub(crate) fn memory_sections(response: &Value) -> Vec<DialogSection> {
             )
         })
         .collect();
-    let mut sections = vec![DialogSection {
-        title: t!("Memory files"),
-        rows: files,
-    }];
+    let mut sections = Vec::new();
+    if !files.is_empty() {
+        sections.push(DialogSection {
+            title: t!("Memory files"),
+            rows: files,
+        });
+    }
     let mut memories = Vec::new();
     let auto_memory = &response["auto_memory"];
     if auto_memory.is_object() {
@@ -265,17 +271,22 @@ pub(crate) fn sandbox_sections(response: &Value) -> Vec<DialogSection> {
     sections
 }
 
-fn output_style_sections(styles: &Value, settings: &Value) -> Vec<DialogSection> {
+fn output_style_sections(styles: &Value, settings: &Value, live_run: bool) -> Vec<DialogSection> {
     let current = settings["effective"]["outputStyle"]
         .as_str()
         .unwrap_or("default");
-    let rows = items(styles, "available_output_styles")
+    let note = (!live_run).then(|| {
+        DialogRow::new(t!(
+            "Start a turn first: the output style applies to the running Claude session."
+        ))
+    });
+    let styles = items(styles, "available_output_styles")
         .filter_map(Value::as_str)
         .map(|style| {
             let mut row = DialogRow::new(style.to_string());
             if style == current {
                 row.badge = Some(t!("Current"));
-            } else {
+            } else if live_run {
                 row.actions.push(RowAction::Control {
                     label: t!("Use"),
                     request: json!({
@@ -285,11 +296,10 @@ fn output_style_sections(styles: &Value, settings: &Value) -> Vec<DialogSection>
                 });
             }
             row
-        })
-        .collect();
+        });
     vec![DialogSection {
         title: t!("Styles"),
-        rows,
+        rows: note.into_iter().chain(styles).collect(),
     }]
 }
 
@@ -369,13 +379,20 @@ impl ClaudeDialog {
         let reload: Reload = Box::new({
             let session = session.clone();
             move |cx| {
-                let (styles, settings) = session.update(cx, |session, cx| {
+                let (styles, settings, live_run) = session.update(cx, |session, cx| {
                     (
                         session.control(json!({ "subtype": "reload_output_styles" }), cx),
                         session.control(json!({ "subtype": "get_settings" }), cx),
+                        session.has_live_run(),
                     )
                 });
-                cx.spawn(async move |_| Ok(output_style_sections(&styles.await?, &settings.await?)))
+                cx.spawn(async move |_| {
+                    Ok(output_style_sections(
+                        &styles.await?,
+                        &settings.await?,
+                        live_run,
+                    ))
+                })
             }
         });
         Self::new(t!("Output Style"), session, workspace, reload, cx)
@@ -649,46 +666,52 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let command = command.clone();
+        type Build = Box<
+            dyn FnOnce(
+                Entity<AgentSession>,
+                WeakEntity<Workspace>,
+                &mut Context<ClaudeDialog>,
+            ) -> ClaudeDialog,
+        >;
+        let control = |title: SharedString,
+                       subtype: &'static str,
+                       sections: fn(&Value) -> Vec<DialogSection>|
+         -> Build {
+            Box::new(move |session, workspace, cx| {
+                ClaudeDialog::for_control(
+                    title,
+                    json!({ "subtype": subtype }),
+                    sections,
+                    session,
+                    workspace,
+                    cx,
+                )
+            })
+        };
+        let build = match command {
+            AppCommand::Status => control(t!("Status"), "get_status", status_sections),
+            AppCommand::Hooks => control(t!("Hooks"), "get_hooks_listing", hooks_sections),
+            AppCommand::Memory => control(t!("Memory"), "get_memory_dialog", memory_sections),
+            AppCommand::Skills => control(t!("Skills"), "get_skills_dialog", skills_sections),
+            AppCommand::Sandbox => control(t!("Sandbox"), "get_sandbox_dialog", sandbox_sections),
+            AppCommand::OutputStyle => Box::new(ClaudeDialog::output_styles),
+            AppCommand::Model
+            | AppCommand::New
+            | AppCommand::Resume
+            | AppCommand::Settings
+            | AppCommand::Diff
+            | AppCommand::Files
+            | AppCommand::Terminal
+            | AppCommand::Stop
+            | AppCommand::Plan { .. }
+            | AppCommand::Fork { .. }
+            | AppCommand::Rewind => return,
+        };
         let session = self.session.clone();
         let weak_workspace = self.workspace.clone();
         self.workspace
             .update(cx, |workspace, cx| {
-                workspace.toggle_modal(window, cx, move |_, cx| {
-                    let dialog = |title: SharedString,
-                                  subtype: &str,
-                                  sections: fn(&Value) -> Vec<DialogSection>,
-                                  cx: &mut Context<ClaudeDialog>| {
-                        ClaudeDialog::for_control(
-                            title,
-                            json!({ "subtype": subtype }),
-                            sections,
-                            session.clone(),
-                            weak_workspace.clone(),
-                            cx,
-                        )
-                    };
-                    match command {
-                        AppCommand::Status => {
-                            dialog(t!("Status"), "get_status", status_sections, cx)
-                        }
-                        AppCommand::Hooks => {
-                            dialog(t!("Hooks"), "get_hooks_listing", hooks_sections, cx)
-                        }
-                        AppCommand::Memory => {
-                            dialog(t!("Memory"), "get_memory_dialog", memory_sections, cx)
-                        }
-                        AppCommand::Skills => {
-                            dialog(t!("Skills"), "get_skills_dialog", skills_sections, cx)
-                        }
-                        AppCommand::Sandbox => {
-                            dialog(t!("Sandbox"), "get_sandbox_dialog", sandbox_sections, cx)
-                        }
-                        _ => {
-                            ClaudeDialog::output_styles(session.clone(), weak_workspace.clone(), cx)
-                        }
-                    }
-                })
+                workspace.toggle_modal(window, cx, move |_, cx| build(session, weak_workspace, cx))
             })
             .log_err();
     }
@@ -820,6 +843,7 @@ mod tests {
 
         response["auto_memory"]["toggleable"] = json!(false);
         assert_eq!(memory_sections(&response)[1].rows[0].actions, []);
+        assert_eq!(memory_sections(&json!({})), []);
     }
 
     #[test]
@@ -886,6 +910,7 @@ mod tests {
         let rows = &output_style_sections(
             &styles,
             &json!({ "effective": { "outputStyle": "Concise" } }),
+            true,
         )[0]
         .rows;
         assert_eq!(
@@ -898,8 +923,21 @@ mod tests {
         assert_eq!(rows[1].badge, Some(t!("Current")));
         assert_eq!(rows[1].actions, []);
 
-        let rows = &output_style_sections(&styles, &json!({ "effective": {} }))[0].rows;
+        let rows = &output_style_sections(&styles, &json!({ "effective": {} }), true)[0].rows;
         assert_eq!(rows[0].badge, Some(t!("Current")));
+    }
+
+    #[test]
+    fn output_styles_without_a_live_run_explain_instead_of_offering_use() {
+        let styles = json!({ "available_output_styles": ["default", "Concise"] });
+        let rows = &output_style_sections(&styles, &json!({ "effective": {} }), false)[0].rows;
+        assert_eq!(
+            rows[0].label,
+            t!("Start a turn first: the output style applies to the running Claude session.")
+        );
+        let labels: Vec<&str> = rows[1..].iter().map(|row| row.label.as_ref()).collect();
+        assert_eq!(labels, ["default", "Concise"]);
+        assert!(rows.iter().all(|row| row.actions.is_empty()));
     }
 
     #[gpui::test]
@@ -927,6 +965,7 @@ mod tests {
         run_until(cx, &settled);
         dialog.update(cx, |dialog, cx| {
             assert!(matches!(dialog.state, DialogState::Loaded(_)));
+            assert!(!dialog.session.read(cx).has_live_run());
             dialog.run_control(json!({ "subtype": "mcp_status" }), cx);
         });
         run_until(cx, &settled);

@@ -386,6 +386,16 @@ mod tests {
     }
 
     #[test]
+    fn claude_never_shadows_a_wu_command() {
+        let shadowed: Vec<&str> = AppCommand::ALL
+            .iter()
+            .map(AppCommand::name)
+            .filter(|name| !agent_harness::claude::is_hidden_command(name))
+            .collect();
+        assert_eq!(shadowed, Vec::<&str>::new());
+    }
+
+    #[test]
     fn details_show_argument_hints() {
         let command = SlashCommand {
             name: "review".into(),
