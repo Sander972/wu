@@ -2588,9 +2588,14 @@ impl AgentSession {
             let executable = harness
                 .executable_path()
                 .ok_or_else(|| anyhow::anyhow!(t!("The agent isn't installed.").to_string()))?;
-            let output =
-                agent_harness::update::run_cli(&executable, &arguments, &cwd, input.as_deref())
-                    .await?;
+            let output = agent_harness::update::run_cli(
+                &executable,
+                &agent_harness::ClaudeLaunch::current(),
+                &arguments,
+                &cwd,
+                input.as_deref(),
+            )
+            .await?;
             anyhow::Ok(output)
         });
         cx.background_spawn(async move { work.await? })

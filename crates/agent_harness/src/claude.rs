@@ -254,14 +254,7 @@ impl ClaudeHarness {
         cmd.args(permission_args(request.permission));
         // Lets `rewind_files` restore files to how they were before a given prompt.
         cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
-        // A wu started from an IDE's terminal inherits that IDE's port, and a chat must not connect to it.
-        cmd.env_remove("CLAUDE_CODE_SSE_PORT");
-        // Like the VS Code extension, never pass on resume variables Wu itself inherited, so a chat only runs a turn again when asked to.
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with("CLAUDE_CODE_RESUME_") {
-                cmd.env_remove(key);
-            }
-        }
+        remove_inherited_variables(&mut cmd);
         if request.resume_interrupted {
             // The CLI runs the cut-off turn again by itself at startup, so no prompt is sent; like the VS Code extension, it is told how old a turn it may still run.
             cmd.env("CLAUDE_CODE_RESUME_INTERRUPTED_TURN", "1");
@@ -2287,6 +2280,26 @@ fn launch_command(exe: &Path, launch: &ClaudeLaunch) -> Command {
     cmd
 }
 
+/// A one-off `claude <arguments>` run (MCP servers, plugins, permission rules, sign-out) starts the same Claude setup as a chat; the caller adds the arguments.
+pub(crate) fn cli_command(exe: &Path, launch: &ClaudeLaunch) -> Command {
+    let mut cmd = launch_command(exe, launch);
+    crate::compose_child_path(&mut cmd, exe);
+    remove_inherited_variables(&mut cmd);
+    apply_user_environment(&mut cmd, launch);
+    cmd
+}
+
+fn remove_inherited_variables(cmd: &mut Command) {
+    // A wu started from an IDE's terminal inherits that IDE's port, and Claude must not connect to it.
+    cmd.env_remove("CLAUDE_CODE_SSE_PORT");
+    // Like the VS Code extension, never pass on resume variables Wu itself inherited, so a chat only runs a turn again when asked to.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("CLAUDE_CODE_RESUME_") {
+            cmd.env_remove(key);
+        }
+    }
+}
+
 fn apply_user_environment(cmd: &mut Command, launch: &ClaudeLaunch) {
     for (name, value) in &launch.environment {
         if user_may_set_environment_variable(name, value) {
@@ -2930,6 +2943,32 @@ mod tests {
         }
         assert!(!envs.contains_key(std::ffi::OsStr::new("")));
         assert!(!envs.contains_key(std::ffi::OsStr::new("A=B")));
+    }
+
+    #[test]
+    fn one_off_cli_commands_start_the_users_claude_setup() {
+        let launch = crate::ClaudeLaunch {
+            process_wrapper: Some("/opt/my tools/wrapper".into()),
+            environment: vec![
+                ("MY_PROXY".into(), "http://localhost:1".into()),
+                ("CLAUDE_CODE_SSE_PORT".into(), "1234".into()),
+            ],
+            ..Default::default()
+        };
+        let command = cli_command(Path::new("claude"), &launch);
+        assert_eq!(command.as_std().get_program(), "/opt/my tools/wrapper");
+        assert_eq!(command.as_std().get_args().collect::<Vec<_>>(), ["claude"]);
+        let envs: std::collections::HashMap<_, _> = command.as_std().get_envs().collect();
+        let value = |name: &str| envs.get(std::ffi::OsStr::new(name)).copied().flatten();
+        assert_eq!(
+            value("MY_PROXY"),
+            Some(std::ffi::OsStr::new("http://localhost:1"))
+        );
+        assert!(
+            envs.contains_key(std::ffi::OsStr::new("CLAUDE_CODE_SSE_PORT"))
+                && value("CLAUDE_CODE_SSE_PORT").is_none(),
+            "the IDE port stays removed"
+        );
     }
 
     #[test]

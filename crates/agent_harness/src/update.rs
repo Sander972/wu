@@ -28,8 +28,10 @@ pub async fn update_cli(
     installed_after: impl FnOnce() -> Option<PathBuf> + Send,
 ) -> Result<UpdateOutcome, UpdateFailed> {
     let before = version_of(&executable).await;
+    let mut command = crate::process::command(&executable);
+    crate::compose_child_path(&mut command, &executable);
     let output = run(
-        &executable,
+        command,
         args,
         &crate::executable::scratch_dir(),
         None,
@@ -52,15 +54,16 @@ pub async fn update_cli(
     })
 }
 
-/// Runs the CLI with `args` as separate arguments, never through a shell, and returns its stdout, or fails with its stderr when it exits unsuccessfully; `input` is written to its stdin.
+/// Runs Claude Code, started the way `launch` says, with `args` as separate arguments, never through a shell, and returns its stdout, or fails with its stderr when it exits unsuccessfully; `input` is written to its stdin.
 pub async fn run_cli(
     executable: &Path,
+    launch: &crate::ClaudeLaunch,
     args: &[String],
     cwd: &Path,
     input: Option<&str>,
 ) -> Result<String, CliFailed> {
     let output = run(
-        executable,
+        crate::claude::cli_command(executable, launch),
         args,
         cwd,
         input,
@@ -80,14 +83,13 @@ pub async fn run_cli(
 }
 
 async fn run(
-    executable: &Path,
+    mut command: crate::process::Command,
     args: &[impl AsRef<std::ffi::OsStr>],
     cwd: &Path,
     input: Option<&str>,
     timeout: Duration,
     timed_out: String,
 ) -> Result<std::process::Output, String> {
-    let mut command = crate::process::command(executable);
     command
         .args(args)
         .current_dir(cwd)
@@ -99,7 +101,6 @@ async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    crate::compose_child_path(&mut command, executable);
     let exchange = async {
         let mut child = command.spawn()?;
         let written = match (input, child.stdin.take()) {
@@ -237,7 +238,7 @@ exit 1",
             ),
         );
         let arguments = ["mcp", "remove", "my server; rm -rf x"].map(String::from);
-        let error = run_cli(&cli, &arguments, dir.path(), None)
+        let error = run_cli(&cli, &Default::default(), &arguments, dir.path(), None)
             .await
             .expect_err("fails");
         assert_eq!(error.0, "no such server");
@@ -257,9 +258,15 @@ exit 1",
             "1.0.0",
             &format!("cat > '{}'", record.display()),
         );
-        run_cli(&cli, &[], dir.path(), Some("{\"op\":\"add\"}"))
-            .await
-            .expect("runs");
+        run_cli(
+            &cli,
+            &Default::default(),
+            &[],
+            dir.path(),
+            Some("{\"op\":\"add\"}"),
+        )
+        .await
+        .expect("runs");
         assert_eq!(
             std::fs::read_to_string(record).expect("recorded input"),
             "{\"op\":\"add\"}"
@@ -276,7 +283,7 @@ exit 1",
 exit 2",
         );
         let input = "x".repeat(8 * 1024 * 1024);
-        let error = run_cli(&cli, &[], dir.path(), Some(&input))
+        let error = run_cli(&cli, &Default::default(), &[], dir.path(), Some(&input))
             .await
             .expect_err("fails");
         assert_eq!(error.0, "refusing to run");
