@@ -438,7 +438,7 @@ core-foundation = "0.10"
 core-foundation-sys = "0.8.6"
 core-graphics = "0.24"
 core-text = "21"
-core-video = { version = "0.5.2", features = ["metal"] }
+core-video = { version = "0.6.0", features = ["metal"] }
 cpal = "0.18"
 criterion = { version = "0.8", features = ["html_reports"] }
 crossbeam = "0.8.4"
