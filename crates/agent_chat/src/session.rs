@@ -8695,7 +8695,9 @@ done
                 .all(|(_, archived, unarchived_at)| *archived && unarchived_at.is_none())
         );
 
-        reopened.update(cx, |store, cx| store.set_archived(&[side_id.clone()], false, cx));
+        reopened.update(cx, |store, cx| {
+            store.set_archived(std::slice::from_ref(&side_id), false, cx)
+        });
         cx.run_until_parked();
         let flags = archived_flags(&reopened, cx);
         for (id, archived, unarchived_at) in flags {
