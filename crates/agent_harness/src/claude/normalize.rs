@@ -199,6 +199,17 @@ fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+fn task_status(status: &str) -> Option<DoneStatus> {
+    match status {
+        "completed" | "complete" | "succeeded" | "success" => Some(DoneStatus::Completed),
+        "failed" | "errored" | "error" => Some(DoneStatus::Errored),
+        "killed" | "cancelled" | "canceled" | "stopped" | "interrupted" => {
+            Some(DoneStatus::Interrupted)
+        }
+        _ => None,
+    }
+}
+
 fn task_kind(task_type: Option<&str>, is_subagent: bool) -> BackgroundTaskKind {
     match task_type {
         _ if is_subagent => BackgroundTaskKind::Agent,
@@ -355,13 +366,8 @@ impl Normalizer {
         match frame {
             Frame::System(f) => {
                 if f.subtype == "task_notification" {
-                    let status = match f.status.as_deref().unwrap_or("") {
-                        "completed" | "complete" | "succeeded" | "success" => DoneStatus::Completed,
-                        "failed" | "errored" | "error" => DoneStatus::Errored,
-                        "killed" | "cancelled" | "canceled" | "stopped" | "interrupted" => {
-                            DoneStatus::Interrupted
-                        }
-                        _ => return Vec::new(),
+                    let Some(status) = task_status(f.status.as_deref().unwrap_or("")) else {
+                        return Vec::new();
                     };
                     let mut events = Vec::new();
                     if let Some(task) = f.task_id.as_deref().filter(|t| !t.is_empty()) {
@@ -391,6 +397,31 @@ impl Normalizer {
                         ));
                     }
                     return events;
+                }
+                if f.subtype == "task_progress" {
+                    let Some(task_id) = f.task_id.filter(|task| !task.is_empty()) else {
+                        return Vec::new();
+                    };
+                    let usage = f.usage.unwrap_or_default();
+                    return vec![AgentEvent::TaskProgress {
+                        task_id,
+                        total_tokens: usage["total_tokens"].as_u64(),
+                        tool_uses: usage["tool_uses"].as_u64(),
+                        duration_ms: usage["duration_ms"].as_u64(),
+                        last_tool: f.last_tool_name,
+                    }];
+                }
+                if f.subtype == "task_updated" {
+                    let status = f.patch.as_ref().and_then(|patch| patch["status"].as_str());
+                    return match (
+                        f.task_id.filter(|task| !task.is_empty()),
+                        status.and_then(task_status),
+                    ) {
+                        (Some(task_id), Some(status)) => {
+                            vec![AgentEvent::TaskFinished { task_id, status }]
+                        }
+                        _ => Vec::new(),
+                    };
                 }
                 if f.subtype == "background_tasks_changed" {
                     let tasks = f
@@ -1423,6 +1454,39 @@ mod tests {
             norm.normalize(empty, false),
             vec![AgentEvent::BackgroundTasksChanged { tasks: Vec::new() }]
         );
+    }
+
+    #[test]
+    fn task_progress_becomes_an_event() {
+        let mut norm = Normalizer::new();
+        let mut events =
+            |line: &str| norm.normalize(crate::claude::wire::parse_frame(line).unwrap(), false);
+        assert_eq!(
+            events(
+                r#"{"type":"system","subtype":"task_progress","task_id":"a1","tool_use_id":"toolu_agent","description":"Explore","usage":{"total_tokens":1200,"tool_uses":3,"duration_ms":4500},"last_tool_name":"Read"}"#
+            ),
+            vec![AgentEvent::TaskProgress {
+                task_id: "a1".into(),
+                total_tokens: Some(1200),
+                tool_uses: Some(3),
+                duration_ms: Some(4500),
+                last_tool: Some("Read".into()),
+            }]
+        );
+        assert!(
+            events(r#"{"type":"system","subtype":"task_progress","usage":{"total_tokens":1}}"#)
+                .is_empty()
+        );
+        assert_eq!(
+            events(
+                r#"{"type":"system","subtype":"task_updated","task_id":"bg1","patch":{"status":"killed","end_time":1}}"#
+            ),
+            vec![AgentEvent::TaskFinished {
+                task_id: "bg1".into(),
+                status: DoneStatus::Interrupted,
+            }]
+        );
+        assert!(events(r#"{"type":"system","subtype":"task_updated","task_id":"bg1","patch":{"is_backgrounded":true}}"#).is_empty());
     }
 
     fn without_tasks(events: Vec<AgentEvent>) -> Vec<AgentEvent> {

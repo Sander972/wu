@@ -2934,6 +2934,10 @@ impl ChatView {
                 .map(|view| (view.additions, view.deletions)),
             _ => None,
         };
+        let run_in_background = match entry {
+            Entry::Tool(tool) => self.render_run_in_background(&tool.id, cx),
+            _ => None,
+        };
         let expanded = match entry {
             Entry::Thinking(_) => self.thought_open(&key),
             _ => self.expanded_rows.contains(&key),
@@ -3017,6 +3021,7 @@ impl ChatView {
                         }),
                 )
             })
+            .children(run_in_background)
             .child(
                 div()
                     .size(px(18.))
@@ -3188,6 +3193,7 @@ impl ChatView {
                                         .child(model),
                                 )
                             })
+                            .children(self.render_run_in_background(&tool.id, cx))
                             .when(running, |this| {
                                 this.child(div().flex_none().child(subagent_spinner(
                                     format!("subagent-spinner-{}", tool.id).into(),

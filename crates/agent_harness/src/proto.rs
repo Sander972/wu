@@ -526,6 +526,14 @@ pub enum AgentEvent {
         description: String,
     },
     #[serde(rename_all = "camelCase")]
+    TaskProgress {
+        task_id: String,
+        total_tokens: Option<u64>,
+        tool_uses: Option<u64>,
+        duration_ms: Option<u64>,
+        last_tool: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
     TaskFinished {
         task_id: String,
         status: DoneStatus,

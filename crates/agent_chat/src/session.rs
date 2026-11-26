@@ -1051,6 +1051,7 @@ pub struct BackgroundTask {
     pub kind: agent_harness::BackgroundTaskKind,
     pub description: String,
     pub started_at: Instant,
+    pub total_tokens: Option<u64>,
 }
 
 pub struct PendingQuestion {
@@ -1611,6 +1612,17 @@ impl AgentSession {
 
     pub fn background_tasks(&self) -> &[BackgroundTask] {
         &self.background_tasks
+    }
+
+    /// A Bash command or subagent still running in the turn, which Claude reported as a task it can move to the background.
+    pub fn can_move_to_background(&self, tool_use_id: &str) -> bool {
+        let is_task = |task: &BackgroundTask| task.tool_use_id.as_deref() == Some(tool_use_id);
+        self.run.is_some()
+            && self
+                .tool_entry(tool_use_id)
+                .is_some_and(|tool| tool.status == ToolStatus::Running)
+            && self.known_tasks.values().any(is_task)
+            && !self.background_tasks.iter().any(is_task)
     }
 
     pub fn tool_entry(&self, id: &str) -> Option<&ToolEntry> {
@@ -3032,15 +3044,13 @@ impl AgentSession {
                 kind,
                 description,
             } => {
-                let started_at = self
-                    .known_tasks
-                    .get(&task_id)
-                    .or_else(|| {
-                        self.background_tasks
-                            .iter()
-                            .find(|task| task.task_id == task_id)
-                    })
-                    .map_or_else(Instant::now, |task| task.started_at);
+                let earlier = self.known_tasks.get(&task_id).or_else(|| {
+                    self.background_tasks
+                        .iter()
+                        .find(|task| task.task_id == task_id)
+                });
+                let started_at = earlier.map_or_else(Instant::now, |task| task.started_at);
+                let total_tokens = earlier.and_then(|task| task.total_tokens);
                 if let Some(live) = self
                     .background_tasks
                     .iter_mut()
@@ -3061,8 +3071,23 @@ impl AgentSession {
                         kind,
                         description,
                         started_at,
+                        total_tokens,
                     },
                 );
+            }
+            AgentEvent::TaskProgress {
+                task_id,
+                total_tokens,
+                ..
+            } => {
+                for task in self
+                    .background_tasks
+                    .iter_mut()
+                    .chain(self.known_tasks.values_mut())
+                    .filter(|task| task.task_id == task_id)
+                {
+                    task.total_tokens = total_tokens.or(task.total_tokens);
+                }
             }
             AgentEvent::TaskFinished { task_id, .. } => {
                 self.known_tasks.remove(&task_id);
@@ -3080,6 +3105,7 @@ impl AgentSession {
                         BackgroundTask {
                             tool_use_id: known.and_then(|task| task.tool_use_id.clone()),
                             started_at: known.map_or_else(Instant::now, |task| task.started_at),
+                            total_tokens: known.and_then(|task| task.total_tokens),
                             description: if info.description.trim().is_empty() {
                                 known.map(|task| task.description.clone()).unwrap_or_default()
                             } else {
@@ -8008,6 +8034,26 @@ done
                 session.apply_event(event, cx);
             }
         });
+    }
+
+    /// Gives the session a live run whose control requests land in the returned receiver.
+    pub(crate) fn attach_live_run(
+        session: &Entity<AgentSession>,
+        cx: &mut TestAppContext,
+    ) -> tokio::sync::mpsc::Receiver<Steer> {
+        session.update(cx, |session, _| {
+            let (steering, receiver) = tokio::sync::mpsc::channel(32);
+            session.run = Some(ActiveRun {
+                steering,
+                interrupt: CancellationToken::new(),
+                stopping_turn: false,
+                stop_acknowledged: None,
+                stop_timeout: None,
+                permission: tokio::sync::watch::channel(PermissionMode::Ask).0,
+                _events: Task::ready(()),
+            });
+            receiver
+        })
     }
 
     pub(crate) fn feed_stopped_turn(

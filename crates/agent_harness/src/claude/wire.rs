@@ -64,6 +64,12 @@ pub(crate) struct SystemFrame {
     pub error: Option<Value>,
     #[serde(default)]
     pub no_response: Option<Value>,
+    #[serde(default)]
+    pub usage: Option<Value>,
+    #[serde(default)]
+    pub last_tool_name: Option<String>,
+    #[serde(default)]
+    pub patch: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -500,6 +506,8 @@ pub(crate) fn initialize_request_line(
     let mut request = json!({ "subtype": "initialize" });
     if for_run {
         request["promptSuggestions"] = json!(prompt_suggestions);
+        // Each background task gets its own Stop in wu, so the CLI lets the turn's Stop spare running background agents.
+        request["perTaskStopAffordance"] = json!(true);
         request["sdkMcpServers"] = json!([IDE_MCP_SERVER]);
         request["hooks"] = json!({
             "PreToolUse": [{
@@ -700,6 +708,7 @@ mod tests {
             let line: Value =
                 serde_json::from_str(&initialize_request_line("r", true, enabled)).expect("json");
             assert_eq!(line["request"]["promptSuggestions"], enabled);
+            assert_eq!(line["request"]["perTaskStopAffordance"], true);
         }
         let probe: Value =
             serde_json::from_str(&initialize_request_line("r", false, true)).expect("json");
