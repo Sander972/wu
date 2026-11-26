@@ -720,6 +720,139 @@ impl Harness for ClaudeHarness {
         resume: Option<&str>,
         request: Value,
     ) -> Result<Value, HarnessError> {
+        self.open_control_session(cwd, resume)
+            .await?
+            .call(request)
+            .await
+    }
+
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_mode(request, controls).await
+    }
+}
+
+type PendingReplies = Arc<
+    std::sync::Mutex<Option<HashMap<String, tokio::sync::oneshot::Sender<Result<Value, String>>>>>,
+>;
+
+/// One Claude process that answers several control requests, which can be in flight together.
+pub struct ControlSession {
+    stdin: ChildStdin,
+    // `None` once the process stopped answering, so later requests fail instead of waiting forever.
+    pending: PendingReplies,
+    reader: tokio::task::JoinHandle<()>,
+    child: Option<Child>,
+    kill_grace: Duration,
+}
+
+impl ControlSession {
+    pub async fn call(&mut self, request: Value) -> Result<Value, HarnessError> {
+        self.send(request).await?.await
+    }
+
+    /// Sends `request` and returns its reply to await later, so other requests can go out meanwhile.
+    pub async fn send(
+        &mut self,
+        request: Value,
+    ) -> Result<impl Future<Output = Result<Value, HarnessError>> + Send + 'static, HarnessError>
+    {
+        let exited =
+            || HarnessError::Protocol("claude exited before answering the control request".into());
+        let request_id = format!("{CONTROL_REQUEST_PREFIX}{}", uuid::Uuid::new_v4());
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .ok_or_else(exited)?
+            .insert(request_id.clone(), reply);
+        let line = wire::control_request_line(&request_id, &request);
+        self.stdin.write_all(line.as_bytes()).await?;
+        self.stdin.write_all(b"\n").await?;
+        self.stdin.flush().await?;
+        Ok(async move {
+            answer
+                .await
+                .map_err(|_| exited())?
+                .map_err(HarnessError::Protocol)
+        })
+    }
+}
+
+impl Drop for ControlSession {
+    fn drop(&mut self) {
+        self.reader.abort();
+        // Without a runtime the child still dies: it is spawned with kill_on_drop.
+        if let Some(mut child) = self.child.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let kill_grace = self.kill_grace;
+            runtime.spawn(async move { shutdown_child(&mut child, kill_grace).await });
+        }
+    }
+}
+
+/// Where to sign in: `automatic` returns to the CLI by itself, `manual` shows a code to paste.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginUrls {
+    pub automatic: Option<String>,
+    pub manual: Option<String>,
+}
+
+fn web_url(response: &Value, key: &str) -> Option<String> {
+    response
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|url| url.starts_with("https://"))
+        .map(str::to_owned)
+}
+
+/// Splits a pasted `code#state`; a bare code takes the state of the sign-in address.
+fn pasted_code(pasted: &str, authenticate: &Value) -> Result<(String, String), HarnessError> {
+    let pasted = pasted.trim();
+    let (code, state) = match pasted.split_once('#') {
+        Some((code, state)) => (code, Some(state.to_owned())),
+        None => (
+            pasted,
+            authenticate
+                .get("manualUrl")
+                .and_then(Value::as_str)
+                .and_then(|url| url.split_once('?'))
+                .and_then(|(_, query)| {
+                    query
+                        .split('&')
+                        .find_map(|pair| pair.strip_prefix("state="))
+                })
+                .map(str::to_owned),
+        ),
+    };
+    match state {
+        Some(state) if !code.is_empty() && !state.is_empty() => Ok((code.to_owned(), state)),
+        _ => Err(HarnessError::Protocol(
+            t!("That doesn't look like a sign-in code. Copy the whole code from the sign-in page.")
+                .to_string(),
+        )),
+    }
+}
+
+impl ClaudeHarness {
+    /// Starts a throwaway Claude process in `cwd` for control requests that must reach the same process.
+    pub async fn control_session(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<ControlSession, HarnessError> {
+        self.open_control_session(cwd, None).await
+    }
+
+    async fn open_control_session(
+        &self,
+        cwd: &std::path::Path,
+        resume: Option<&str>,
+    ) -> Result<ControlSession, HarnessError> {
         let exe = self.resolve_executable()?;
         let launch = RunRequest {
             prompt: String::new(),
@@ -747,55 +880,91 @@ impl Harness for ClaudeHarness {
                 HarnessError::Io(e)
             }
         })?;
-        let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             shutdown_child(&mut child, self.kill_grace).await;
             return Err(HarnessError::Protocol("claude child has no stdio".into()));
         };
-        const INITIALIZE_ID: &str = "wu-control-initialize";
-        let request_id = format!("{CONTROL_REQUEST_PREFIX}{}", uuid::Uuid::new_v4());
-        let mut lines = BufReader::new(stdout).lines();
-        let answer = async {
-            let initialize = wire::initialize_request_line(INITIALIZE_ID, false);
-            control_exchange(&mut stdin, &mut lines, &initialize, INITIALIZE_ID).await?;
-            let line = wire::control_request_line(&request_id, &request);
-            control_exchange(&mut stdin, &mut lines, &line, &request_id).await
-        }
-        .await;
-        drop(stdin);
-        let kill_grace = self.kill_grace;
-        tokio::spawn(async move { shutdown_child(&mut child, kill_grace).await });
-        answer
+        let pending: PendingReplies = Arc::new(std::sync::Mutex::new(Some(HashMap::new())));
+        let reader = tokio::spawn({
+            let pending = pending.clone();
+            async move {
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let Some((request_id, answer)) =
+                        wire::control_reply(&line, CONTROL_REQUEST_PREFIX)
+                    else {
+                        continue;
+                    };
+                    let reply = pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_mut()
+                        .and_then(|pending| pending.remove(&request_id));
+                    if let Some(reply) = reply {
+                        reply.send(answer).ok();
+                    }
+                }
+                pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+            }
+        });
+        let mut session = ControlSession {
+            stdin,
+            pending,
+            reader,
+            child: Some(child),
+            kill_grace: self.kill_grace,
+        };
+        session
+            .call(serde_json::json!({ "subtype": "initialize" }))
+            .await?;
+        Ok(session)
     }
 
-    async fn run(
+    /// Signs in to Claude in one process: `urls` gets the sign-in addresses, then either the browser returns to the CLI by itself or a code pasted into `codes` finishes the sign-in.
+    pub async fn login(
         &self,
-        request: RunRequest,
-        controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls).await
-    }
-}
-
-async fn control_exchange(
-    stdin: &mut ChildStdin,
-    lines: &mut tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
-    line: &str,
-    request_id: &str,
-) -> Result<Value, HarnessError> {
-    stdin.write_all(line.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await?;
-    while let Some(output) = lines.next_line().await? {
-        if let Some((_, answer)) = wire::control_reply(&output, request_id) {
-            return answer.map_err(HarnessError::Protocol);
+        cwd: &std::path::Path,
+        urls: tokio::sync::oneshot::Sender<LoginUrls>,
+        mut codes: mpsc::Receiver<String>,
+    ) -> Result<Value, HarnessError> {
+        let mut session = self.control_session(cwd).await?;
+        let authenticate = session
+            .call(serde_json::json!({
+                "subtype": "claude_authenticate",
+                "loginWithClaudeAi": true,
+            }))
+            .await?;
+        urls.send(LoginUrls {
+            automatic: web_url(&authenticate, "automaticUrl"),
+            manual: web_url(&authenticate, "manualUrl"),
+        })
+        .ok();
+        // Sent before any code: the CLI forgets the flow once it completes, and the browser can complete it without one.
+        let completion = session
+            .send(serde_json::json!({ "subtype": "claude_oauth_wait_for_completion" }))
+            .await?;
+        tokio::pin!(completion);
+        tokio::select! {
+            completed = &mut completion => completed,
+            Some(pasted) = codes.recv() => {
+                let (code, state) = pasted_code(&pasted, &authenticate)?;
+                let callback = session
+                    .send(serde_json::json!({
+                        "subtype": "claude_oauth_callback",
+                        "authorizationCode": code,
+                        "state": state,
+                    }))
+                    .await?;
+                // The callback answers when the sign-in ends, with the clearer error when the code is refused.
+                callback.await?;
+                completion.await
+            }
         }
     }
-    Err(HarnessError::Protocol(
-        "claude exited before answering the control request".into(),
-    ))
-}
 
-impl ClaudeHarness {
     async fn run_with_mode(
         &self,
         mut request: RunRequest,
@@ -1897,6 +2066,22 @@ fn flag_settings(request: &RunRequest) -> serde_json::Map<String, Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn pasted_code_is_split_at_hash() {
+        let authenticate =
+            json!({ "manualUrl": "https://claude.example/manual?code=true&state=from-url" });
+        assert_eq!(
+            pasted_code(" abc#xyz\n", &authenticate).ok(),
+            Some(("abc".to_owned(), "xyz".to_owned()))
+        );
+        assert_eq!(
+            pasted_code("abc", &authenticate).ok(),
+            Some(("abc".to_owned(), "from-url".to_owned()))
+        );
+        assert!(pasted_code("abc", &json!({})).is_err());
+        assert!(pasted_code("#xyz", &authenticate).is_err());
+    }
 
     async fn answer_to(
         raw: Value,

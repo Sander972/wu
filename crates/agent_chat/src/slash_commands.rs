@@ -103,10 +103,12 @@ pub(crate) enum AppCommand {
     Usage,
     Export { file: Option<String> },
     Copy { nth: Option<usize> },
+    Login,
+    Logout,
 }
 
 impl AppCommand {
-    const ALL: [AppCommand; 23] = [
+    const ALL: [AppCommand; 25] = [
         AppCommand::Model,
         AppCommand::New,
         AppCommand::Resume,
@@ -133,6 +135,8 @@ impl AppCommand {
         AppCommand::Usage,
         AppCommand::Export { file: None },
         AppCommand::Copy { nth: None },
+        AppCommand::Login,
+        AppCommand::Logout,
     ];
 
     fn name(&self) -> &'static str {
@@ -160,6 +164,8 @@ impl AppCommand {
             AppCommand::Usage => "usage",
             AppCommand::Export { .. } => "export",
             AppCommand::Copy { .. } => "copy",
+            AppCommand::Login => "login",
+            AppCommand::Logout => "logout",
         }
     }
 
@@ -188,6 +194,8 @@ impl AppCommand {
             AppCommand::Usage => t!("Wu: show plan usage and session cost"),
             AppCommand::Export { .. } => t!("Wu: save the conversation to a file"),
             AppCommand::Copy { .. } => t!("Wu: copy a reply to the clipboard"),
+            AppCommand::Login => t!("Wu: sign in to Claude"),
+            AppCommand::Logout => t!("Wu: sign out of Claude"),
         }
     }
 
@@ -216,7 +224,9 @@ impl AppCommand {
             | AppCommand::Plugins
             | AppCommand::Usage
             | AppCommand::Export { .. }
-            | AppCommand::Copy { .. } => None,
+            | AppCommand::Copy { .. }
+            | AppCommand::Login
+            | AppCommand::Logout => None,
         }
     }
 }

@@ -1529,3 +1529,33 @@ async fn control_error_and_timeout_surface() {
         .expect("the run ending resolved the call");
     assert!(!matches!(ended, Ok(Ok(_))), "{ended:?}");
 }
+
+#[tokio::test]
+async fn login_flow_sends_three_requests_to_one_process() {
+    let (urls_sender, urls) = oneshot::channel();
+    let (codes, pasted) = mpsc::channel(1);
+    let login = tokio::spawn(async move {
+        harness()
+            .login(std::path::Path::new(""), urls_sender, pasted)
+            .await
+    });
+    let urls = tokio::time::timeout(Duration::from_secs(10), urls)
+        .await
+        .expect("sign-in addresses in time")
+        .expect("the login sent its addresses");
+    assert_eq!(
+        urls.automatic.as_deref(),
+        Some("https://claude.example/automatic?state=from-url")
+    );
+    codes
+        .send("abc#xyz".into())
+        .await
+        .expect("login reads codes");
+    let signed_in = tokio::time::timeout(Duration::from_secs(10), login)
+        .await
+        .expect("signed in in time")
+        .expect("login task ran")
+        .expect("the CLI completed the sign-in");
+    assert_eq!(signed_in["account"]["email"], "me@example.com");
+    assert_eq!(signed_in["callback"], "abc|xyz");
+}

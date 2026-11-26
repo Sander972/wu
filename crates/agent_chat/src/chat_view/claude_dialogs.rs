@@ -1,6 +1,7 @@
 use super::{ChatView, composer::open_path};
 use crate::{
-    session::{AgentSession, AgentStore, Entry},
+    AgentKind,
+    session::{AgentSession, AgentStore, Entry, spawn_agent_work},
     slash_commands::AppCommand,
     usage_rings::{resets_in, with_separators},
 };
@@ -1763,6 +1764,174 @@ impl Render for ClaudeDialog {
     }
 }
 
+enum LoginState {
+    Starting,
+    Waiting,
+    Checking,
+    Failed(SharedString),
+}
+
+/// Signs in to Claude: the browser opens the sign-in page, and a code from it can be pasted here when the browser can't hand it back.
+pub(crate) struct LoginDialog {
+    state: LoginState,
+    manual_url: Option<String>,
+    code: Entity<Editor>,
+    codes: tokio::sync::mpsc::Sender<String>,
+    focus_handle: FocusHandle,
+    _login: Task<()>,
+}
+
+impl EventEmitter<DismissEvent> for LoginDialog {}
+impl ModalView for LoginDialog {}
+
+impl Focusable for LoginDialog {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl LoginDialog {
+    fn new(
+        cwd: PathBuf,
+        store: Entity<AgentStore>,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (urls_sender, urls) = tokio::sync::oneshot::channel();
+        let (codes, pasted) = tokio::sync::mpsc::channel(1);
+        let login = spawn_agent_work(cx, async move {
+            agent_harness::ClaudeHarness::new()
+                .login(&cwd, urls_sender, pasted)
+                .await
+        });
+        let login = cx.spawn_in(window, async move |this, cx| {
+            if let Ok(urls) = urls.await {
+                this.update_in(cx, |this, window, cx| {
+                    if let Some(url) = &urls.automatic {
+                        cx.open_url(url);
+                    }
+                    this.manual_url = urls.manual;
+                    this.state = LoginState::Waiting;
+                    window.focus(&this.code.focus_handle(cx), cx);
+                    cx.notify();
+                })
+                .log_err();
+            }
+            let signed_in = match login.await {
+                Ok(signed_in) => signed_in.map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            this.update(cx, |this, cx| match signed_in {
+                Ok(_) => {
+                    store.update(cx, |store, cx| store.account_changed(AgentKind::Claude, cx));
+                    show_toast(&workspace, t!("Signed in to Claude."), cx);
+                    cx.emit(DismissEvent);
+                }
+                Err(error) => {
+                    this.state = LoginState::Failed(error.into());
+                    cx.notify();
+                }
+            })
+            .log_err();
+        });
+        let code = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text(&t!("Paste the code from the sign-in page"), window, cx);
+            editor
+        });
+        Self {
+            state: LoginState::Starting,
+            manual_url: None,
+            code,
+            codes,
+            focus_handle: cx.focus_handle(),
+            _login: login,
+        }
+    }
+
+    fn submit(&mut self, cx: &mut Context<Self>) {
+        let code = self.code.read(cx).text(cx);
+        // The code is a secret, so a refused send is dropped without logging it.
+        if !matches!(self.state, LoginState::Waiting)
+            || code.trim().is_empty()
+            || self.codes.try_send(code).is_err()
+        {
+            return;
+        }
+        self.state = LoginState::Checking;
+        cx.notify();
+    }
+}
+
+impl Render for LoginDialog {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let waiting = matches!(self.state, LoginState::Waiting);
+        let status = match &self.state {
+            LoginState::Starting => Label::new(t!("Opening the sign-in page…")).color(Color::Muted),
+            LoginState::Waiting => Label::new(t!(
+                "Finish signing in in your browser. If the browser can't return to Wu, paste the code it shows."
+            ))
+            .color(Color::Muted),
+            LoginState::Checking => Label::new(t!("Signing in…")).color(Color::Muted),
+            LoginState::Failed(error) => Label::new(error.clone()).color(Color::Error),
+        };
+        let mut body = Section::new().child(status);
+        if waiting {
+            if let Some(url) = self.manual_url.clone() {
+                body = body.child(
+                    h_flex().child(
+                        Button::new("claude-login-manual", t!("Open the sign-in page again"))
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    ),
+                );
+            }
+            body = body.child(
+                div()
+                    .mt_2()
+                    .px_2()
+                    .py_1()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .rounded_sm()
+                    .child(self.code.clone()),
+            );
+        }
+        let footer = ModalFooter::new().end_slot(
+            h_flex()
+                .gap_1()
+                .child(
+                    Button::new("claude-login-cancel", t!("Cancel"))
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
+                )
+                .when(waiting, |this| {
+                    this.child(
+                        Button::new("claude-login-submit", t!("Sign in"))
+                            .style(ButtonStyle::Filled)
+                            .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+                    )
+                }),
+        );
+        v_flex()
+            .track_focus(&self.focus_handle)
+            .elevation_3(cx)
+            .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| cx.emit(DismissEvent)))
+            .on_action(cx.listener(|this, _: &menu::Confirm, _, cx| this.submit(cx)))
+            .occlude()
+            .w(rems(34.))
+            .child(
+                Modal::new("claude-login", None)
+                    .header(
+                        ModalHeader::new()
+                            .show_dismiss_button(true)
+                            .headline(t!("Sign in to Claude")),
+                    )
+                    .section(body)
+                    .footer(footer),
+            )
+    }
+}
+
 fn show_toast<C: gpui::AppContext>(
     workspace: &WeakEntity<Workspace>,
     message: impl Into<String>,
@@ -1902,6 +2071,55 @@ impl ChatView {
             .detach_and_log_err(cx);
     }
 
+    pub(super) fn show_login_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.session.read(cx).metadata().cwd.clone();
+        let store = self.store.clone();
+        let weak_workspace = self.workspace.clone();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, move |window, cx| {
+                    LoginDialog::new(cwd, store, weak_workspace, window, cx)
+                })
+            })
+            .log_err();
+    }
+
+    pub(super) fn sign_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &t!("Sign out of Claude?"),
+            Some(&t!(
+                "Claude Code on this computer stays signed out until you sign in again."
+            )),
+            &[
+                PromptButton::new(t!("Sign out")),
+                PromptButton::cancel(t!("Cancel")),
+            ],
+            cx,
+        );
+        let session = self.session.clone();
+        let store = self.store.clone();
+        let workspace = self.workspace.clone();
+        cx.spawn(async move |_, cx| {
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            let arguments = vec!["auth".to_string(), "logout".to_string()];
+            let signed_out = session
+                .update(cx, |session, cx| session.run_cli(arguments, None, cx))
+                .await;
+            let message = match signed_out {
+                Ok(_) => {
+                    store.update(cx, |store, cx| store.account_changed(AgentKind::Claude, cx));
+                    t!("Signed out of Claude.")
+                }
+                Err(error) => t!("Couldn't sign out: {error}", error = error),
+            };
+            show_toast(&workspace, message, cx);
+        })
+        .detach();
+    }
+
     pub(super) fn copy_reply(&mut self, nth: Option<usize>, cx: &mut Context<Self>) {
         let reply = nth_reply(self.entries(cx), nth.unwrap_or(1), cx);
         let message = match reply {
@@ -1988,7 +2206,9 @@ impl ChatView {
             | AppCommand::Fork { .. }
             | AppCommand::Rewind
             | AppCommand::Export { .. }
-            | AppCommand::Copy { .. } => return,
+            | AppCommand::Copy { .. }
+            | AppCommand::Login
+            | AppCommand::Logout => return,
         };
         let session = self.session.clone();
         let weak_workspace = self.workspace.clone();

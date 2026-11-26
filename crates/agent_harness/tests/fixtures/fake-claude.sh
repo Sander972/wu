@@ -390,6 +390,27 @@ case "$first" in
       emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$rid\",\"error\":\"MCP servers are unavailable\"}}"
       ;;
     *'"subtype":"rewind_files"'*) answer_rewind "$1" "idle" ;;
+    # Scenario login: like the real CLI, the callback and the wait only work in the process that started the flow, and both answer once the code arrives.
+    *'"subtype":"claude_authenticate"'*)
+      flow=started
+      emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{\"manualUrl\":\"https://claude.example/manual?code=true&state=from-url\",\"automaticUrl\":\"https://claude.example/automatic?state=from-url\"}}}"
+      ;;
+    *'"subtype":"claude_oauth_wait_for_completion"'*|*'"subtype":"claude_oauth_callback"'*)
+      if [ "$flow" != started ]; then
+        emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$rid\",\"error\":\"No active claude_authenticate flow\"}}"
+        return
+      fi
+      case "$1" in
+      *'"subtype":"claude_oauth_wait_for_completion"'*) waiting=$rid ;;
+      *)
+        code=$(printf '%s\n' "$1" | sed 's/.*"authorizationCode":"\([^"]*\)".*/\1/')
+        state=$(printf '%s\n' "$1" | sed 's/.*"state":"\([^"]*\)".*/\1/')
+        for answered in $rid $waiting; do
+          emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$answered\",\"response\":{\"account\":{\"email\":\"me@example.com\"},\"callback\":\"$code|$state\"}}}"
+        done
+        ;;
+      esac
+      ;;
     esac
   }
   case "$first" in

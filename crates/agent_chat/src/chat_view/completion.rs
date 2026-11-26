@@ -241,6 +241,8 @@ impl ChatView {
                             | AppCommand::Plugins
                             | AppCommand::Usage
                             | AppCommand::Export { .. }
+                            | AppCommand::Login
+                            | AppCommand::Logout
                     )
                 )
             });
@@ -758,7 +760,7 @@ impl ChatView {
         });
     }
 
-    pub(super) fn run_app_command(
+    pub(crate) fn run_app_command(
         &mut self,
         command: AppCommand,
         window: &mut Window,
@@ -816,6 +818,8 @@ impl ChatView {
             | AppCommand::Usage => self.show_claude_dialog(&command, window, cx),
             AppCommand::Export { file } => self.export_conversation(file, window, cx),
             AppCommand::Copy { nth } => self.copy_reply(nth, cx),
+            AppCommand::Login => self.show_login_dialog(window, cx),
+            AppCommand::Logout => self.sign_out(window, cx),
             AppCommand::Settings | AppCommand::Diff | AppCommand::Files | AppCommand::Terminal => {
                 let Some(name) = command.action_name() else {
                     return;

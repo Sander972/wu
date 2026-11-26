@@ -1,14 +1,15 @@
 use crate::{
     AgentKind,
     chat_style::{accent, hairline, popover_card, selected_row, text_faint, ui, wash},
-    chat_view::{DialogSection, context_sections},
+    chat_view::{ChatView, DialogSection, context_sections},
     session::{AgentSession, AgentStore, ContextSnapshot},
+    slash_commands::AppCommand,
 };
 use agent_harness::usage::UsageWindow;
 use gpui::{
     AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, Hsla, IntoElement, ParentElement, PathBuilder, Render, SharedString, Styled,
-    Subscription, Task, Window, canvas, div, point, px, relative,
+    Subscription, Task, WeakEntity, Window, canvas, div, point, px, relative,
 };
 use i18n::t;
 use serde_json::json;
@@ -419,12 +420,18 @@ impl Render for ContextCard {
 pub struct UsageCard {
     store: Entity<AgentStore>,
     kind: AgentKind,
+    chat: WeakEntity<ChatView>,
     focus_handle: FocusHandle,
     _subscription: Subscription,
 }
 
 impl UsageCard {
-    pub fn new(store: Entity<AgentStore>, kind: AgentKind, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<AgentStore>,
+        kind: AgentKind,
+        chat: WeakEntity<ChatView>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         store.update(cx, |store, cx| {
             store.refresh_plan_usage(kind, true, cx);
             store.refresh_accounts(kind, cx);
@@ -433,6 +440,7 @@ impl UsageCard {
             _subscription: cx.observe(&store, |_, _, cx| cx.notify()),
             store,
             kind,
+            chat,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -617,17 +625,47 @@ impl UsageCard {
                     .into_any_element(),
             );
         }
-        elements.push(
-            div()
-                .px(px(8.))
-                .pb(px(6.))
-                .text_size(ui(11.))
-                .text_color(text_faint(cx))
-                .child(t!(
-                    "Sign in to another account in the CLI and Wu remembers it here."
-                ))
-                .into_any_element(),
-        );
+        if self.kind == AgentKind::Claude {
+            let command_button = |id: &'static str, label: SharedString, command: AppCommand| {
+                Button::new(id, label).on_click(cx.listener(move |this, _, window, cx| {
+                    cx.emit(DismissEvent);
+                    this.chat
+                        .update(cx, |chat, cx| {
+                            chat.run_app_command(command.clone(), window, cx)
+                        })
+                        .log_err();
+                }))
+            };
+            elements.push(
+                h_flex()
+                    .px(px(4.))
+                    .pb(px(6.))
+                    .gap(px(4.))
+                    .child(command_button(
+                        "agent-account-sign-in",
+                        t!("Sign in to another account"),
+                        AppCommand::Login,
+                    ))
+                    .child(command_button(
+                        "agent-account-sign-out",
+                        t!("Sign out"),
+                        AppCommand::Logout,
+                    ))
+                    .into_any_element(),
+            );
+        } else {
+            elements.push(
+                div()
+                    .px(px(8.))
+                    .pb(px(6.))
+                    .text_size(ui(11.))
+                    .text_color(text_faint(cx))
+                    .child(t!(
+                        "Sign in to another account in the CLI and Wu remembers it here."
+                    ))
+                    .into_any_element(),
+            );
+        }
         Some(elements)
     }
 }

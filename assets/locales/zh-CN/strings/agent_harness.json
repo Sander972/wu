@@ -141,6 +141,7 @@
   "Start a {agent} subagent?": "要启动 {agent} 子智能体吗？",
   "Steering failed: {error}": "引导失败：{error}",
   "That account is signed in right now. Switch to another account before removing it.": "该账号当前已登录。请先切换到其他账号，再将其移除。",
+  "That doesn't look like a sign-in code. Copy the whole code from the sign-in page.": "这看起来不像登录代码。请从登录页面复制完整的代码。",
   "That saved login no longer exists": "该已保存的登录已不存在",
   "That saved login no longer exists. Refresh and try again.": "该已保存的登录已不存在。请刷新后重试。",
   "The Claude Code Keychain entry could not be read": "无法读取 Claude Code 的钥匙串条目",

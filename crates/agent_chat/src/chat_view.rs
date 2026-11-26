@@ -35,7 +35,7 @@ use crate::{
         AgentSession, AgentStore, Entry, PendingQuestion, Prompt, RewindPreview, ToolEntry,
         ToolStatus,
     },
-    slash_commands::{CommandToken, app_command_for_text},
+    slash_commands::{AppCommand, CommandToken, app_command_for_text},
     usage_rings::{ContextCard, UsageCard, context_chip, usage_chip},
 };
 use agent_harness::{ToolCall, UserInputAnswer, UserInputQuestion, view};
@@ -2459,8 +2459,23 @@ impl ChatView {
         let Some(Entry::Notice { text, is_error }) = self.entries(cx).get(index) else {
             return div().into_any_element();
         };
+        let asks_to_sign_in = *is_error
+            && self.session.read(cx).kind() == AgentKind::Claude
+            && text.to_lowercase().contains("not logged in");
         let text = crate::session::translated_notice(text);
-        if *is_error {
+        if asks_to_sign_in {
+            v_flex()
+                .items_start()
+                .child(self.render_error(index, text, cx))
+                .child(
+                    Button::new(("agent-notice-sign-in", index), t!("Sign in")).on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.run_app_command(AppCommand::Login, window, cx)
+                        }),
+                    ),
+                )
+                .into_any_element()
+        } else if *is_error {
             self.render_error(index, text, cx)
         } else {
             div()

@@ -3383,7 +3383,7 @@ pub(crate) fn shell_env_loaded(cx: &App) -> impl std::future::Future<Output = ()
 }
 
 /// Agent CLIs and their config folders come from the login shell's environment, which loads after startup.
-fn spawn_agent_work<T: 'static, F, R>(
+pub(crate) fn spawn_agent_work<T: 'static, F, R>(
     cx: &Context<T>,
     work: F,
 ) -> Task<std::result::Result<R, gpui_tokio::JoinError>>
@@ -4214,15 +4214,7 @@ impl AgentStore {
                 if let Err(error) = result {
                     state.error = Some(error.into());
                 }
-                if let Some(usage) = this.plan_usage.get_mut(&kind) {
-                    usage.fetched_at = None;
-                }
-                if let Some(catalog) = this.catalogs.get_mut(&kind) {
-                    catalog.loaded = false;
-                }
-                this.refresh_plan_usage(kind, true, cx);
-                this.ensure_models(kind, cx);
-                this.refresh_accounts(kind, cx);
+                this.account_changed(kind, cx);
             })
             .log_err();
         });
@@ -4230,6 +4222,19 @@ impl AgentStore {
             state._activation = Some(task);
         }
         cx.notify();
+    }
+
+    /// Fetches usage, models and the account list again after the signed-in account changed.
+    pub fn account_changed(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
+        if let Some(usage) = self.plan_usage.get_mut(&kind) {
+            usage.fetched_at = None;
+        }
+        if let Some(catalog) = self.catalogs.get_mut(&kind) {
+            catalog.loaded = false;
+        }
+        self.refresh_plan_usage(kind, true, cx);
+        self.ensure_models(kind, cx);
+        self.refresh_accounts(kind, cx);
     }
 
     pub fn agent_update(&self, kind: AgentKind) -> Option<&AgentUpdateStatus> {
