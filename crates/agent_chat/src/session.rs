@@ -1704,6 +1704,9 @@ impl AgentSession {
         }
         if self.run_is_quiet() {
             self.run = None;
+            self.remote_control_url = None;
+            self.capabilities.clear();
+            self.prompt_requests.clear();
             cx.notify();
         }
         if self.must_stay_loaded() {
@@ -6280,6 +6283,26 @@ pub(crate) mod tests {
             session.remote_control_url = None;
             session.release_when_idle(Duration::ZERO, cx);
             assert!(session.run.is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn idle_release_clears_what_the_run_announced(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let _receiver = attach_live_run(&session, cx);
+        let (reply, _replied) = tokio::sync::oneshot::channel();
+        session.update(cx, |session, cx| {
+            session.metadata.native_session_id = Some("sess-1".into());
+            session.capabilities = vec!["ui_prompt".into()];
+            session.prompt_requests.push((serde_json::json!({}), reply));
+            session.release_when_idle(Duration::ZERO, cx);
+            assert!(session.run.is_none());
+            assert!(session.capabilities.is_empty());
+            assert!(session.prompt_requests.is_empty());
         });
     }
 
