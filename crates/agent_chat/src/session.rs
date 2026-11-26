@@ -1474,7 +1474,7 @@ impl AgentSession {
         self.keep_unseen
     }
 
-    /// The user is looking at the chat again, so it may be marked seen.
+    /// The user interacted with the chat again, so it may be marked seen.
     pub fn acknowledge(&mut self, cx: &mut Context<Self>) {
         if self.keep_unseen {
             self.keep_unseen = false;
@@ -1727,6 +1727,7 @@ impl AgentSession {
         if prompt.is_empty() || self.deleted {
             return;
         }
+        self.keep_unseen = false;
         let stopping = self.run.as_ref().is_some_and(ActiveRun::stopping);
         if self.working && self.run.is_some() && !stopping {
             if AgentChatSettings::get_global(cx).steer_while_working {
@@ -2929,6 +2930,7 @@ impl AgentSession {
                     DoneStatus::Completed => {
                         self.metadata.outcome = Some(ChatOutcome::Completed);
                         self.metadata.unseen = true;
+                        self.keep_unseen = false;
                         cx.emit(SessionEvent::Finished { errored: false });
                         self.request_generated_title(cx);
                     }
@@ -2941,6 +2943,7 @@ impl AgentSession {
                         self.run_failed = true;
                         self.metadata.outcome = Some(ChatOutcome::Errored);
                         self.metadata.unseen = true;
+                        self.keep_unseen = false;
                         cx.emit(SessionEvent::Finished { errored: true });
                         self.push_notice(
                             error.unwrap_or_else(|| n!("The agent stopped with an error.").into()),
@@ -9451,6 +9454,27 @@ done
         });
         session.update(cx, |session, cx| session.mark_seen(cx));
         session.read_with(cx, |session, _| assert!(!session.metadata().unseen));
+    }
+
+    #[gpui::test]
+    async fn a_new_message_or_finished_turn_ends_the_keep_unread_hold(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let holds =
+            |cx: &mut TestAppContext| session.read_with(cx, |session, _| session.keeps_unseen());
+        session.update(cx, |session, cx| session.mark_unseen(cx));
+        assert!(holds(cx));
+        session.update(cx, |session, cx| session.send_message("scenario:happy", cx));
+        assert!(!holds(cx), "sending a message ends the hold");
+        session.update(cx, |session, cx| session.mark_unseen(cx));
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+        assert!(!holds(cx), "a finished turn ends the hold");
+        session.read_with(cx, |session, _| assert!(session.metadata().unseen));
     }
 
     fn session_id(session: &Entity<AgentSession>, cx: &mut TestAppContext) -> String {

@@ -487,7 +487,6 @@ impl ChatView {
             for handle in [view.composer.focus_handle(cx), view.question_focus.clone()] {
                 view._subscriptions
                     .push(cx.on_focus_in(&handle, window, |this, _, cx| {
-                        this.session.update(cx, |session, cx| session.acknowledge(cx));
                         let workspace = this.workspace.entity_id();
                         crate::remember_focused_chat(workspace, cx.weak_entity(), cx);
                     }));
@@ -991,6 +990,12 @@ impl ChatView {
         self.list.set_follow_mode(FollowMode::Tail);
         window.focus(&Focusable::focus_handle(self, cx), cx);
         cx.notify();
+    }
+
+    fn acknowledge_unseen(&self, cx: &mut Context<Self>) {
+        if self.session.read(cx).keeps_unseen() {
+            self.session.update(cx, |session, cx| session.acknowledge(cx));
+        }
     }
 
     fn rename_chat(&mut self, _: &RenameChat, window: &mut Window, cx: &mut Context<Self>) {
@@ -4450,6 +4455,9 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::focus_last_message))
             .on_action(cx.listener(Self::move_to_panel))
             .on_action(cx.listener(Self::move_to_tab))
+            // Focus alone doesn't count: a closing menu hands focus back to the composer before its action runs.
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| this.acknowledge_unseen(cx)))
+            .capture_key_down(cx.listener(|this, _, _, cx| this.acknowledge_unseen(cx)))
             .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {
                 this.dictation_key_up(event, cx)
             }));
@@ -5514,7 +5522,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn marking_the_visible_chat_unread_keeps_it_unread_until_it_is_focused(
+    async fn marking_the_visible_chat_unread_survives_a_menu_restoring_focus(
         cx: &mut TestAppContext,
     ) {
         cx.update(|cx| {
@@ -5532,7 +5540,7 @@ mod tests {
         let session = store.update(cx, |store, cx| {
             store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
         });
-        workspace.update_in(cx, |workspace, window, cx| {
+        let chat = workspace.update_in(cx, |workspace, window, cx| {
             let weak = cx.entity().downgrade();
             let chat = cx.new(|cx| {
                 ChatView::new(
@@ -5544,7 +5552,8 @@ mod tests {
                     cx,
                 )
             });
-            workspace.add_item_to_active_pane(Box::new(chat), None, true, window, cx);
+            workspace.add_item_to_active_pane(Box::new(chat.clone()), None, true, window, cx);
+            chat
         });
         let draw = |cx: &mut VisualTestContext| {
             cx.run_until_parked();
@@ -5559,14 +5568,30 @@ mod tests {
         draw(cx);
         assert!(!unseen(cx), "an unread chat that is on screen is marked seen");
 
+        // A tab menu hands focus back to the chat's composer when it closes, which only takes effect on the next frame, after its action has run.
+        let other_session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let weak = cx.entity().downgrade();
+            let other = cx.new(|cx| {
+                ChatView::new(other_session, store.clone(), project.clone(), weak, window, cx)
+            });
+            workspace.add_item_to_active_pane(Box::new(other), None, true, window, cx);
+        });
+        draw(cx);
         let id = session.read_with(cx, |session, _| session.metadata().id.clone());
-        store.update(cx, |store, cx| store.mark_unseen(&[id], cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_item(&chat, true, true, window, cx);
+            store.update(cx, |store, cx| store.mark_unseen(&[id], cx));
+        });
         draw(cx);
-        assert!(unseen(cx), "an explicit mark as unread survives a render");
+        draw(cx);
+        assert!(unseen(cx), "an explicit mark as unread survives a render and a focus restore");
 
-        session.update(cx, |session, cx| session.acknowledge(cx));
+        cx.simulate_keystrokes("a");
         draw(cx);
-        assert!(!unseen(cx), "focusing the chat marks it seen again");
+        assert!(!unseen(cx), "typing in the chat marks it seen again");
     }
 
     #[gpui::test]
