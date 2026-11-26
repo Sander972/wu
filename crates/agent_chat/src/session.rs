@@ -1990,6 +1990,7 @@ impl AgentSession {
             self.working_since = Some(Instant::now());
         }
         self.working = true;
+        self.continuing_turn = false;
         self.run_failed = false;
         self.metadata.outcome = None;
         self.touch(cx);
@@ -7747,6 +7748,26 @@ done
         store.update(cx, |store, _| store.live.clear());
         let again = reopen(&store, &id, cx).await;
         again.read_with(cx, |session, _| assert!(!session.is_working()));
+    }
+
+    #[gpui::test]
+    async fn a_message_sent_during_a_continued_turn_makes_it_resumable_again(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, store, id) = chat_cut_off(2, cx);
+        update_chat_settings(cx, |content| {
+            content.while_working = Some(settings::AgentChatWhileWorking::Steer)
+        });
+        let session = reopen(&store, &id, cx).await;
+        session.read_with(cx, |session, _| {
+            assert!(session.is_continuing_turn());
+            assert_eq!(session.metadata().interrupted_at, None);
+        });
+        session.update(cx, |session, cx| session.send_message("one more thing", cx));
+        session.read_with(cx, |session, _| {
+            assert!(!session.is_continuing_turn());
+            assert!(session.metadata().interrupted_at.is_some());
+        });
     }
 
     #[gpui::test]
