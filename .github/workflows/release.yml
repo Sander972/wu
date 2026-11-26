@@ -60,7 +60,7 @@ jobs:
           APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
           APPLE_NOTARIZATION_TEAM: ${{ secrets.APPLE_NOTARIZATION_TEAM }}
-        run: script/bundle-mac ${{ matrix.arch }}-apple-darwin
+        run: script/bundle-mac -r ${{ matrix.arch }}-apple-darwin
       - name: Check that every string and command has its Chinese text
         if: matrix.arch == 'aarch64'
         run: script/check-translations --binary target/aarch64-apple-darwin/release/wu
@@ -101,7 +101,7 @@ jobs:
       - name: Use the stable release channel
         run: echo stable > crates/wu/RELEASE_CHANNEL
       - name: Bundle
-        run: ./script/bundle-linux
+        run: ./script/bundle-linux --remote-server
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
@@ -122,7 +122,7 @@ jobs:
         run: Set-Content -Path crates/wu/RELEASE_CHANNEL -Value stable -NoNewline
         shell: pwsh
       - name: Bundle
-        run: script/bundle-windows.ps1 -Architecture x86_64
+        run: script/bundle-windows.ps1 -Architecture x86_64 -RemoteServer
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
