@@ -156,6 +156,8 @@
   "Fork conversation and rewind code": "分叉对话并回退代码",
   "Fork conversation from here": "从此处分叉对话",
   "Forked from \"{title}\"": "分叉自“{title}”",
+  "From the {plugins} and {last} plugins": "来自 {plugins} 和 {last} 插件",
+  "From the {plugin} plugin": "来自 {plugin} 插件",
   "Group by project": "按项目分组",
   "Hooks": "钩子",
   "Image": "图片",

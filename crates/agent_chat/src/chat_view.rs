@@ -1902,6 +1902,7 @@ impl ChatView {
             RowKind::Working => self.render_working_trailer(cx),
             RowKind::Retry(index) => self.render_retry(index, cx),
         };
+        let content = self.plugin_transcript_row(row.kind, &turn, content, cx);
         let content = match row.kind.hover_id(row.turn) {
             Some(id) => {
                 let hovered_row = row.identity();
@@ -1963,7 +1964,9 @@ impl ChatView {
             .pt(px(top_pad))
             .pb(px(bottom_pad))
             .child(content);
-        column(row_element, self.gutter()).into_any_element()
+        let row_element = column(row_element, self.gutter()).into_any_element();
+        self.flush_plugin_ui(window, cx);
+        row_element
     }
 
     fn render_message_time(&self, at: i64, cx: &Context<Self>) -> Option<AnyElement> {
@@ -2988,7 +2991,7 @@ impl ChatView {
                 .into_any_element();
         }
         let last = items.end.saturating_sub(1);
-        v_flex()
+        let element = v_flex()
             .w_full()
             .child(header)
             .when(open, |this| {
@@ -2996,7 +2999,20 @@ impl ChatView {
                     items.map(|index| self.render_tree_row(index, index < last, window, cx)),
                 ))
             })
-            .into_any_element()
+            .into_any_element();
+        match group.iter().find_map(|entry| match entry {
+            Entry::Tool(tool) => Some(tool),
+            _ => None,
+        }) {
+            Some(first) => self.plugin_row(
+                "ToolGroup",
+                &first.id,
+                || plugin_ui::tool_group_props(group, is_live, open),
+                element,
+                cx,
+            ),
+            None => element,
+        }
     }
 
     fn render_tree_row(
@@ -3070,6 +3086,16 @@ impl ChatView {
                 )
                 .into_any_element(),
             _ => div().into_any_element(),
+        });
+        let body = body.map(|body| match entry {
+            Entry::Tool(tool) if tool.output.is_some() => self.plugin_row(
+                "ToolResult",
+                &tool.id,
+                || plugin_ui::tool_result_props(tool),
+                body,
+                cx,
+            ),
+            _ => body,
         });
         let tint = if failed { danger } else { colors.text_muted };
         let text = colors.text;
@@ -3184,7 +3210,7 @@ impl ChatView {
                     })),
             )
             .children(body);
-        div()
+        let row = div()
             .w_full()
             .flex_none()
             .flex()
@@ -3201,7 +3227,17 @@ impl ChatView {
                 hairline(0.12, cx),
             ))
             .child(card)
-            .into_any_element()
+            .into_any_element();
+        match entry {
+            Entry::Tool(tool) => self.plugin_row(
+                "ToolUse",
+                &tool.id,
+                || plugin_ui::tool_use_props(tool),
+                row,
+                cx,
+            ),
+            _ => row,
+        }
     }
 
     fn render_subagent_chip(&self, index: usize, cx: &Context<Self>) -> AnyElement {
@@ -4692,12 +4728,16 @@ impl Render for ChatView {
                         .child(self.render_status_strip(cx))
                         .children(self.render_todo_panel(cx))
                         .children(self.render_queue_panel(cx))
+                        .children(self.render_plugin_above_prompt(cx))
                         .child(composer_area)
                         .child(div().pt(px(8.)).child(self.render_footer(cx))),
                 ),
             );
-        root.child(self.render_with_side_pane(chat.into_any_element(), cx))
-            .into_any_element()
+        let element = root
+            .child(self.render_with_side_pane(chat.into_any_element(), cx))
+            .into_any_element();
+        self.flush_plugin_ui(window, cx);
+        element
     }
 }
 
@@ -6605,13 +6645,14 @@ mod tests {
         instance_id: &str,
         cx: &mut VisualTestContext,
     ) -> Option<Vec<String>> {
-        view.update(cx, |view, cx| {
+        view.update_in(cx, |view, window, cx| {
             view.plugin_ui
                 .render(
                     &view.session,
                     "ToolUse",
                     instance_id,
                     serde_json::json!({}),
+                    window,
                     cx,
                 )
                 .map(|rendered| rendered.drawn_by.clone())
@@ -6632,7 +6673,9 @@ mod tests {
             .expect("the chat waits for the reply");
         draw_plugin_chat(cx);
         assert!(
-            receiver.try_recv().is_err(),
+            drain_controls(&mut receiver)
+                .iter()
+                .all(|call| call.request["subtype"] == "ui_render"),
             "an attached chat doesn't attach again"
         );
 
@@ -6674,6 +6717,8 @@ mod tests {
             .send(Ok(serde_json::json!({ "surfaces": ["vscode"] })))
             .expect("the chat waits for the reply");
         draw_plugin_chat(cx);
+        // The frame asked for what it draws itself (the band above the prompt).
+        drain_controls(&mut receiver);
         let answer = serde_json::json!({
             "tree": { "type": "Text", "children": ["drawn"] },
             "props": {},
@@ -6770,6 +6815,267 @@ mod tests {
             cx.read_from_clipboard().and_then(|item| item.text()),
             Some("copied".to_owned())
         );
+    }
+
+    fn drain_controls(
+        receiver: &mut tokio::sync::mpsc::Receiver<agent_harness::Steer>,
+    ) -> Vec<agent_harness::ControlCall> {
+        let mut calls = Vec::new();
+        while let Ok(agent_harness::Steer::Control(call)) = receiver.try_recv() {
+            calls.push(call);
+        }
+        calls
+    }
+
+    fn take_render(
+        calls: &mut Vec<agent_harness::ControlCall>,
+        component: &str,
+    ) -> agent_harness::ControlCall {
+        let index = calls
+            .iter()
+            .position(|call| {
+                call.request["subtype"] == "ui_render" && call.request["component"] == component
+            })
+            .unwrap_or_else(|| panic!("expected a {component} render"));
+        calls.remove(index)
+    }
+
+    fn painted_height(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> Pixels {
+        view.read_with(cx, |view, _| {
+            view.painted_rows
+                .borrow()
+                .values()
+                .fold(px(0.), |height, bounds| height + bounds.size.height)
+        })
+    }
+
+    /// An attached chat running one Bash call, drawn once, with the drawing requests that frame sent.
+    async fn plugin_tool_chat(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<AgentSession>,
+        Entity<ChatView>,
+        tokio::sync::mpsc::Receiver<agent_harness::Steer>,
+        Vec<agent_harness::ControlCall>,
+        &mut VisualTestContext,
+    ) {
+        let (session, view, mut receiver, attach, cx) = plugin_chat(cx).await;
+        attach
+            .reply
+            .send(Ok(serde_json::json!({ "surfaces": ["vscode"] })))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        feed_events(&session, vec![tool_call("toolu_1", "Bash")], cx);
+        draw_plugin_chat(cx);
+        let calls = drain_controls(&mut receiver);
+        (session, view, receiver, calls, cx)
+    }
+
+    fn tool_use_fixture() -> serde_json::Value {
+        let mut frame: serde_json::Value = serde_json::from_str(include_str!(
+            "chat_view/fixtures/plugin_ui/render-tool-use.json"
+        ))
+        .expect("fixture is JSON");
+        frame["response"]["response"].take()
+    }
+
+    #[gpui::test]
+    async fn unhooked_rows_render_unchanged(cx: &mut TestAppContext) {
+        let (session, view, mut receiver, mut calls, cx) = plugin_tool_chat(cx).await;
+        let render = take_render(&mut calls, "ToolUse");
+        assert_eq!(render.request["instance_id"], "toolu_1");
+        assert_eq!(render.request["props"]["tool"], "Bash");
+        assert_eq!(render.request["props"]["isRunning"], true);
+        let before = painted_height(&view, cx);
+        render
+            .reply
+            .send(Ok(serde_json::json!({
+                "tree": { "type": "engine", "ref": 0 },
+                "props": {},
+                "rewritten": false,
+                "hooked": false,
+                "drawn_by": [],
+            })))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        assert_eq!(painted_height(&view, cx), before);
+        assert!(cx.debug_bounds("plugin-ui-caption").is_none());
+
+        feed_events(&session, vec![tool_call("toolu_2", "Bash")], cx);
+        draw_plugin_chat(cx);
+        assert!(
+            drain_controls(&mut receiver)
+                .iter()
+                .all(|call| call.request["component"] != "ToolUse"),
+            "an unhooked component isn't asked for until an invalidation"
+        );
+        view.update(cx, |view, cx| {
+            view.apply_plugin_ui_event(&serde_json::json!({ "subtype": "ui_invalidate" }), cx)
+        });
+        draw_plugin_chat(cx);
+        let mut asked = drain_controls(&mut receiver)
+            .iter()
+            .filter(|call| call.request["component"] == "ToolUse")
+            .map(|call| call.request["instance_id"].to_string())
+            .collect::<Vec<_>>();
+        asked.sort();
+        assert_eq!(asked, ["\"toolu_1\"", "\"toolu_2\""]);
+    }
+
+    #[gpui::test]
+    async fn hooked_tool_row_shows_the_tree_and_the_plugin_caption(cx: &mut TestAppContext) {
+        let (_session, view, _receiver, mut calls, cx) = plugin_tool_chat(cx).await;
+        let before = painted_height(&view, cx);
+        take_render(&mut calls, "ToolUse")
+            .reply
+            .send(Ok(tool_use_fixture()))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        assert!(cx.debug_bounds("plugin-ui-caption").is_some());
+        assert!(cx.debug_bounds("plugin-ui-button-ping").is_some());
+        assert!(
+            painted_height(&view, cx) > before,
+            "the row keeps wu's line and adds the plugin's"
+        );
+    }
+
+    #[gpui::test]
+    async fn pressing_a_button_sends_ui_press_with_its_target(cx: &mut TestAppContext) {
+        let (_session, view, mut receiver, mut calls, cx) = plugin_tool_chat(cx).await;
+        take_render(&mut calls, "ToolUse")
+            .reply
+            .send(Ok(tool_use_fixture()))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        let button = cx
+            .debug_bounds("plugin-ui-button-ping")
+            .expect("the button is drawn");
+        cx.simulate_click(button.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let client_id = view.read_with(cx, |view, _| view.plugin_ui.client_id().to_owned());
+        let press = next_control(&mut receiver);
+        assert_eq!(
+            press.request,
+            serde_json::json!({
+                "subtype": "ui_press",
+                "surface": "vscode",
+                "client_id": client_id,
+                "plugin": "wu-draw-test",
+                "handle": 976571764,
+                "key": "ping",
+            })
+        );
+    }
+
+    #[gpui::test]
+    async fn typing_in_an_input_sends_ui_input_and_applies_the_returned_value(
+        cx: &mut TestAppContext,
+    ) {
+        let (_session, view, mut receiver, mut calls, cx) = plugin_tool_chat(cx).await;
+        take_render(&mut calls, "ToolUse")
+            .reply
+            .send(Ok(serde_json::json!({
+                "tree": {
+                    "type": "Box",
+                    "props": { "flexDirection": "column" },
+                    "children": [
+                        { "type": "engine", "ref": 0 },
+                        { "type": "Input", "props": { "key": "name", "value": "" }, "press": { "plugin": "p", "handle": 5 } },
+                    ],
+                },
+                "props": {},
+                "rewritten": true,
+                "hooked": true,
+                "drawn_by": ["p"],
+            })))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        let field = cx
+            .debug_bounds("plugin-ui-input-ToolUse:toolu_1:p:name")
+            .expect("the field is drawn");
+        cx.simulate_click(field.center(), gpui::Modifiers::none());
+        cx.simulate_input("ab");
+        let mut inputs = drain_controls(&mut receiver);
+        assert_eq!(inputs.len(), 2, "each edit is sent");
+        let last = inputs.remove(1);
+        assert_eq!(last.request["subtype"], "ui_input");
+        assert_eq!(last.request["plugin"], "p");
+        assert_eq!(last.request["handle"], 5);
+        assert_eq!(last.request["key"], "name");
+        assert_eq!(last.request["value"], "ab");
+        assert_eq!(last.request["kind"], "change");
+        assert_eq!(last.request["component"], "ToolUse");
+        assert_eq!(last.request["instance_id"], "toolu_1");
+        last.reply
+            .send(Ok(serde_json::json!({ "handled": true, "value": "AB" })))
+            .expect("the chat waits for the reply");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.plugin_ui.input_texts(cx)),
+            ["AB"]
+        );
+        assert!(
+            drain_controls(&mut receiver).is_empty(),
+            "the value wu applied isn't sent back as typing"
+        );
+    }
+
+    #[gpui::test]
+    async fn non_http_hrefs_are_not_opened(cx: &mut TestAppContext) {
+        let (_session, view, cx) = focus_chat(cx).await;
+        let open = |href: &str, cx: &mut VisualTestContext| {
+            let action = plugin_ui::UiAction::Open { href: href.into() };
+            view.update_in(cx, |view, window, cx| {
+                view.plugin_ui_action(("ToolUse".into(), "toolu_1".into()), action, window, cx)
+            });
+            cx.run_until_parked();
+        };
+        for href in [
+            "file:///C:/Windows/System32/calc.exe",
+            "javascript:alert(1)",
+            "wu://open?path=secret",
+        ] {
+            open(href, cx);
+            assert_eq!(cx.opened_url(), None, "{href} must not open");
+        }
+        open("https://example.com/docs", cx);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/docs"));
+    }
+
+    #[gpui::test]
+    async fn status_text_shows_in_the_footer_and_clears_on_null(cx: &mut TestAppContext) {
+        let (session, view, cx) = focus_chat(cx).await;
+        feed_events(&session, Vec::new(), cx);
+        let status = |text: serde_json::Value, cx: &mut VisualTestContext| {
+            view.update(cx, |view, cx| {
+                view.apply_plugin_ui_event(
+                    &serde_json::json!({ "subtype": "ui_status", "plugin": "p", "text": text }),
+                    cx,
+                )
+            });
+            draw_plugin_chat(cx);
+        };
+        status(serde_json::json!("indexing"), cx);
+        assert!(cx.debug_bounds("plugin-ui-status").is_some());
+        status(serde_json::Value::Null, cx);
+        assert!(cx.debug_bounds("plugin-ui-status").is_none());
+    }
+
+    #[gpui::test]
+    async fn toast_shows_then_expires(cx: &mut TestAppContext) {
+        let (session, view, cx) = focus_chat(cx).await;
+        feed_events(&session, Vec::new(), cx);
+        view.update(cx, |view, cx| {
+            view.apply_plugin_ui_event(
+                &serde_json::json!({ "subtype": "ui_toast", "plugin": "p", "text": "saved", "timeout_ms": 1000 }),
+                cx,
+            )
+        });
+        draw_plugin_chat(cx);
+        assert!(cx.debug_bounds("plugin-ui-toast").is_some());
+        cx.executor().advance_clock(Duration::from_millis(1500));
+        draw_plugin_chat(cx);
+        assert!(cx.debug_bounds("plugin-ui-toast").is_none());
     }
 
     #[gpui::test]

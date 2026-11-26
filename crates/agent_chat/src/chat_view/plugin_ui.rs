@@ -1,18 +1,26 @@
-// shortcut: Tasks 48-49 draw the trees, panes, statuses and toasts kept here; drop this allow once they read them.
-#![expect(dead_code)]
-
+use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use collections::HashMap;
-use editor::MultiBufferOffset;
-use gpui::{App, Context, Entity, SharedString, Task, TaskExt as _, Window};
+use collections::{HashMap, HashSet};
+use editor::{Editor, EditorEvent, MultiBufferOffset};
+use gpui::{
+    AnyElement, App, Context, ElementId, Entity, FontWeight, SharedString, Subscription, Task,
+    TaskExt as _, Window, div, px,
+};
+use i18n::t;
 use serde_json::{Value, json};
+use theme::ActiveTheme as _;
+use ui::{Tooltip, prelude::*};
 use util::ResultExt as _;
 
-use super::ChatView;
-use crate::{AgentKind, session::AgentSession};
+use super::{ChatView, RowKind, Turn};
+use crate::AgentKind;
+use crate::chat_style::{flavour_word, text_faint, ui};
+use crate::session::{AgentSession, Entry, ToolEntry, ToolStatus};
+use agent_harness::ToolCall;
 
 /// Temporary, user-approved stand-in: the CLI only accepts the "desktop", "mobile" and "vscode" surfaces.
 pub(crate) const SURFACE: &str = "vscode";
@@ -23,6 +31,12 @@ const MAX_TOASTS: usize = 5;
 const MAX_DRAWN_BY: usize = 20;
 /// What the CLI sent for a toast without its own timeout in the recording.
 const DEFAULT_TOAST_TIMEOUT: Duration = Duration::from_millis(4000);
+/// The extension's instance ids for the spinner and the band above the prompt.
+const SPINNER: &str = "main";
+const ABOVE_PROMPT: &str = "above-prompt";
+/// The extension cuts the tool output it shows plugins at 64 Ki characters.
+const MAX_OUTPUT_CHARS: usize = 65_536;
+const ABOVE_PROMPT_ROWS: u32 = 12;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TextStyleHint {
@@ -36,6 +50,39 @@ pub(crate) struct Target {
     pub plugin: String,
     pub handle: serde_json::Number,
     pub key: Option<String>,
+}
+
+/// What a click or an edit in a plugin's drawing asks for; the first three are sent as `ui_press`, `ui_input` and `ui_select`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum UiAction {
+    Press {
+        target: Target,
+        href: Option<String>,
+    },
+    Input {
+        target: Target,
+        value: String,
+        kind: Option<String>,
+    },
+    Select {
+        target: Target,
+        value: String,
+    },
+    /// A `Link` node: it has no `press`, so wu opens it itself.
+    Open {
+        href: String,
+    },
+}
+
+type ActionHandler = Rc<dyn Fn(UiAction, &mut Window, &mut App)>;
+/// A drawn component instance: its component name and instance id.
+type Site = (String, String);
+
+/// Only web links open: a plugin must not make wu open a file, run a script or follow one of wu's own links.
+pub(crate) fn opens_href(href: &str) -> bool {
+    href.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -258,17 +305,14 @@ pub(crate) struct Toast {
 
 pub(crate) struct Rendered {
     pub tree: UiNode,
-    /// The props an `Engine` node with a nonzero reference draws with.
-    pub props: Value,
     pub drawn_by: Vec<String>,
-    pub rewritten: bool,
+    pub hooked: bool,
 }
 
 impl Rendered {
     fn from_answer(answer: &Value) -> Self {
         Self {
             tree: parse_tree(&answer["tree"]),
-            props: answer["props"].clone(),
             drawn_by: answer["drawn_by"]
                 .as_array()
                 .into_iter()
@@ -277,9 +321,44 @@ impl Rendered {
                 .take(MAX_DRAWN_BY)
                 .map(str::to_owned)
                 .collect(),
-            rewritten: answer["rewritten"].as_bool().unwrap_or_default(),
+            hooked: answer["hooked"].as_bool().unwrap_or(true),
         }
     }
+
+    /// Claude Code's own drawing, an unhooked component or a tree that only holds wu's row leaves the row as wu draws it.
+    fn shows(&self) -> bool {
+        self.hooked && !self.drawn_by.is_empty() && draws_anything(&self.tree)
+    }
+}
+
+fn draws_anything(node: &UiNode) -> bool {
+    match node {
+        UiNode::Text { text, .. } | UiNode::Unknown { text, .. } => !text.trim().is_empty(),
+        UiNode::Group { children, .. } => children.iter().any(draws_anything),
+        UiNode::Engine { .. } => false,
+        UiNode::Button { .. }
+        | UiNode::Link { .. }
+        | UiNode::Input { .. }
+        | UiNode::Select { .. } => true,
+    }
+}
+
+/// Names a control across renders: its plugin hands out a new `handle` for every drawing, so the `key` is used when it has one.
+fn control_key(site: &Site, target: &Target) -> String {
+    let name = target
+        .key
+        .clone()
+        .unwrap_or_else(|| target.handle.to_string());
+    format!("{}:{}:{}:{name}", site.0, site.1, target.plugin)
+}
+
+struct PluginInput {
+    editor: Entity<Editor>,
+    /// Updated with every drawing, since the handle changes.
+    target: Target,
+    /// Text wu put in the field itself, so the edit it causes isn't sent back as typing.
+    applied: Option<String>,
+    _subscription: Subscription,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -303,10 +382,21 @@ pub(crate) struct PluginUi {
     pub toasts: VecDeque<Toast>,
     pub panes: Vec<PaneInfo>,
     pub shown_pane: Option<String>,
-    cache: HashMap<(String, String), Rendered>,
+    cache: HashMap<Site, Rendered>,
+    /// Invalidated drawings: still shown, so the row keeps its height, until the new one arrives.
+    stale: HashSet<Site>,
     /// Renders asked for and not cached, with the number of the latest request; a failed one stays here so it isn't asked again every frame.
-    requested: HashMap<(String, String), u64>,
+    requested: HashMap<Site, u64>,
     requests_sent: u64,
+    /// Components the agent answered `hooked: false` for: not asked again until the next `ui_invalidate`.
+    unhooked: HashSet<String>,
+    /// Drawings the last frame looked for and didn't have, sent by `ChatView::flush_plugin_ui` once the frame is built.
+    wanted: RefCell<Vec<(Site, Value)>>,
+    inputs: HashMap<String, PluginInput>,
+    /// The option last picked in each `Select`, shown until the plugin draws the control again.
+    selections: HashMap<String, String>,
+    columns: u32,
+    toast_timer: Option<Task<()>>,
 }
 
 impl PluginUi {
@@ -321,8 +411,15 @@ impl PluginUi {
             panes: Vec::new(),
             shown_pane: None,
             cache: HashMap::default(),
+            stale: HashSet::default(),
             requested: HashMap::default(),
             requests_sent: 0,
+            unhooked: HashSet::default(),
+            wanted: RefCell::default(),
+            inputs: HashMap::default(),
+            selections: HashMap::default(),
+            columns: 0,
+            toast_timer: None,
         }
     }
 
@@ -332,12 +429,14 @@ impl PluginUi {
             .any(|capability| capability == CAPABILITY)
     }
 
-    /// Forgets what an earlier run drew once `run` is a different one.
+    /// Forgets what an earlier run drew once `run` is a different one; the request counters carry on so a late answer from the old run can't match a new request.
     pub fn follow_run(&mut self, run: u64) {
         if self.run != run {
             *self = Self {
                 client_id: std::mem::take(&mut self.client_id),
                 run,
+                attaches_sent: self.attaches_sent,
+                requests_sent: self.requests_sent,
                 ..Self::new()
             };
         }
@@ -360,6 +459,7 @@ impl PluginUi {
         self.attaches_sent += 1;
         let number = self.attaches_sent;
         self.attachment = Attachment::Pending(number);
+        self.columns = columns;
         let request = json!({
             "subtype": "ui_attach",
             "surface": SURFACE,
@@ -393,6 +493,7 @@ impl PluginUi {
             return;
         }
         self.cache.clear();
+        self.stale.clear();
         self.requested.clear();
         // Without a live run a control request would start a one-off agent process just to detach.
         if !session.read(cx).has_live_run() {
@@ -404,21 +505,24 @@ impl PluginUi {
             .detach_and_log_err(cx);
     }
 
-    /// The cached drawing of a component instance; when there is none yet it is asked for in the background and the view notified once it arrives.
+    /// The cached drawing of a component instance; when there is none yet, or it is stale, it is asked for in the background and the view notified once it arrives.
     pub fn render(
         &mut self,
         session: &Entity<AgentSession>,
         component: &str,
         instance_id: &str,
         props: Value,
+        window: &mut Window,
         cx: &mut Context<ChatView>,
     ) -> Option<&Rendered> {
         let key = (component.to_owned(), instance_id.to_owned());
-        if self.cache.contains_key(&key) {
+        let fresh = self.cache.contains_key(&key) && !self.stale.contains(&key);
+        if fresh
+            || self.attachment != Attachment::Attached
+            || self.requested.contains_key(&key)
+            || self.unhooked.contains(component)
+        {
             return self.cache.get(&key);
-        }
-        if self.attachment != Attachment::Attached || self.requested.contains_key(&key) {
-            return None;
         }
         self.requests_sent += 1;
         let number = self.requests_sent;
@@ -432,18 +536,25 @@ impl PluginUi {
             "props": props,
         });
         let answer = session.update(cx, |session, cx| session.control(request, cx));
-        cx.spawn(async move |this, cx| {
+        let answered_key = key.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let key = answered_key;
             let answer = answer.await;
-            this.update(cx, |view, cx| {
-                let plugin_ui = &mut view.plugin_ui;
+            this.update_in(cx, |view, window, cx| {
                 // An invalidation or a newer request made this answer stale.
-                if plugin_ui.requested.get(&key) != Some(&number) {
+                if view.plugin_ui.requested.get(&key) != Some(&number) {
                     return;
                 }
                 match answer {
                     Ok(answer) => {
-                        plugin_ui.requested.remove(&key);
-                        plugin_ui.cache.insert(key, Rendered::from_answer(&answer));
+                        view.plugin_ui.requested.remove(&key);
+                        view.plugin_ui.stale.remove(&key);
+                        if answer["hooked"] == false {
+                            view.plugin_ui.unhooked.insert(key.0.clone());
+                        }
+                        let rendered = Rendered::from_answer(&answer);
+                        view.sync_plugin_inputs(&key, &rendered.tree, window, cx);
+                        view.plugin_ui.cache.insert(key, rendered);
                         cx.notify();
                     }
                     Err(error) => log::warn!("the agent didn't draw {}: {error:#}", key.0),
@@ -452,11 +563,38 @@ impl PluginUi {
             .log_err();
         })
         .detach();
-        None
+        self.cache.get(&key)
+    }
+
+    /// The drawing to show in place of a component instance, if a plugin drew one; a missing or stale drawing is asked for by the next `ChatView::flush_plugin_ui`.
+    fn drawn(
+        &self,
+        component: &str,
+        instance_id: &str,
+        props: impl FnOnce() -> Value,
+    ) -> Option<&Rendered> {
+        let key = (component.to_owned(), instance_id.to_owned());
+        let cached = self.cache.get(&key);
+        if (cached.is_none() || self.stale.contains(&key))
+            && self.attachment == Attachment::Attached
+            && !self.requested.contains_key(&key)
+            && !self.unhooked.contains(component)
+        {
+            self.wanted.borrow_mut().push((key, props()));
+        }
+        cached.filter(|rendered| rendered.shows())
+    }
+
+    /// Keeps the drawing on screen until the new one arrives, so the row doesn't change height in between.
+    fn invalidate(&mut self, key: &Site) {
+        self.requested.remove(key);
+        if self.cache.contains_key(key) {
+            self.stale.insert(key.clone());
+        }
     }
 
     /// Applies a drawing frame from the agent; true when the view must draw again.
-    pub fn apply_event(&mut self, event: &Value) -> bool {
+    pub fn apply_event(&mut self, event: &Value, now: Instant) -> bool {
         let text = |event: &Value| event["text"].as_str().map(|text| text.to_owned().into());
         let plugin = event["plugin"].as_str().unwrap_or_default().to_owned();
         match event["subtype"].as_str().unwrap_or_default() {
@@ -470,7 +608,7 @@ impl PluginUi {
                 self.toasts.push_back(Toast {
                     plugin,
                     text,
-                    expires_at: Instant::now() + timeout,
+                    expires_at: now + timeout,
                 });
                 while self.toasts.len() > MAX_TOASTS {
                     self.toasts.pop_front();
@@ -489,6 +627,7 @@ impl PluginUi {
                 false
             }
             "ui_invalidate" => {
+                self.unhooked.clear();
                 match event["instances"].as_array() {
                     Some(instances) => {
                         for instance in instances {
@@ -502,13 +641,12 @@ impl PluginUi {
                                     .unwrap_or_default()
                                     .to_owned(),
                             );
-                            self.cache.remove(&key);
-                            self.requested.remove(&key);
+                            self.invalidate(&key);
                         }
                     }
                     None => {
-                        self.cache.clear();
                         self.requested.clear();
+                        self.stale = self.cache.keys().cloned().collect();
                     }
                 }
                 true
@@ -547,6 +685,19 @@ impl PluginUi {
         self.toasts.retain(|toast| toast.expires_at > now);
         self.toasts.len() != before
     }
+
+    #[cfg(test)]
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    #[cfg(test)]
+    pub fn input_texts(&self, cx: &App) -> Vec<String> {
+        self.inputs
+            .values()
+            .map(|input| input.editor.read(cx).text(cx))
+            .collect()
+    }
 }
 
 impl ChatView {
@@ -570,8 +721,440 @@ impl ChatView {
     pub(super) fn apply_plugin_ui_event(&mut self, event: &Value, cx: &mut Context<Self>) {
         self.plugin_ui
             .follow_run(self.session.read(cx).runs_started());
-        if self.plugin_ui.apply_event(event) {
+        let now = cx.background_executor().now();
+        if self.plugin_ui.apply_event(event, now) {
             cx.notify();
+        }
+        if event["subtype"] == "ui_toast" {
+            self.schedule_toast_expiry(cx);
+        }
+    }
+
+    fn schedule_toast_expiry(&mut self, cx: &mut Context<Self>) {
+        let Some(next) = self
+            .plugin_ui
+            .toasts
+            .iter()
+            .map(|toast| toast.expires_at)
+            .min()
+        else {
+            self.plugin_ui.toast_timer = None;
+            return;
+        };
+        let delay = next.saturating_duration_since(cx.background_executor().now());
+        self.plugin_ui.toast_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |view, cx| {
+                if view.plugin_ui.expire_toasts(cx.background_executor().now()) {
+                    cx.notify();
+                }
+                view.schedule_toast_expiry(cx);
+            })
+            .log_err();
+        }));
+    }
+
+    /// Sends the drawings the frame just built looked for; called once the frame's elements no longer borrow the view.
+    pub(super) fn flush_plugin_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for ((component, instance_id), props) in self.plugin_ui.wanted.take() {
+            self.plugin_ui
+                .render(&self.session, &component, &instance_id, props, window, cx);
+        }
+    }
+
+    /// A plugin's drawing of a component instance with its caption, or `None` when no plugin drew it; wu's own element `own` goes where the drawing has its `engine` node, and stays in `own` when it has none.
+    pub(super) fn plugin_drawing(
+        &self,
+        component: &str,
+        instance_id: &str,
+        props: impl FnOnce() -> Value,
+        own: &mut Option<AnyElement>,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let rendered = self.plugin_ui.drawn(component, instance_id, props)?;
+        let site = (component.to_owned(), instance_id.to_owned());
+        let view = self.this.clone();
+        let action_site = site.clone();
+        let on_action: ActionHandler = Rc::new(move |action, window, cx| {
+            view.update(cx, |view, cx| {
+                view.plugin_ui_action(action_site.clone(), action, window, cx)
+            })
+            .log_err();
+        });
+        let mut drawing = Drawing {
+            plugin_ui: &self.plugin_ui,
+            site: &site,
+            on_action,
+            own: own.take(),
+        };
+        let tree = drawing.node(&rendered.tree, cx);
+        *own = drawing.own.take();
+        Some(
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .child(tree)
+                .child(caption(&rendered.drawn_by, cx))
+                .into_any_element(),
+        )
+    }
+
+    /// `own` as wu draws it, or the plugin drawing that takes its place.
+    pub(super) fn plugin_row(
+        &self,
+        component: &str,
+        instance_id: &str,
+        props: impl FnOnce() -> Value,
+        own: AnyElement,
+        cx: &App,
+    ) -> AnyElement {
+        let mut own = Some(own);
+        self.plugin_drawing(component, instance_id, props, &mut own, cx)
+            .or(own)
+            .unwrap_or_else(|| div().into_any_element())
+    }
+
+    /// The transcript rows a plugin can draw, other than tool rows, which their group draws.
+    pub(super) fn plugin_transcript_row(
+        &self,
+        kind: RowKind,
+        turn: &Turn,
+        own: AnyElement,
+        cx: &App,
+    ) -> AnyElement {
+        let entries = self.entries(cx);
+        match kind {
+            RowKind::User(index) => {
+                let Some(Entry::User { text, .. }) = entries.get(index) else {
+                    return own;
+                };
+                self.plugin_row(
+                    "UserMessage",
+                    &index.to_string(),
+                    || json!({ "text": text, "origin": { "kind": "sdk" }, "isExpanded": true }),
+                    own,
+                    cx,
+                )
+            }
+            RowKind::Message(index) => {
+                let Some(Entry::Assistant { markdown, .. }) = entries.get(index) else {
+                    return own;
+                };
+                self.plugin_row(
+                    "AssistantMessage",
+                    &index.to_string(),
+                    || {
+                        json!({
+                            "text": markdown.read(cx).source(),
+                            "isFirstOfReply": turn.first_reply == Some(index),
+                        })
+                    },
+                    own,
+                    cx,
+                )
+            }
+            RowKind::Notice(index) => match entries.get(index) {
+                Some(Entry::Notice {
+                    text,
+                    is_error: false,
+                }) => self.plugin_row(
+                    "CommandOutput",
+                    &index.to_string(),
+                    || json!({ "text": text }),
+                    own,
+                    cx,
+                ),
+                _ => own,
+            },
+            RowKind::Working => {
+                let session = self.session.read(cx);
+                let elapsed = self
+                    .working_since(cx)
+                    .map_or(0, |since| since.elapsed().as_secs());
+                let mode = match entries.last() {
+                    Some(Entry::Tool(tool)) if tool.status == ToolStatus::Running => "tool-use",
+                    Some(Entry::Assistant { .. } | Entry::Thinking(_)) => "responding",
+                    _ => "requesting",
+                };
+                self.plugin_row(
+                    "Spinner",
+                    SPINNER,
+                    || {
+                        json!({
+                            "word": flavour_word(self.flavour_seed, elapsed),
+                            "message": session.is_compacting().then_some("Compacting"),
+                            "suffix": "…",
+                            "mode": mode,
+                        })
+                    },
+                    own,
+                    cx,
+                )
+            }
+            _ => own,
+        }
+    }
+
+    pub(super) fn plugin_agent_row(&self, task_id: &str, own: AnyElement, cx: &App) -> AnyElement {
+        // The extension leaves 4 columns for the row's own indent.
+        let columns = self.plugin_ui.columns.saturating_sub(4);
+        self.plugin_row(
+            "AgentRow",
+            task_id,
+            || json!({ "columns": columns }),
+            own,
+            cx,
+        )
+    }
+
+    /// What plugins draw above the prompt:the `AbovePrompt` band, the drawing for the question being asked, and toasts.
+    pub(super) fn render_plugin_above_prompt(&self, cx: &App) -> Option<AnyElement> {
+        let session = self.session.read(cx);
+        let band = self.plugin_drawing(
+            "AbovePrompt",
+            ABOVE_PROMPT,
+            || {
+                json!({
+                    "hasSurvey": false,
+                    "isCollapsed": false,
+                    "isWorking": session.is_working(),
+                    "maxRows": ABOVE_PROMPT_ROWS,
+                    "bodyColumns": self.plugin_ui.columns,
+                    "scroll": { "offset": 0, "bodyRows": ABOVE_PROMPT_ROWS },
+                    "view": {},
+                })
+            },
+            &mut None,
+            cx,
+        );
+        let question = session
+            .pending_questions()
+            .first()
+            .filter(|pending| !pending.is_plan() && !pending.is_permission())
+            .and_then(|pending| {
+                self.plugin_drawing(
+                    "AskUserQuestion",
+                    pending.id(),
+                    || {
+                        let questions = pending
+                            .questions
+                            .iter()
+                            .map(|question| {
+                                json!({
+                                    "question": question.question,
+                                    "header": question.header,
+                                    "options": question.options.iter().map(|label| json!({ "label": label })).collect::<Vec<_>>(),
+                                    "multiSelect": question.multi_select,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        json!({ "tool": "AskUserQuestion", "questions": questions })
+                    },
+                    &mut None,
+                    cx,
+                )
+            });
+        if band.is_none() && question.is_none() && self.plugin_ui.toasts.is_empty() {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        Some(
+            v_flex()
+                .w_full()
+                .gap(px(4.))
+                .pb(px(8.))
+                .children(band)
+                .children(question)
+                .children(self.plugin_ui.toasts.iter().map(|toast| {
+                    h_flex()
+                        .debug_selector(|| "plugin-ui-toast".into())
+                        .gap(px(6.))
+                        .px(px(10.))
+                        .py(px(4.))
+                        .rounded(px(8.))
+                        .bg(colors.element_background)
+                        .text_size(ui(12.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(text_faint(cx))
+                                .child(toast.plugin.clone()),
+                        )
+                        .child(div().min_w_0().child(toast.text.clone()))
+                }))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn render_plugin_status(&self, cx: &App) -> Option<AnyElement> {
+        if self.plugin_ui.statuses.is_empty() {
+            return None;
+        }
+        let text = self
+            .plugin_ui
+            .statuses
+            .values()
+            .map(SharedString::as_ref)
+            .collect::<Vec<_>>()
+            .join(" · ");
+        Some(
+            div()
+                .debug_selector(|| "plugin-ui-status".into())
+                .min_w_0()
+                .px(px(8.))
+                .truncate()
+                .text_size(ui(11.))
+                .text_color(text_faint(cx))
+                .child(text)
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn plugin_ui_action(
+        &mut self,
+        site: Site,
+        action: UiAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (subtype, target, fields) = match action {
+            UiAction::Open { href } => {
+                if opens_href(&href) {
+                    self.open_link(href.into(), window, cx);
+                }
+                return;
+            }
+            UiAction::Press { target, href } => ("ui_press", target, json!({ "href": href })),
+            UiAction::Input {
+                target,
+                value,
+                kind,
+            } => (
+                "ui_input",
+                target,
+                json!({ "value": value, "kind": kind, "component": site.0, "instance_id": site.1 }),
+            ),
+            UiAction::Select { target, value } => {
+                self.plugin_ui
+                    .selections
+                    .insert(control_key(&site, &target), value.clone());
+                cx.notify();
+                (
+                    "ui_select",
+                    target,
+                    json!({ "value": value, "component": site.0, "instance_id": site.1 }),
+                )
+            }
+        };
+        let mut request = json!({
+            "subtype": subtype,
+            "surface": SURFACE,
+            "client_id": self.plugin_ui.client_id,
+            "plugin": target.plugin,
+            "handle": target.handle,
+            "key": target.key,
+        });
+        if let (Some(request), Value::Object(fields)) = (request.as_object_mut(), fields) {
+            request.extend(fields);
+            request.retain(|_, value| !value.is_null());
+        }
+        let input = (subtype == "ui_input").then(|| control_key(&site, &target));
+        let answer = self
+            .session
+            .update(cx, |session, cx| session.control(request, cx));
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = answer.await?;
+            this.update_in(cx, |view, window, cx| {
+                if let Some(value) = answer["value"].as_str()
+                    && let Some(input) = input.and_then(|key| view.plugin_ui.inputs.get_mut(&key))
+                    && input.editor.read(cx).text(cx) != value
+                {
+                    input.applied = Some(value.to_owned());
+                    input
+                        .editor
+                        .update(cx, |editor, cx| editor.set_text(value, window, cx));
+                }
+                // As the extension does: a control the plugin didn't handle is drawn again, so it can't stay stuck.
+                if answer["handled"] != true {
+                    view.plugin_ui.invalidate(&site);
+                    cx.notify();
+                }
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Gives each `Input` of a new drawing its text field, kept across drawings by its key.
+    fn sync_plugin_inputs(
+        &mut self,
+        site: &Site,
+        node: &UiNode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match node {
+            UiNode::Group { children, .. } => {
+                for child in children {
+                    self.sync_plugin_inputs(site, child, window, cx);
+                }
+            }
+            UiNode::Input {
+                placeholder,
+                value,
+                target,
+                ..
+            } => {
+                let key = control_key(site, target);
+                if let Some(input) = self.plugin_ui.inputs.get_mut(&key) {
+                    input.target = target.clone();
+                    return;
+                }
+                let editor = cx.new(|cx| {
+                    let mut editor = Editor::single_line(window, cx);
+                    editor.set_text(value.as_str(), window, cx);
+                    if let Some(placeholder) = placeholder {
+                        editor.set_placeholder_text(placeholder, window, cx);
+                    }
+                    editor
+                });
+                let subscription = cx.subscribe_in(&editor, window, {
+                    let key = key.clone();
+                    let site = site.clone();
+                    move |view, editor, event: &EditorEvent, window, cx| {
+                        if !matches!(event, EditorEvent::BufferEdited) {
+                            return;
+                        }
+                        let value = editor.read(cx).text(cx);
+                        let Some(input) = view.plugin_ui.inputs.get_mut(&key) else {
+                            return;
+                        };
+                        if input.applied.take().as_ref() == Some(&value) {
+                            return;
+                        }
+                        let target = input.target.clone();
+                        view.plugin_ui_action(
+                            site.clone(),
+                            UiAction::Input {
+                                target,
+                                value,
+                                kind: Some("change".into()),
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                });
+                self.plugin_ui.inputs.insert(
+                    key,
+                    PluginInput {
+                        editor,
+                        target: target.clone(),
+                        applied: Some(value.clone()),
+                        _subscription: subscription,
+                    },
+                );
+            }
+            _ => {}
         }
     }
 
@@ -618,6 +1201,282 @@ impl ChatView {
             }
         }
     }
+}
+
+/// Draws one plugin tree; plugin text is always plain text, never markdown or detected links.
+struct Drawing<'a> {
+    plugin_ui: &'a PluginUi,
+    site: &'a Site,
+    on_action: ActionHandler,
+    /// wu's own element, placed at the tree's first `engine` node.
+    own: Option<AnyElement>,
+}
+
+impl Drawing<'_> {
+    fn node(&mut self, node: &UiNode, cx: &App) -> AnyElement {
+        let colors = cx.theme().colors();
+        match node {
+            UiNode::Text { text, style } => div()
+                .when(style.dim, |this| this.text_color(colors.text_muted))
+                .when(style.bold, |this| this.font_weight(FontWeight::BOLD))
+                .child(text.clone())
+                .into_any_element(),
+            UiNode::Unknown { text, .. } => div()
+                .text_color(colors.text_muted)
+                .child(text.clone())
+                .into_any_element(),
+            UiNode::Group {
+                children,
+                horizontal,
+            } => {
+                let children = children
+                    .iter()
+                    .map(|child| self.node(child, cx))
+                    .collect::<Vec<_>>();
+                if *horizontal {
+                    h_flex().flex_wrap().gap(px(6.)).children(children)
+                } else {
+                    v_flex().min_w_0().children(children)
+                }
+                .into_any_element()
+            }
+            // shortcut: wu draws its row as it is even when the answer's props (a nonzero `ref`) rewrite it; apply those props once a plugin needs it.
+            UiNode::Engine { .. } => self.own.take().unwrap_or_else(|| div().into_any_element()),
+            UiNode::Button { label, target } => {
+                let key = control_key(self.site, target);
+                let on_action = self.on_action.clone();
+                let target = target.clone();
+                let selector = format!("plugin-ui-button-{}", target.key.as_deref().unwrap_or(""));
+                div()
+                    .debug_selector(|| selector)
+                    .child(
+                        Button::new(
+                            SharedString::from(format!("plugin-ui-{key}")),
+                            label.clone(),
+                        )
+                        .label_size(LabelSize::Small)
+                        .on_click(move |_, window, cx| {
+                            let action = UiAction::Press {
+                                target: target.clone(),
+                                href: None,
+                            };
+                            on_action(action, window, cx)
+                        }),
+                    )
+                    .into_any_element()
+            }
+            UiNode::Link { label, href } => {
+                let on_action = self.on_action.clone();
+                let open = href.clone();
+                div()
+                    .id(SharedString::from(format!(
+                        "plugin-ui-link-{}-{}-{href}",
+                        self.site.0, self.site.1
+                    )))
+                    .text_color(colors.text_accent)
+                    .cursor_pointer()
+                    .tooltip(Tooltip::text(href.clone()))
+                    .on_click(move |_, window, cx| {
+                        on_action(UiAction::Open { href: open.clone() }, window, cx)
+                    })
+                    .child(label.clone())
+                    .into_any_element()
+            }
+            UiNode::Input {
+                label,
+                placeholder,
+                value,
+                target,
+            } => {
+                let key = control_key(self.site, target);
+                let field = match self.plugin_ui.inputs.get(&key) {
+                    Some(input) => {
+                        let editor = input.editor.clone();
+                        let on_action = self.on_action.clone();
+                        let target = target.clone();
+                        div()
+                            .debug_selector(|| format!("plugin-ui-input-{key}"))
+                            .flex_1()
+                            .min_w(px(120.))
+                            .px(px(8.))
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(colors.border)
+                            .on_action(move |_: &menu::Confirm, window, cx| {
+                                let value = editor.read(cx).text(cx);
+                                let action = UiAction::Input {
+                                    target: target.clone(),
+                                    value,
+                                    kind: Some("submit".into()),
+                                };
+                                on_action(action, window, cx)
+                            })
+                            .child(input.editor.clone())
+                            .into_any_element()
+                    }
+                    None => div()
+                        .text_color(colors.text_muted)
+                        .child(if value.is_empty() {
+                            placeholder.clone().unwrap_or_default()
+                        } else {
+                            value.clone().into()
+                        })
+                        .into_any_element(),
+                };
+                h_flex()
+                    .gap(px(8.))
+                    .children(label.clone())
+                    .child(field)
+                    .into_any_element()
+            }
+            UiNode::Select {
+                label,
+                value,
+                options,
+                target,
+            } => {
+                let key = control_key(self.site, target);
+                let selected = self
+                    .plugin_ui
+                    .selections
+                    .get(&key)
+                    .or(value.as_ref())
+                    .or(options.first().map(|option| &option.value))
+                    .cloned();
+                h_flex()
+                    .flex_wrap()
+                    .gap(px(4.))
+                    .children(label.clone())
+                    .children(options.iter().enumerate().map(|(index, option)| {
+                        let on_action = self.on_action.clone();
+                        let target = target.clone();
+                        let value = option.value.clone();
+                        Button::new(
+                            ElementId::NamedInteger(
+                                format!("plugin-ui-{key}").into(),
+                                index as u64,
+                            ),
+                            option.label.clone(),
+                        )
+                        .label_size(LabelSize::Small)
+                        .toggle_state(selected.as_ref() == Some(&option.value))
+                        .on_click(move |_, window, cx| {
+                            let action = UiAction::Select {
+                                target: target.clone(),
+                                value: value.clone(),
+                            };
+                            on_action(action, window, cx)
+                        })
+                    }))
+                    .into_any_element()
+            }
+        }
+    }
+}
+
+fn caption(drawn_by: &[String], cx: &App) -> AnyElement {
+    let text = match drawn_by {
+        [plugin] => t!("From the {plugin} plugin", plugin = plugin),
+        [others @ .., last] => t!(
+            "From the {plugins} and {last} plugins",
+            plugins = others.join(", "),
+            last = last
+        ),
+        [] => return div().into_any_element(),
+    };
+    div()
+        .debug_selector(|| "plugin-ui-caption".into())
+        .pt(px(2.))
+        .text_size(ui(11.))
+        .text_color(text_faint(cx))
+        .child(text)
+        .into_any_element()
+}
+
+/// The CLI's own name and input for a tool call; wu keeps only what it shows, so fields it drops (a Bash `description`, say) are missing.
+fn claude_tool(call: &ToolCall) -> (String, Value) {
+    let (name, input) = match call {
+        ToolCall::Exec { command } => ("Bash", json!({ "command": command })),
+        ToolCall::ReadFile { path } => ("Read", json!({ "file_path": path })),
+        ToolCall::WriteFile { path, content } => {
+            ("Write", json!({ "file_path": path, "content": content }))
+        }
+        ToolCall::EditFile {
+            path,
+            old_string,
+            new_string,
+        } => (
+            "Edit",
+            json!({ "file_path": path, "old_string": old_string, "new_string": new_string }),
+        ),
+        ToolCall::ApplyPatch { path } => ("ApplyPatch", json!({ "path": path })),
+        ToolCall::Search { pattern, path } => ("Grep", json!({ "pattern": pattern, "path": path })),
+        ToolCall::Glob { pattern } => ("Glob", json!({ "pattern": pattern })),
+        ToolCall::WebFetch { url, prompt } => ("WebFetch", json!({ "url": url, "prompt": prompt })),
+        ToolCall::WebSearch { query } => ("WebSearch", json!({ "query": query })),
+        ToolCall::Todo { items } => ("TodoWrite", json!({ "todos": items })),
+        ToolCall::Mcp {
+            server,
+            tool,
+            input,
+        } => {
+            return (
+                format!("mcp__{server}__{tool}"),
+                input.clone().unwrap_or_else(|| json!({})),
+            );
+        }
+        ToolCall::Unknown { name, input } => {
+            return (name.clone(), input.clone().unwrap_or_else(|| json!({})));
+        }
+    };
+    (name.to_owned(), input)
+}
+
+fn tool_output(tool: &ToolEntry) -> Option<String> {
+    let output = tool.output.as_ref()?;
+    Some(output.chars().take(MAX_OUTPUT_CHARS).collect())
+}
+
+/// The extension's `ToolUse` props.
+pub(super) fn tool_use_props(tool: &ToolEntry) -> Value {
+    let (name, input) = claude_tool(&tool.call);
+    let mut props = json!({
+        "tool_use_id": tool.id,
+        "tool": name,
+        "input": input,
+        "isRunning": tool.status == ToolStatus::Running,
+        "isErrored": tool.status == ToolStatus::Failed,
+        "isInterrupted": tool.status == ToolStatus::Canceled,
+    });
+    if tool.status != ToolStatus::Running
+        && let Some(output) = tool_output(tool)
+    {
+        props["output"] = output.into();
+    }
+    props
+}
+
+/// The extension's `ToolResult` props.
+pub(super) fn tool_result_props(tool: &ToolEntry) -> Value {
+    json!({
+        "tool_use_id": tool.id,
+        "tool": claude_tool(&tool.call).0,
+        "output": tool_output(tool),
+        "isErrored": tool.status == ToolStatus::Failed,
+    })
+}
+
+/// The extension's `ToolGroup` props.
+pub(super) fn tool_group_props(entries: &[Entry], is_active: bool, is_expanded: bool) -> Value {
+    let calls = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Tool(tool) => Some(tool_use_props(tool)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    json!({ "calls": calls, "isActive": is_active, "isExpanded": is_expanded })
 }
 
 #[cfg(test)]
@@ -854,54 +1713,116 @@ mod tests {
     }
 
     #[test]
-    fn invalidate_drops_only_listed_instances() {
+    fn invalidate_marks_only_listed_instances_stale_and_keeps_them_drawn() {
         let mut plugin_ui = PluginUi::new();
         cached(&mut plugin_ui, "ToolUse", "toolu_1");
         cached(&mut plugin_ui, "ToolUse", "toolu_2");
         cached(&mut plugin_ui, "Pane", "pane");
+        plugin_ui.unhooked.insert("Spinner".into());
 
-        assert!(plugin_ui.apply_event(&json!({
-            "subtype": "ui_invalidate",
-            "instances": [{"surface": SURFACE, "component": "ToolUse", "instance_id": "toolu_1"}],
-        })));
-        let mut keys: Vec<_> = plugin_ui.cache.keys().cloned().collect();
-        keys.sort();
+        assert!(plugin_ui.apply_event(
+            &json!({
+                "subtype": "ui_invalidate",
+                "instances": [{"surface": SURFACE, "component": "ToolUse", "instance_id": "toolu_1"}],
+            }),
+            Instant::now()
+        ));
         assert_eq!(
-            keys,
-            vec![
-                ("Pane".to_owned(), "pane".to_owned()),
-                ("ToolUse".to_owned(), "toolu_2".to_owned())
-            ]
+            plugin_ui.stale.iter().cloned().collect::<Vec<_>>(),
+            vec![("ToolUse".to_owned(), "toolu_1".to_owned())]
+        );
+        assert_eq!(
+            plugin_ui.cache.len(),
+            3,
+            "a stale drawing stays until the new one arrives"
+        );
+        assert!(
+            plugin_ui.unhooked.is_empty(),
+            "an invalidation asks unhooked components again"
         );
 
-        assert!(plugin_ui.apply_event(&json!({"subtype": "ui_invalidate"})));
-        assert!(plugin_ui.cache.is_empty());
+        assert!(plugin_ui.apply_event(&json!({"subtype": "ui_invalidate"}), Instant::now()));
+        assert_eq!(plugin_ui.stale.len(), 3);
+    }
+
+    #[test]
+    fn follow_run_keeps_counting_requests() {
+        let mut plugin_ui = PluginUi::new();
+        plugin_ui.attaches_sent = 3;
+        plugin_ui.requests_sent = 7;
+        plugin_ui.follow_run(1);
+        assert_eq!((plugin_ui.attaches_sent, plugin_ui.requests_sent), (3, 7));
+    }
+
+    #[test]
+    fn non_http_hrefs_are_not_opened() {
+        for href in [
+            "file:///C:/Windows/System32/calc.exe",
+            "javascript:alert(1)",
+            "wu://open?path=secret",
+            "mailto:someone@example.com",
+            " https://example.com",
+            "example.com",
+        ] {
+            assert!(!opens_href(href), "{href} must not open");
+        }
+        for href in [
+            "https://example.com/docs",
+            "http://localhost:3000",
+            "HTTPS://EXAMPLE.COM",
+        ] {
+            assert!(opens_href(href), "{href} opens");
+        }
+    }
+
+    #[test]
+    fn drawings_show_only_when_a_plugin_drew_something() {
+        let rendered = |answer: Value| Rendered::from_answer(&answer).shows();
+        let tree = json!({"type": "Box", "children": [{"type": "engine", "ref": 1}, {"type": "Text", "children": ["line"]}]});
+        assert!(rendered(
+            json!({"tree": tree, "hooked": true, "drawn_by": ["p"]})
+        ));
+        assert!(!rendered(
+            json!({"tree": tree, "hooked": false, "drawn_by": ["p"]})
+        ));
+        assert!(!rendered(
+            json!({"tree": tree, "hooked": true, "drawn_by": []})
+        ));
+        assert!(!rendered(
+            json!({"tree": {"type": "Box", "children": [{"type": "engine", "ref": 0}, " "]}, "hooked": true, "drawn_by": ["p"]})
+        ));
     }
 
     #[test]
     fn status_null_clears_and_toasts_expire() {
         let mut plugin_ui = PluginUi::new();
-        assert!(
-            plugin_ui.apply_event(&json!({"subtype": "ui_status", "plugin": "a", "text": "busy"}))
-        );
-        assert!(
-            plugin_ui.apply_event(&json!({"subtype": "ui_status", "plugin": "b", "text": "idle"}))
-        );
-        assert!(
-            plugin_ui.apply_event(&json!({"subtype": "ui_status", "plugin": "a", "text": null}))
-        );
+        assert!(plugin_ui.apply_event(
+            &json!({"subtype": "ui_status", "plugin": "a", "text": "busy"}),
+            Instant::now()
+        ));
+        assert!(plugin_ui.apply_event(
+            &json!({"subtype": "ui_status", "plugin": "b", "text": "idle"}),
+            Instant::now()
+        ));
+        assert!(plugin_ui.apply_event(
+            &json!({"subtype": "ui_status", "plugin": "a", "text": null}),
+            Instant::now()
+        ));
         assert_eq!(
             plugin_ui.statuses.iter().collect::<Vec<_>>(),
             vec![(&"b".to_owned(), &SharedString::from("idle"))]
         );
 
         for index in 0..7 {
-            plugin_ui.apply_event(&json!({
-                "subtype": "ui_toast",
-                "plugin": "a",
-                "text": format!("toast {index}"),
-                "timeout_ms": if index == 6 { 60_000 } else { 1_000 },
-            }));
+            plugin_ui.apply_event(
+                &json!({
+                    "subtype": "ui_toast",
+                    "plugin": "a",
+                    "text": format!("toast {index}"),
+                    "timeout_ms": if index == 6 { 60_000 } else { 1_000 },
+                }),
+                Instant::now(),
+            );
         }
         assert_eq!(
             plugin_ui

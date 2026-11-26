@@ -412,7 +412,13 @@ impl Focusable for BackgroundTasksCard {
 }
 
 impl Render for BackgroundTasksCard {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(chat) = self.chat.upgrade() {
+            window.defer(cx, move |window, cx| {
+                chat.update(cx, |chat, cx| chat.flush_plugin_ui(window, cx))
+            });
+        }
+        let chat_view = self.chat.upgrade();
         let session = self.session.read(cx);
         let live_run = session.has_live_run();
         let rows = background_rows(session)
@@ -455,8 +461,10 @@ impl Render for BackgroundTasksCard {
                         .enumerate()
                         .map(move |(index, (row, canceled))| {
                             let task_id = row.task_id.clone();
+                            let agent_task = (row.kind == BackgroundTaskKind::Agent)
+                                .then(|| row.task_id.clone());
                             let output = outputs.get(&row.task_id).cloned();
-                            v_flex()
+                            let element = v_flex()
                                 .id(index)
                                 .px(px(4.))
                                 .py(px(2.))
@@ -563,6 +571,13 @@ impl Render for BackgroundTasksCard {
                                             .child(output),
                                     )
                                 })
+                                .into_any_element();
+                            match (agent_task, chat_view.as_ref()) {
+                                (Some(task_id), Some(chat_view)) => {
+                                    chat_view.read(cx).plugin_agent_row(&task_id, element, cx)
+                                }
+                                _ => element,
+                            }
                         }),
                 ),
             )

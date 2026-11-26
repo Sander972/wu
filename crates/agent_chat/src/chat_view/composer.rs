@@ -655,7 +655,8 @@ impl ChatView {
                     .min_w_0()
                     .pl(px(10.))
                     .children(self.render_agent_update(cx))
-                    .children(self.render_editor_context_chip(cx)),
+                    .children(self.render_editor_context_chip(cx))
+                    .children(self.render_plugin_status(cx)),
             )
             .children(self.render_remote_control_indicator(cx))
             .children(self.render_background_indicator(cx))
