@@ -37,6 +37,8 @@ const ABOVE_PROMPT: &str = "above-prompt";
 /// The extension cuts the tool output it shows plugins at 64 Ki characters.
 const MAX_OUTPUT_CHARS: usize = 65_536;
 const ABOVE_PROMPT_ROWS: u32 = 12;
+/// The extension asks again for a hooked agent row this often, since its drawing can show time passing.
+const AGENT_ROW_REFRESH: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TextStyleHint {
@@ -80,9 +82,12 @@ type Site = (String, String);
 
 /// Only web links open: a plugin must not make wu open a file, run a script or follow one of wu's own links.
 pub(crate) fn opens_href(href: &str) -> bool {
-    href.split_once(':').is_some_and(|(scheme, _)| {
-        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
-    })
+    !href
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+        && href.split_once("://").is_some_and(|(scheme, _)| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -321,7 +326,7 @@ impl Rendered {
                 .take(MAX_DRAWN_BY)
                 .map(str::to_owned)
                 .collect(),
-            hooked: answer["hooked"].as_bool().unwrap_or(true),
+            hooked: answer["hooked"].as_bool().unwrap_or(false),
         }
     }
 
@@ -340,6 +345,20 @@ fn draws_anything(node: &UiNode) -> bool {
         | UiNode::Link { .. }
         | UiNode::Input { .. }
         | UiNode::Select { .. } => true,
+    }
+}
+
+fn collect_controls(site: &Site, node: &UiNode, keys: &mut HashSet<String>) {
+    match node {
+        UiNode::Group { children, .. } => {
+            for child in children {
+                collect_controls(site, child, keys);
+            }
+        }
+        UiNode::Input { target, .. } | UiNode::Select { target, .. } => {
+            keys.insert(control_key(site, target));
+        }
+        _ => {}
     }
 }
 
@@ -388,6 +407,8 @@ pub(crate) struct PluginUi {
     /// Renders asked for and not cached, with the number of the latest request; a failed one stays here so it isn't asked again every frame.
     requested: HashMap<Site, u64>,
     requests_sent: u64,
+    /// The props of each instance's latest request and when it was sent: a drawing is asked for again when wu's props for it change.
+    asked: HashMap<Site, (Value, Instant)>,
     /// Components the agent answered `hooked: false` for: not asked again until the next `ui_invalidate`.
     unhooked: HashSet<String>,
     /// Drawings the last frame looked for and didn't have, sent by `ChatView::flush_plugin_ui` once the frame is built.
@@ -414,6 +435,7 @@ impl PluginUi {
             stale: HashSet::default(),
             requested: HashMap::default(),
             requests_sent: 0,
+            asked: HashMap::default(),
             unhooked: HashSet::default(),
             wanted: RefCell::default(),
             inputs: HashMap::default(),
@@ -495,6 +517,9 @@ impl PluginUi {
         self.cache.clear();
         self.stale.clear();
         self.requested.clear();
+        self.asked.clear();
+        self.inputs.clear();
+        self.selections.clear();
         // Without a live run a control request would start a one-off agent process just to detach.
         if !session.read(cx).has_live_run() {
             return;
@@ -505,7 +530,7 @@ impl PluginUi {
             .detach_and_log_err(cx);
     }
 
-    /// The cached drawing of a component instance; when there is none yet, or it is stale, it is asked for in the background and the view notified once it arrives.
+    /// The cached drawing of a component instance; when there is none yet, it is stale or `props` changed, it is asked for in the background and the view notified once it arrives.
     pub fn render(
         &mut self,
         session: &Entity<AgentSession>,
@@ -516,17 +541,14 @@ impl PluginUi {
         cx: &mut Context<ChatView>,
     ) -> Option<&Rendered> {
         let key = (component.to_owned(), instance_id.to_owned());
-        let fresh = self.cache.contains_key(&key) && !self.stale.contains(&key);
-        if fresh
-            || self.attachment != Attachment::Attached
-            || self.requested.contains_key(&key)
-            || self.unhooked.contains(component)
-        {
+        if !self.may_ask(&key) || !self.outdated(&key, &props) {
             return self.cache.get(&key);
         }
         self.requests_sent += 1;
         let number = self.requests_sent;
         self.requested.insert(key.clone(), number);
+        self.asked
+            .insert(key.clone(), (props.clone(), Instant::now()));
         let request = json!({
             "subtype": "ui_render",
             "surface": SURFACE,
@@ -555,6 +577,7 @@ impl PluginUi {
                         let rendered = Rendered::from_answer(&answer);
                         view.sync_plugin_inputs(&key, &rendered.tree, window, cx);
                         view.plugin_ui.cache.insert(key, rendered);
+                        view.plugin_ui.prune_controls();
                         cx.notify();
                     }
                     Err(error) => log::warn!("the agent didn't draw {}: {error:#}", key.0),
@@ -566,7 +589,7 @@ impl PluginUi {
         self.cache.get(&key)
     }
 
-    /// The drawing to show in place of a component instance, if a plugin drew one; a missing or stale drawing is asked for by the next `ChatView::flush_plugin_ui`.
+    /// The drawing to show in place of a component instance, if a plugin drew one; a missing, stale or outdated drawing is asked for by the next `ChatView::flush_plugin_ui`, and the old one stays on screen meanwhile.
     fn drawn(
         &self,
         component: &str,
@@ -574,15 +597,40 @@ impl PluginUi {
         props: impl FnOnce() -> Value,
     ) -> Option<&Rendered> {
         let key = (component.to_owned(), instance_id.to_owned());
-        let cached = self.cache.get(&key);
-        if (cached.is_none() || self.stale.contains(&key))
-            && self.attachment == Attachment::Attached
-            && !self.requested.contains_key(&key)
-            && !self.unhooked.contains(component)
-        {
-            self.wanted.borrow_mut().push((key, props()));
+        // A request in flight isn't doubled: once it is answered, the next frame asks again if the props moved on meanwhile.
+        if self.may_ask(&key) {
+            let props = props();
+            if self.outdated(&key, &props) {
+                self.wanted.borrow_mut().push((key.clone(), props));
+            }
         }
-        cached.filter(|rendered| rendered.shows())
+        self.cache.get(&key).filter(|rendered| rendered.shows())
+    }
+
+    fn may_ask(&self, key: &Site) -> bool {
+        self.attachment == Attachment::Attached
+            && !self.requested.contains_key(key)
+            && !self.unhooked.contains(&key.0)
+    }
+
+    fn outdated(&self, key: &Site, props: &Value) -> bool {
+        let (Some(cached), Some((asked, asked_at))) = (self.cache.get(key), self.asked.get(key))
+        else {
+            return true;
+        };
+        self.stale.contains(key)
+            || asked != props
+            || (key.0 == "AgentRow" && cached.hooked && asked_at.elapsed() >= AGENT_ROW_REFRESH)
+    }
+
+    /// Drops the fields and picks of controls no current drawing has, such as a keyless `Input` whose handle changed.
+    fn prune_controls(&mut self) {
+        let mut live = HashSet::default();
+        for (site, rendered) in &self.cache {
+            collect_controls(site, &rendered.tree, &mut live);
+        }
+        self.inputs.retain(|key, _| live.contains(key));
+        self.selections.retain(|key, _| live.contains(key));
     }
 
     /// Keeps the drawing on screen until the new one arrives, so the row doesn't change height in between.
@@ -907,7 +955,7 @@ impl ChatView {
         )
     }
 
-    /// What plugins draw above the prompt:the `AbovePrompt` band, the drawing for the question being asked, and toasts.
+    /// What plugins draw above the prompt: the `AbovePrompt` band, the drawing for the question being asked, and toasts.
     pub(super) fn render_plugin_above_prompt(&self, cx: &App) -> Option<AnyElement> {
         let session = self.session.read(cx);
         let band = self.plugin_drawing(
@@ -1019,8 +1067,9 @@ impl ChatView {
     ) {
         let (subtype, target, fields) = match action {
             UiAction::Open { href } => {
+                // Not through `open_link`: a plugin's link must never be resolved to a local file.
                 if opens_href(&href) {
-                    self.open_link(href.into(), window, cx);
+                    cx.open_url(&href);
                 }
                 return;
             }
@@ -1763,6 +1812,11 @@ mod tests {
             "mailto:someone@example.com",
             " https://example.com",
             "example.com",
+            "http:example.com",
+            "javascript:alert(1)//://",
+            "https://exa mple.com",
+            "https://example.com/\n",
+            "https://example.com/\u{7}",
         ] {
             assert!(!opens_href(href), "{href} must not open");
         }

@@ -6940,6 +6940,38 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn completing_a_hooked_tool_asks_for_its_row_again(cx: &mut TestAppContext) {
+        let (session, _view, mut receiver, mut calls, cx) = plugin_tool_chat(cx).await;
+        let render = take_render(&mut calls, "ToolUse");
+        assert!(render.request["props"].get("output").is_none());
+        render
+            .reply
+            .send(Ok(tool_use_fixture()))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        drain_controls(&mut receiver);
+        feed_events(
+            &session,
+            vec![AgentEvent::ToolResult {
+                id: "toolu_1".into(),
+                is_error: false,
+                output: Some("done".into()),
+                diff: None,
+            }],
+            cx,
+        );
+        draw_plugin_chat(cx);
+        let again = take_render(&mut drain_controls(&mut receiver), "ToolUse");
+        assert_eq!(again.request["instance_id"], "toolu_1");
+        assert_eq!(again.request["props"]["isRunning"], false);
+        assert_eq!(again.request["props"]["output"], "done");
+        assert!(
+            cx.debug_bounds("plugin-ui-caption").is_some(),
+            "the old drawing stays until the new one arrives"
+        );
+    }
+
+    #[gpui::test]
     async fn pressing_a_button_sends_ui_press_with_its_target(cx: &mut TestAppContext) {
         let (_session, view, mut receiver, mut calls, cx) = plugin_tool_chat(cx).await;
         take_render(&mut calls, "ToolUse")
