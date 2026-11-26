@@ -301,6 +301,34 @@ fn session_title(records: &[Value]) -> Option<String> {
         .or(has_message)
 }
 
+/// Appends the line the CLI itself writes when a chat is renamed, so `claude --resume` shows the new title. A missing transcript is left alone: the CLI creates it with the chat's first message.
+pub fn append_custom_title(
+    config_dir: &Path,
+    cwd: &Path,
+    session_id: &str,
+    title: &str,
+) -> std::io::Result<()> {
+    if !valid_session_id(session_id) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid session id",
+        ));
+    }
+    let path = project_dir(config_dir, cwd).join(format!("{session_id}.jsonl"));
+    let mut line = serde_json::to_string(&serde_json::json!({
+        "type": "custom-title",
+        "sessionId": session_id,
+        "customTitle": title,
+    }))?;
+    line.push('\n');
+    let mut file = match std::fs::OpenOptions::new().append(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    std::io::Write::write_all(&mut file, line.as_bytes())
+}
+
 const MAX_LISTED_SESSIONS: usize = 500;
 
 #[derive(Default)]
@@ -623,6 +651,41 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn custom_title_line_is_appended_and_read_back() {
+        let config = tempfile::tempdir().expect("config folder");
+        let cwd = Path::new("/work/app");
+        write_session(
+            config.path(),
+            cwd,
+            "11111111-aaaa",
+            &[user("u1", None, json!("First question"))],
+        );
+        let path = project_dir(config.path(), cwd).join("11111111-aaaa.jsonl");
+        let before = std::fs::read_to_string(&path).expect("transcript");
+
+        append_custom_title(config.path(), cwd, "11111111-aaaa", "My \"quoted\" name")
+            .expect("append");
+
+        let after = std::fs::read_to_string(&path).expect("transcript");
+        assert!(after.starts_with(&before), "existing lines are untouched");
+        let appended = &after[before.len()..];
+        assert!(appended.ends_with('\n') && appended.matches('\n').count() == 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(appended).expect("one json line"),
+            json!({"type": "custom-title", "sessionId": "11111111-aaaa", "customTitle": "My \"quoted\" name"})
+        );
+        let sessions = list_sessions(config.path(), cwd, &TitleCache::default());
+        assert_eq!(sessions[0].title, "My \"quoted\" name");
+
+        append_custom_title(config.path(), cwd, "missing-session", "Nope").expect("no file");
+        assert!(append_custom_title(config.path(), cwd, "../escape", "Nope").is_err());
+        let files = std::fs::read_dir(project_dir(config.path(), cwd))
+            .expect("project folder")
+            .count();
+        assert_eq!(files, 1, "no transcript is created");
     }
 
     #[test]

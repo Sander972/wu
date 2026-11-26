@@ -46,6 +46,8 @@ pub(crate) struct SystemFrame {
     #[serde(default)]
     pub tasks: Vec<WireBackgroundTask>,
     #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
     pub compact_result: Option<String>,
     #[serde(default)]
     pub compact_error: Option<String>,

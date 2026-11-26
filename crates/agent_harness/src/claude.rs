@@ -1,6 +1,7 @@
 pub mod catalog;
 mod discovery;
 mod history;
+pub use history::append_custom_title;
 mod normalize;
 mod wire;
 
@@ -724,6 +725,24 @@ impl Harness for ClaudeHarness {
         tokio::task::spawn_blocking(move || history::read_history(&config_dir, &cwd, &session_id))
             .await
             .map_err(|error| HarnessError::Protocol(error.to_string()))?
+    }
+
+    async fn rename_transcript(
+        &self,
+        cwd: &std::path::Path,
+        session_id: &str,
+        title: &str,
+    ) -> Result<(), HarnessError> {
+        let config_dir = self.config_dir();
+        let cwd = cwd.to_owned();
+        let session_id = session_id.to_owned();
+        let title = title.to_owned();
+        tokio::task::spawn_blocking(move || {
+            history::append_custom_title(&config_dir, &cwd, &session_id, &title)
+        })
+        .await
+        .map_err(|error| HarnessError::Protocol(error.to_string()))?
+        .map_err(|error| HarnessError::Protocol(error.to_string()))
     }
 
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {

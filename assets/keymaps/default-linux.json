@@ -467,6 +467,8 @@
       "ctrl-shift-f": "pane::DeploySearch",
       "ctrl-shift-h": ["pane::DeploySearch", { "replace_enabled": true }],
       "ctrl-shift-t": "pane::ReopenClosedItem",
+      "ctrl-escape": "agent_chat::FocusInput",
+      "ctrl-shift-escape": "agent_chat::NewChatInTab",
       "ctrl-k ctrl-p": "workspace::ReopenLastPicker",
       "ctrl-k ctrl-s": "wu::OpenKeymap",
       "ctrl-k ctrl-t": "theme_selector::Toggle",
@@ -1312,6 +1314,18 @@
       "find": "buffer_search::Deploy",
       "ctrl-f": "buffer_search::Deploy",
       "ctrl-o": "agent_chat::ToggleThinkingBlocks",
+    },
+  },
+  {
+    "context": "AgentChat && new_conversation_shortcut",
+    "bindings": {
+      "ctrl-n": "agent_chat::NewClaudeChat",
+    },
+  },
+  {
+    "context": "AgentChat && reopen_closed_session_shortcut",
+    "bindings": {
+      "ctrl-shift-t": "agent_chat::ReopenClosedChat",
     },
   },
   {

@@ -24,8 +24,8 @@ pub(crate) use editor_context::{
 };
 
 use crate::{
-    AgentChatSettings, AgentKind, MarkChatUnread, MoveChatToPanel, MoveChatToTab, RenameChat,
-    Send, Stop,
+    AgentChatSettings, AgentKind, FocusLastMessage, MarkChatUnread, MoveChatToPanel,
+    MoveChatToTab, RenameChat, Send, Stop,
     SubmitAnswer, ToggleThinkingBlocks,
     chat_style::{
         Chip, accent, flavour_seed, flavour_word, format_elapsed, gradient_spinner, hairline, ink,
@@ -344,6 +344,10 @@ impl ChatView {
                 _ => {}
             }),
             cx.on_release(|this, cx| {
+                if this.subagent.is_none() {
+                    let id = this.session.read(cx).metadata().id.clone();
+                    this.store.update(cx, |store, _| store.chat_closed(&id));
+                }
                 this.clear_search_highlights(cx);
                 this.release_diagram_images(cx);
             }),
@@ -973,6 +977,18 @@ impl ChatView {
     ) {
         self.thinking_expanded = !self.thinking_expanded;
         self.expanded_rows.retain(|key| !key.starts_with("thought-"));
+        cx.notify();
+    }
+
+    fn focus_last_message(
+        &mut self,
+        _: &FocusLastMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_scroll_button = false;
+        self.list.set_follow_mode(FollowMode::Tail);
+        window.focus(&Focusable::focus_handle(self, cx), cx);
         cx.notify();
     }
 
@@ -4264,9 +4280,16 @@ fn column(content: impl IntoElement, gutter: f32) -> impl IntoElement {
 }
 
 impl ChatView {
-    fn key_context(&self) -> KeyContext {
+    fn key_context(&self, cx: &App) -> KeyContext {
         let mut context = KeyContext::default();
         context.add("AgentChat");
+        let settings = AgentChatSettings::get_global(cx);
+        if settings.enable_new_conversation_shortcut {
+            context.add("new_conversation_shortcut");
+        }
+        if settings.enable_reopen_closed_session_shortcut {
+            context.add("reopen_closed_session_shortcut");
+        }
         context
     }
 
@@ -4392,7 +4415,7 @@ impl Render for ChatView {
             .map(|pending| pending.id().to_string());
         let drop_highlight = cx.theme().colors().drop_target_background;
         let root = v_flex()
-            .key_context(self.key_context())
+            .key_context(self.key_context(cx))
             .relative()
             .size_full()
             .when(self.side_pane.is_none(), |root| {
@@ -4420,6 +4443,7 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::toggle_dictation))
             .on_action(cx.listener(Self::rename_chat))
             .on_action(cx.listener(Self::toggle_thinking_blocks))
+            .on_action(cx.listener(Self::focus_last_message))
             .on_action(cx.listener(Self::move_to_panel))
             .on_action(cx.listener(Self::move_to_tab))
             .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {

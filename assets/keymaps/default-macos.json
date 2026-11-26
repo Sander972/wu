@@ -527,6 +527,8 @@
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "cmd-shift-d": "debug_panel::ToggleFocus",
       "ctrl-cmd-i": "agent_chat::ToggleChatPanel",
+      "cmd-escape": "agent_chat::FocusInput",
+      "cmd-shift-escape": "agent_chat::NewChatInTab",
       "cmd-alt-s": "workspace::SaveAll",
       "cmd-k n": "encoding_selector::Toggle",
       "cmd-k m": "language_selector::Toggle",
@@ -1359,6 +1361,18 @@
     "bindings": {
       "cmd-f": "buffer_search::Deploy",
       "ctrl-o": "agent_chat::ToggleThinkingBlocks",
+    },
+  },
+  {
+    "context": "AgentChat && new_conversation_shortcut",
+    "bindings": {
+      "cmd-n": "agent_chat::NewClaudeChat",
+    },
+  },
+  {
+    "context": "AgentChat && reopen_closed_session_shortcut",
+    "bindings": {
+      "cmd-shift-t": "agent_chat::ReopenClosedChat",
     },
   },
   {

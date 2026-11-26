@@ -219,6 +219,16 @@ pub trait Harness: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Writes a user-chosen chat title where the agent's own CLI reads titles from, so both apps agree.
+    async fn rename_transcript(
+        &self,
+        _cwd: &std::path::Path,
+        _session_id: &str,
+        _title: &str,
+    ) -> Result<(), HarnessError> {
+        Ok(())
+    }
+
     /// Sends one control request to a fresh agent process for the chat `resume` names, or a throwaway one.
     async fn control_once(
         &self,

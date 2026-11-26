@@ -31,6 +31,7 @@ use crate::{AgentChatSettings, AgentKind};
 const SIDE_ANSWERS_KEPT: usize = 20;
 const FIRST_MESSAGE_TITLE_CHARS: usize = 20;
 const AGENT_TITLE_CHARS: usize = 60;
+const MAX_CLOSED_CHATS: usize = 20;
 const TOOL_OUTPUT_MAX_CHARS: usize = 200_000;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const STOP_IN_PLACE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1230,6 +1231,7 @@ pub struct AgentSession {
     native_fork_prompt: Option<Prompt>,
     native_fork_failed: bool,
     native_fork_errors: Vec<String>,
+    title_requested: bool,
     metadata: SessionMetadata,
     transcript: Transcript,
     subagents: HashMap<String, Subagent>,
@@ -1307,6 +1309,7 @@ impl AgentSession {
             runs_started: 0,
             native_fork_prompt: None,
             native_fork_failed: false,
+            title_requested: false,
             native_fork_errors: Vec::new(),
             metadata,
             transcript,
@@ -2857,6 +2860,7 @@ impl AgentSession {
                         self.metadata.outcome = Some(ChatOutcome::Completed);
                         self.metadata.unseen = true;
                         cx.emit(SessionEvent::Finished { errored: false });
+                        self.request_generated_title(cx);
                     }
                     DoneStatus::Interrupted => {
                         if self.user_stopped && self.turn_prompts == 1 {
@@ -3140,6 +3144,45 @@ impl AgentSession {
         }
         self.metadata.title = title;
         self.save_metadata(cx);
+    }
+
+    /// After the first turn Claude names a chat the user hasn't named, and persists that name in its transcript like the CLI does.
+    fn request_generated_title(&mut self, cx: &mut Context<Self>) {
+        if self.title_requested
+            || self.harness.id() != HarnessId::ClaudeCode
+            || !self.has_live_run()
+        {
+            return;
+        }
+        let Some(first_prompt) = self.transcript.entries.iter().find_map(|entry| match entry {
+            Entry::User { text, .. } => Some(text.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        if self.metadata.title != title_from(&first_prompt) {
+            return;
+        }
+        self.title_requested = true;
+        let answer = self.control(
+            serde_json::json!({
+                "subtype": "generate_session_title",
+                "description": first_prompt,
+                "persist": true,
+            }),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let title = answer
+                .await
+                .log_err()
+                .and_then(|reply| reply.get("title")?.as_str().map(str::to_owned));
+            if let Some(title) = title {
+                this.update(cx, |this, cx| this.adopt_agent_title(&title, cx))
+                    .log_err();
+            }
+        })
+        .detach();
     }
 
     fn set_native_session_id(&mut self, session_id: String, cx: &mut Context<Self>) {
@@ -3515,6 +3558,7 @@ pub struct AgentStore {
     sessions: Vec<SessionMetadata>,
     live: HashMap<String, Entity<AgentSession>>,
     released: HashMap<String, WeakEntity<AgentSession>>,
+    closed_chats: Vec<String>,
     idle_watch: Option<Task<()>>,
     auto_archive_watch: Option<Task<()>>,
     auto_archive_ready: bool,
@@ -3786,6 +3830,7 @@ impl AgentStore {
             sessions: Vec::new(),
             live: HashMap::default(),
             released: HashMap::default(),
+            closed_chats: Vec::new(),
             idle_watch: None,
             auto_archive_watch: None,
             auto_archive_ready: false,
@@ -4677,7 +4722,80 @@ impl AgentStore {
         if title.is_empty() {
             return;
         }
-        self.update_session_metadata(id, |metadata| metadata.title = title, cx);
+        self.update_session_metadata(id, |metadata| metadata.title = title.clone(), cx);
+        self.write_title_to_agent(id, title, cx);
+    }
+
+    /// Without a native session id the agent has no transcript yet, and a live run is told as well so its own picker stays current.
+    fn write_title_to_agent(&mut self, id: &str, title: String, cx: &mut Context<Self>) {
+        let Some((kind, cwd, native_session_id)) = self
+            .sessions
+            .iter()
+            .find(|metadata| metadata.id == id)
+            .and_then(|metadata| {
+                Some((
+                    metadata.kind,
+                    metadata.cwd.clone(),
+                    metadata.native_session_id.clone()?,
+                ))
+            })
+        else {
+            return;
+        };
+        let harness = self.harness(kind);
+        if let Some(session) = self
+            .loaded_session(id)
+            .filter(|session| session.read(cx).has_live_run())
+        {
+            session
+                .update(cx, |session, cx| {
+                    session.control(
+                        serde_json::json!({
+                            "subtype": "rename_session",
+                            "title": title,
+                            "source": "host",
+                            "session_id": native_session_id,
+                        }),
+                        cx,
+                    )
+                })
+                .detach_and_log_err(cx);
+        }
+        let write = spawn_agent_work(cx, async move {
+            harness
+                .rename_transcript(&cwd, &native_session_id, &title)
+                .await
+        });
+        cx.background_spawn(async move {
+            write
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result.map_err(anyhow::Error::from))
+                .log_err();
+        })
+        .detach();
+    }
+
+    /// Remembers a chat whose tab was closed, newest last, so the reopen shortcut can bring it back.
+    pub fn chat_closed(&mut self, id: &str) {
+        if !self.sessions.iter().any(|metadata| metadata.id == id) {
+            return;
+        }
+        self.closed_chats.retain(|closed| closed != id);
+        self.closed_chats.push(id.to_string());
+        if self.closed_chats.len() > MAX_CLOSED_CHATS {
+            self.closed_chats.remove(0);
+        }
+    }
+
+    /// The most recently closed chat that still exists and isn't open now, which is no longer remembered as closed.
+    pub fn take_closed_chat(&mut self, is_open: impl Fn(&str) -> bool) -> Option<String> {
+        while let Some(id) = self.closed_chats.pop() {
+            if !is_open(&id) && self.sessions.iter().any(|metadata| metadata.id == id) {
+                return Some(id);
+            }
+        }
+        None
     }
 
     pub fn mark_unseen(&mut self, ids: &[String], cx: &mut Context<Self>) {
@@ -7049,6 +7167,99 @@ done
             assert_eq!(queued, ["scenario:happy"]);
             assert!(!session.can_steer(&Prompt::from("/compact".to_string())));
         });
+    }
+
+    #[gpui::test]
+    async fn rename_updates_the_cli_transcript(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = tempfile::tempdir().expect("config folder");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| {
+            store.harnesses.insert(
+                AgentKind::Claude,
+                Arc::new(
+                    ClaudeHarness::new()
+                        .with_executable(fake_claude())
+                        .with_config_dir(config.path()),
+                ),
+            );
+        });
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let id = session.read_with(cx, |session, _| session.metadata().id.clone());
+        let project_folder: String = directory
+            .path()
+            .to_string_lossy()
+            .chars()
+            .map(|character| if character.is_ascii_alphanumeric() { character } else { '-' })
+            .collect();
+        let project_folder = config.path().join("projects").join(project_folder);
+        std::fs::create_dir_all(&project_folder).expect("project folder");
+        let transcript = project_folder.join("sess-1.jsonl");
+        let before = "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}
+";
+        std::fs::write(&transcript, before).expect("transcript");
+
+        store.update(cx, |store, cx| store.rename_session(&id, "Early name".into(), cx));
+        run_until(cx, |_| true);
+        assert_eq!(
+            std::fs::read_to_string(&transcript).expect("transcript"),
+            before,
+            "a chat the CLI doesn't know yet has no transcript line to write"
+        );
+
+        store.update(cx, |store, cx| {
+            store.update_session_metadata(
+                &id,
+                |metadata| metadata.native_session_id = Some("sess-1".into()),
+                cx,
+            )
+        });
+        store.update(cx, |store, cx| store.rename_session(&id, "  My name  ".into(), cx));
+        run_until(cx, |_| {
+            std::fs::read_to_string(&transcript).is_ok_and(|text| text.len() > before.len())
+        });
+        let text = std::fs::read_to_string(&transcript).expect("transcript");
+        let appended = text.strip_prefix(before).expect("existing lines are kept");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(appended).expect("one line"),
+            serde_json::json!({"type": "custom-title", "sessionId": "sess-1", "customTitle": "My name"})
+        );
+    }
+
+    #[gpui::test]
+    async fn reopen_closed_chat_restores_the_last_closed_tab(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let mut ids = Vec::new();
+        for _ in 0..4 {
+            let session = store.update(cx, |store, cx| {
+                store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+            });
+            ids.push(session.read_with(cx, |session, _| session.metadata().id.clone()));
+        }
+        store.update(cx, |store, cx| {
+            store.chat_closed(&ids[0]);
+            store.chat_closed(&ids[1]);
+            store.chat_closed(&ids[2]);
+            store.chat_closed(&ids[0]);
+            store.chat_closed("no-such-chat");
+            store.delete_session(&ids[2], cx);
+        });
+        let open = ids[3].clone();
+        let take = |is_open: &dyn Fn(&str) -> bool, cx: &mut TestAppContext| {
+            store.update(cx, |store, _| store.take_closed_chat(is_open))
+        };
+        assert_eq!(take(&|_| false, cx), Some(ids[0].clone()));
+        assert_eq!(
+            take(&|id| id == ids[1], cx),
+            None,
+            "an open chat is skipped and the deleted one is gone"
+        );
+        store.update(cx, |store, _| store.chat_closed(&open));
+        assert_eq!(take(&|_| false, cx), Some(open));
+        assert_eq!(take(&|_| false, cx), None);
     }
 
     fn use_quick_stopping_claude(store: &Entity<AgentStore>, cx: &mut TestAppContext) {

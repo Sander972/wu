@@ -38,6 +38,8 @@ pub struct AgentChatSettings {
     pub attach_selection: bool,
     pub attach_open_file: bool,
     pub show_fix_actions: bool,
+    pub enable_new_conversation_shortcut: bool,
+    pub enable_reopen_closed_session_shortcut: bool,
     pub archive_inactive_days: u32,
     pub commit_message: CommitMessageSettings,
 }
@@ -132,6 +134,12 @@ impl Settings for AgentChatSettings {
             attach_selection: content.attach_selection.unwrap_or(true),
             attach_open_file: content.attach_open_file.unwrap_or(true),
             show_fix_actions: content.show_fix_actions.unwrap_or(true),
+            enable_new_conversation_shortcut: content
+                .enable_new_conversation_shortcut
+                .unwrap_or(false),
+            enable_reopen_closed_session_shortcut: content
+                .enable_reopen_closed_session_shortcut
+                .unwrap_or(true),
             archive_inactive_days: content.archive_inactive_sessions.unwrap_or_default().days(),
             commit_message: {
                 let commit_message = content.commit_message.unwrap_or_default();

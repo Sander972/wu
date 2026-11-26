@@ -461,6 +461,18 @@ impl Normalizer {
                     }
                     return events;
                 }
+                if f.subtype == "session_title_changed" {
+                    let ours = self
+                        .session_id
+                        .as_deref()
+                        .is_none_or(|id| id == f.session_id);
+                    return match f.title {
+                        Some(title) if ours && !title.trim().is_empty() => {
+                            vec![AgentEvent::TitleChanged { title }]
+                        }
+                        _ => Vec::new(),
+                    };
+                }
                 if f.subtype == "api_retry" {
                     if std::mem::replace(&mut self.retry_reported, true) {
                         return Vec::new();
@@ -1527,6 +1539,24 @@ mod tests {
                 tokens: None,
                 manual: false
             }]
+        );
+    }
+
+    #[test]
+    fn session_title_changes_become_title_events_for_this_chat_only() {
+        let mut norm = Normalizer::new();
+        let mut events =
+            |line: &str| norm.normalize(crate::claude::wire::parse_frame(line).unwrap(), false);
+        events(r#"{"type":"system","subtype":"init","model":"m","tools":[],"cwd":"/x","session_id":"s1"}"#);
+        assert_eq!(
+            events(r#"{"type":"system","subtype":"session_title_changed","session_id":"s1","title":"Fix login"}"#),
+            vec![AgentEvent::TitleChanged {
+                title: "Fix login".into()
+            }]
+        );
+        assert!(
+            events(r#"{"type":"system","subtype":"session_title_changed","session_id":"other","title":"Nope"}"#)
+                .is_empty()
         );
     }
 

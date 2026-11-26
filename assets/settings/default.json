@@ -163,6 +163,10 @@
     "attach_open_file": true,
     // Offers "Fix with Claude" in the code actions of an error or warning.
     "show_fix_actions": true,
+    // Starts a new chat with Cmd-N (Ctrl-N elsewhere) while a chat has focus.
+    "enable_new_conversation_shortcut": false,
+    // Reopens the chat whose tab you closed last with Cmd-Shift-T (Ctrl-Shift-T elsewhere) while a chat has focus.
+    "enable_reopen_closed_session_shortcut": true,
     // Archives chats you haven't touched for this many days: 0 (off), 1, 2, 7 or 14. Open, pinned, unread and running chats are kept.
     "archive_inactive_sessions": 14,
     // How the Git panel writes commit messages.

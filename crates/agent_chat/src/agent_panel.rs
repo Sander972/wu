@@ -1,6 +1,6 @@
 use crate::{
-    AgentChatSettings, AgentKind, ContinueSavedChat, NewAntigravityChat, NewClaudeChat,
-    NewCodexChat, NewOpencodeChat, ToggleFocus,
+    AgentChatSettings, AgentKind, ContinueSavedChat, NewAntigravityChat, NewChatInTab,
+    NewClaudeChat, NewCodexChat, NewOpencodeChat, ReopenClosedChat, ToggleFocus,
     chat_style::{accent, ink, selected_row, text_faint, ui, wash, working_animation},
     chat_view::ChatView,
     session::{
@@ -89,6 +89,22 @@ pub fn init(cx: &mut App) {
             .register_action(|workspace, _: &NewAntigravityChat, window, cx| {
                 if agent_chat_enabled(cx) {
                     new_chat(workspace, AgentKind::Antigravity, window, cx);
+                }
+            })
+            .register_action(|workspace, _: &NewChatInTab, window, cx| {
+                if agent_chat_enabled(cx)
+                    && let Some(session) = create_session(workspace, AgentKind::Claude, cx)
+                {
+                    let store = store_for(workspace, cx);
+                    store.update(cx, |store, cx| {
+                        store.update_agent_if_due(AgentKind::Claude, cx)
+                    });
+                    open_chat_tab(workspace, session, store, false, window, cx);
+                }
+            })
+            .register_action(|workspace, _: &ReopenClosedChat, window, cx| {
+                if agent_chat_enabled(cx) {
+                    reopen_closed_chat(workspace, window, cx);
                 }
             })
             .register_action(|workspace, _: &ContinueSavedChat, window, cx| {
@@ -211,6 +227,17 @@ fn open_chat_in(
         crate::chat_panel::show_chat_in_panel(workspace, session, store, window, cx);
         return;
     }
+    open_chat_tab(workspace, session, store, split, window, cx);
+}
+
+fn open_chat_tab(
+    workspace: &mut Workspace,
+    session: Entity<AgentSession>,
+    store: Entity<AgentStore>,
+    split: bool,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     if let Some(view) = chat_view_for(workspace, &session, cx) {
         if view.read(cx).is_docked() {
             crate::chat_panel::reveal_chat(workspace, &view, window, cx);
@@ -227,6 +254,31 @@ fn open_chat_in(
     } else {
         workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
     }
+}
+
+fn reopen_closed_chat(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let open_ids: Vec<String> = crate::open_chats(workspace, cx)
+        .iter()
+        .map(|chat| chat.read(cx).session().read(cx).metadata().id.clone())
+        .collect();
+    let store = store_for(workspace, cx);
+    let Some(id) = store.update(cx, |store, _| {
+        store.take_closed_chat(|id| open_ids.iter().any(|open| open == id))
+    }) else {
+        return;
+    };
+    let opening = store.update(cx, |store, cx| store.open_session(&id, cx));
+    cx.spawn_in(window, async move |workspace, cx| {
+        let session = opening.await?;
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_chat(workspace, session, window, cx)
+        })
+    })
+    .detach_and_log_err(cx);
 }
 
 enum Renaming {

@@ -7760,7 +7760,7 @@ fn version_control_page() -> SettingsPage {
 }
 
 fn agent_chat_page() -> SettingsPage {
-    fn general_section() -> [SettingsPageItem; 4] {
+    fn general_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader(n!("General")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -7801,6 +7801,54 @@ fn agent_chat_page() -> SettingsPage {
                     },
                     write: |settings_content, value, _| {
                         settings_content.agent_chat.get_or_insert_default().chat_panel_dock = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("New Chat Shortcut"),
+                description: n!(
+                    "Start a new chat with Cmd-N (Ctrl-N elsewhere) while a chat has focus."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.enable_new_conversation_shortcut"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent_chat
+                            .as_ref()?
+                            .enable_new_conversation_shortcut
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .enable_new_conversation_shortcut = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Reopen Closed Chat Shortcut"),
+                description: n!(
+                    "Reopen the chat whose tab you closed last with Cmd-Shift-T (Ctrl-Shift-T elsewhere) while a chat has focus."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.enable_reopen_closed_session_shortcut"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent_chat
+                            .as_ref()?
+                            .enable_reopen_closed_session_shortcut
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .enable_reopen_closed_session_shortcut = value;
                     },
                 }),
                 metadata: None,

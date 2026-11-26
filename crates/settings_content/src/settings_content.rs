@@ -1199,6 +1199,14 @@ pub struct AgentChatSettingsContent {
     ///
     /// Default: true
     pub show_fix_actions: Option<bool>,
+    /// Start a new chat with Cmd-N (Ctrl-N elsewhere) while a chat has focus.
+    ///
+    /// Default: false
+    pub enable_new_conversation_shortcut: Option<bool>,
+    /// Reopen the chat whose tab you closed last with Cmd-Shift-T (Ctrl-Shift-T elsewhere) while a chat has focus.
+    ///
+    /// Default: true
+    pub enable_reopen_closed_session_shortcut: Option<bool>,
     /// Archive chats you haven't touched for this many days (0 turns it off, otherwise 1, 2, 7 or 14). Open, pinned, unread and running chats are kept.
     ///
     /// Default: 14

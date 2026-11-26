@@ -76,6 +76,14 @@ actions!(
         MoveChatToPanel,
         /// Moves a chat from the chat panel back into a tab.
         MoveChatToTab,
+        /// Moves focus from the chat box to the editor, or from the editor back to the chat box of the chat you last used. On Windows, Ctrl-Escape opens the Start menu, so Ctrl-Alt-Escape does this as well.
+        FocusInput,
+        /// Starts a new Claude Code chat in a tab, even when new chats open in the chat panel.
+        NewChatInTab,
+        /// Reopens the chat whose tab you closed last.
+        ReopenClosedChat,
+        /// Scrolls the chat to its last message and moves focus to the chat box.
+        FocusLastMessage,
         /// Accepts the agent's proposed file change shown in the review tab.
         AcceptProposedChanges,
         /// Rejects the agent's proposed file change shown in the review tab.
@@ -152,6 +160,12 @@ pub fn init(shell_env_loaded: Option<futures::channel::oneshot::Receiver<()>>, c
         );
     })
     .detach();
+    cx.observe_new(|workspace: &mut Workspace, _, _| {
+        workspace.register_action(|workspace, _: &FocusInput, window, cx| {
+            toggle_input_focus(workspace, window, cx)
+        });
+    })
+    .detach();
     offer_fix_actions(cx);
     ide_server::init(cx);
     watch_enabled(cx);
@@ -199,8 +213,8 @@ pub(crate) fn remember_focused_chat(
         .insert(workspace, chat);
 }
 
-/// The chat you last focused, whether open as a tab or docked in the chat panel, else any open chat.
-fn last_focused_chat(workspace: &Workspace, cx: &App) -> Option<Entity<ChatView>> {
+/// Every chat of the workspace, whether open as a tab or docked in the chat panel, except subagent views.
+pub(crate) fn open_chats(workspace: &Workspace, cx: &App) -> Vec<Entity<ChatView>> {
     let panel_chats = workspace
         .panel::<ChatPanel>(cx)
         .map(|panel| {
@@ -208,17 +222,49 @@ fn last_focused_chat(workspace: &Workspace, cx: &App) -> Option<Entity<ChatView>
             pane.items_of_type::<ChatView>().collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let open: Vec<Entity<ChatView>> = workspace
+    workspace
         .items_of_type::<ChatView>(cx)
         .chain(panel_chats)
         .filter(|chat| !chat.read(cx).is_subagent())
-        .collect();
+        .collect()
+}
+
+/// The chat you last focused, whether open as a tab or docked in the chat panel, else any open chat.
+fn last_focused_chat(workspace: &Workspace, cx: &App) -> Option<Entity<ChatView>> {
+    let open = open_chats(workspace, cx);
     let remembered = cx
         .try_global::<LastFocusedChats>()
         .and_then(|chats| chats.0.get(&workspace.weak_handle().entity_id()))
         .and_then(|chat| chat.upgrade())
         .filter(|chat| open.contains(chat));
     remembered.or_else(|| open.into_iter().next())
+}
+
+fn toggle_input_focus(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    if !agent_panel::agent_chat_enabled(cx) {
+        return;
+    }
+    let in_chat = open_chats(workspace, cx)
+        .iter()
+        .any(|chat| gpui::Focusable::focus_handle(chat.read(cx), cx).contains_focused(window, cx));
+    if !in_chat {
+        if let Some(chat) = reveal_last_chat(workspace, window, cx) {
+            window.focus(&gpui::Focusable::focus_handle(chat.read(cx), cx), cx);
+        }
+        return;
+    }
+    let mut panes = vec![workspace.active_pane().clone()];
+    panes.extend(workspace.panes().iter().cloned());
+    let editor = panes.iter().find_map(|pane| {
+        let pane = pane.read(cx);
+        pane.active_item()
+            .into_iter()
+            .chain(pane.items().cloned())
+            .find(|item| item.act_as::<ChatView>(cx).is_none())
+    });
+    if let Some(editor) = editor {
+        workspace.activate_item(editor.as_ref(), true, true, window, cx);
+    }
 }
 
 fn mention_in_last_chat(
@@ -548,6 +594,58 @@ mod tests {
             composer_text(&chats[0], cx),
             "@src/a.rs#5-10 @src/a.rs#5-10 "
         );
+    }
+
+    #[gpui::test]
+    async fn focus_input_toggles_between_editor_and_composer(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let (editor, chat) = workspace.update_in(cx, |workspace, window, cx| {
+            let editor = cx.new(workspace::item::test::TestItem::new);
+            workspace.add_item_to_active_pane(Box::new(editor.clone()), None, true, window, cx);
+            let weak = cx.entity().downgrade();
+            let chat = cx
+                .new(|cx| ChatView::new(session, store.clone(), project.clone(), weak, window, cx));
+            workspace.add_item_to_active_pane(Box::new(chat.clone()), None, true, window, cx);
+            (editor, chat)
+        });
+        let toggle = |cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                toggle_input_focus(workspace, window, cx)
+            });
+            cx.run_until_parked();
+        };
+        let focused = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                let in_chat = gpui::Focusable::focus_handle(chat.read(cx), cx)
+                    .contains_focused(window, cx);
+                let in_editor = gpui::Focusable::focus_handle(editor.read(cx), cx)
+                    .contains_focused(window, cx);
+                (in_chat, in_editor)
+            })
+        };
+        cx.update(|window, cx| {
+            window.focus(&gpui::Focusable::focus_handle(chat.read(cx), cx), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(focused(cx), (true, false));
+        toggle(cx);
+        assert_eq!(focused(cx), (false, true));
+        toggle(cx);
+        assert_eq!(focused(cx), (true, false));
     }
 
     #[gpui::test]
