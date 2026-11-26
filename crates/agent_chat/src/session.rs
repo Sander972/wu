@@ -2255,6 +2255,20 @@ impl AgentSession {
         })
     }
 
+    /// Runs the agent's own CLI in this chat's folder with `arguments` as an argument vector, and fails with the CLI's stderr.
+    pub fn run_cli(&self, arguments: Vec<String>, cx: &Context<Self>) -> Task<Result<()>> {
+        let harness = self.harness.clone();
+        let cwd = self.metadata.cwd.clone();
+        let work = spawn_agent_work(cx, async move {
+            let executable = harness
+                .executable_path()
+                .ok_or_else(|| anyhow::anyhow!(t!("The agent isn't installed.").to_string()))?;
+            agent_harness::update::run_cli(&executable, &arguments, &cwd).await?;
+            anyhow::Ok(())
+        });
+        cx.background_spawn(async move { work.await? })
+    }
+
     /// Asks Claude what rewinding the files to this user message would change, without changing them.
     pub fn rewind_preview(
         &mut self,

@@ -236,6 +236,7 @@ impl ChatView {
                             | AppCommand::Skills
                             | AppCommand::Sandbox
                             | AppCommand::OutputStyle
+                            | AppCommand::Mcp
                     )
                 )
             });
@@ -804,7 +805,8 @@ impl ChatView {
             | AppCommand::Memory
             | AppCommand::Skills
             | AppCommand::Sandbox
-            | AppCommand::OutputStyle => self.show_claude_dialog(&command, window, cx),
+            | AppCommand::OutputStyle
+            | AppCommand::Mcp => self.show_claude_dialog(&command, window, cx),
             AppCommand::Settings | AppCommand::Diff | AppCommand::Files | AppCommand::Terminal => {
                 let Some(name) = command.action_name() else {
                     return;

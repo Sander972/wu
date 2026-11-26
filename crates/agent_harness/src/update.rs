@@ -22,19 +22,13 @@ pub async fn update_cli(
     installed_after: impl FnOnce() -> Option<PathBuf> + Send,
 ) -> Result<UpdateOutcome, UpdateFailed> {
     let before = version_of(&executable).await;
-    let mut command = crate::process::command(&executable);
-    command
-        .args(args)
-        .current_dir(crate::executable::scratch_dir())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    crate::compose_child_path(&mut command, &executable);
-    let output = tokio::time::timeout(UPDATE_TIMEOUT, command.output())
-        .await
-        .map_err(|_| UpdateFailed(i18n::t!("The update took too long.").to_string()))?
-        .map_err(|error| UpdateFailed(error.to_string()))?;
+    let output = run(
+        &executable,
+        args,
+        &crate::executable::scratch_dir(),
+        i18n::t!("The update took too long.").to_string(),
+    )
+    .await?;
     if !output.status.success() {
         return Err(UpdateFailed(failure_reason(&output)));
     }
@@ -47,6 +41,46 @@ pub async fn update_cli(
     } else {
         UpdateOutcome::UpToDate
     })
+}
+
+/// Runs the CLI with `args` as separate arguments, never through a shell, and fails with its stderr when it exits unsuccessfully.
+pub async fn run_cli(executable: &Path, args: &[String], cwd: &Path) -> Result<(), UpdateFailed> {
+    let output = run(
+        executable,
+        args,
+        cwd,
+        i18n::t!("The command took too long.").to_string(),
+    )
+    .await?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(UpdateFailed(match stderr.trim() {
+        "" => failure_reason(&output),
+        stderr => stderr.to_owned(),
+    }))
+}
+
+async fn run(
+    executable: &Path,
+    args: &[impl AsRef<std::ffi::OsStr>],
+    cwd: &Path,
+    timed_out: String,
+) -> Result<std::process::Output, UpdateFailed> {
+    let mut command = crate::process::command(executable);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    crate::compose_child_path(&mut command, executable);
+    tokio::time::timeout(UPDATE_TIMEOUT, command.output())
+        .await
+        .map_err(|_| UpdateFailed(timed_out))?
+        .map_err(|error| UpdateFailed(error.to_string()))
 }
 
 async fn version_of(executable: &Path) -> Option<semver::Version> {
@@ -150,5 +184,31 @@ mod tests {
             .await
             .expect_err("fails");
         assert_eq!(error.0, "Exit code 3");
+    }
+
+    #[tokio::test]
+    async fn run_cli_passes_each_argument_whole_and_reports_stderr() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let record = dir.path().join("arguments");
+        let cli = fake_cli(
+            dir.path(),
+            "1.0.0",
+            &format!(
+                "for argument in \"$@\"; do echo \"$argument\" >> '{}'; done
+echo 'no such server' >&2
+exit 1",
+                record.display()
+            ),
+        );
+        let arguments = ["mcp", "remove", "my server; rm -rf x"].map(String::from);
+        let error = run_cli(&cli, &arguments, dir.path())
+            .await
+            .expect_err("fails");
+        assert_eq!(error.0, "no such server");
+        let recorded = std::fs::read_to_string(record).expect("recorded arguments");
+        assert_eq!(
+            recorded.lines().collect::<Vec<_>>(),
+            ["mcp", "remove", "my server; rm -rf x"]
+        );
     }
 }

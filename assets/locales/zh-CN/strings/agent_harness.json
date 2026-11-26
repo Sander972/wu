@@ -144,6 +144,7 @@
   "That saved login no longer exists": "该已保存的登录已不存在",
   "That saved login no longer exists. Refresh and try again.": "该已保存的登录已不存在。请刷新后重试。",
   "The Claude Code Keychain entry could not be read": "无法读取 Claude Code 的钥匙串条目",
+  "The command took too long.": "命令耗时过长。",
   "The macOS Keychain didn't answer in time": "macOS 钥匙串未及时响应",
   "The model provider is likely unreachable or rejecting requests. Check the model/provider setup (`opencode auth list`, opencode.json) or the opencode log (~/.local/share/opencode/log).": "模型提供商可能无法访问或正在拒绝请求。请检查模型和提供商设置（`opencode auth list`、opencode.json）或 opencode 日志（~/.local/share/opencode/log）。",
   "The provider is failing and opencode is retrying (attempt {attempt}): {message}": "提供商出错，opencode 正在重试（第 {attempt} 次）：{message}",
