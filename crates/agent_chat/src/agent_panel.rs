@@ -1,6 +1,7 @@
 use crate::{
     AgentChatSettings, AgentKind, ContinueSavedChat, NewAntigravityChat, NewChatInTab,
-    NewClaudeChat, NewCodexChat, NewOpencodeChat, ReopenClosedChat, ToggleFocus,
+    NewClaudeChat, NewClaudeChatInWorktree, NewCodexChat, NewOpencodeChat, ReopenClosedChat,
+    ToggleFocus,
     chat_style::{accent, ink, selected_row, text_faint, ui, wash, working_animation},
     chat_view::ChatView,
     session::{
@@ -74,6 +75,11 @@ pub fn init(cx: &mut App) {
             .register_action(|workspace, _: &NewClaudeChat, window, cx| {
                 if agent_chat_enabled(cx) {
                     new_chat(workspace, AgentKind::Claude, window, cx);
+                }
+            })
+            .register_action(|workspace, _: &NewClaudeChatInWorktree, window, cx| {
+                if agent_chat_enabled(cx) {
+                    new_chat_in_new_worktree(workspace, window, cx);
                 }
             })
             .register_action(|workspace, _: &NewCodexChat, window, cx| {
@@ -254,6 +260,20 @@ fn new_chat_in_new_worktree(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    let failure = if workspace.project().read(cx).repositories(cx).is_empty() {
+        Some(t!("This project has no git repository to make a worktree from."))
+    } else if workspace.active_worktree_creation().label.is_some() {
+        Some(t!("A worktree is already being created."))
+    } else {
+        None
+    };
+    if let Some(message) = failure {
+        workspace.show_toast(
+            Toast::new(NotificationId::unique::<AgentPanel>(), message.to_string()).autohide(),
+            cx,
+        );
+        return;
+    }
     let creating = git_ui_core::worktree_service::create_worktree_workspace(
         workspace,
         &wu_actions::CreateWorktree {
@@ -264,11 +284,12 @@ fn new_chat_in_new_worktree(
         None,
         cx,
     );
-    // The worktree service already shows a toast for a failed creation, so a failure only needs logging here.
+    // The checks above cover the failures the service returns without a toast of its own; any other failure already showed one.
     cx.spawn_in(window, async move |_, cx| {
         let created = creating.await?;
         cx.update(|window, cx| {
             let Some(multi_workspace) = window.window_handle().downcast::<MultiWorkspace>() else {
+                log::error!("couldn't open the new worktree: its window is not a workspace window");
                 return;
             };
             multi_workspace
@@ -1139,17 +1160,9 @@ impl AgentPanel {
                         )
                     });
                     let menu = if has_claude {
-                        let workspace = workspace.clone();
-                        menu.entry(
+                        menu.action(
                             t!("New Claude chat in a new worktree"),
-                            None,
-                            move |window, cx| {
-                                workspace
-                                    .update(cx, |workspace, cx| {
-                                        new_chat_in_new_worktree(workspace, window, cx)
-                                    })
-                                    .log_err();
-                            },
+                            NewClaudeChatInWorktree.boxed_clone(),
                         )
                     } else {
                         menu
@@ -2794,10 +2807,19 @@ fn new_chat_tab_button(
             .anchor(gpui::Anchor::TopLeft)
             .menu(move |window, cx| {
                 let agents = AgentChatSettings::get_global(cx).agents().to_vec();
+                let has_claude = agents.contains(&AgentKind::Claude);
                 Some(ContextMenu::build(window, cx, move |menu, _, _| {
-                    agents.into_iter().fold(menu, |menu, kind| {
+                    let menu = agents.into_iter().fold(menu, |menu, kind| {
                         menu.action(kind.label(), new_chat_action(kind))
-                    })
+                    });
+                    if has_claude {
+                        menu.action(
+                            t!("New Claude chat in a new worktree"),
+                            NewClaudeChatInWorktree.boxed_clone(),
+                        )
+                    } else {
+                        menu
+                    }
                 }))
             })
             .into_any_element(),

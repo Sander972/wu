@@ -91,10 +91,19 @@ use workspace::{
 async fn linked_worktree_name(fs: &dyn fs::Fs, cwd: &std::path::Path) -> Option<String> {
     let pointer = fs.load(&cwd.join(".git")).await.ok()?;
     let git_dir = std::path::Path::new(pointer.trim().strip_prefix("gitdir:")?.trim());
-    if git_dir.parent()?.file_name()? != "worktrees" {
+    let worktrees_dir = git_dir.parent()?;
+    if worktrees_dir.file_name()? != "worktrees" {
         return None;
     }
-    Some(cwd.file_name()?.to_string_lossy().into_owned())
+    let folder = cwd.file_name()?;
+    // Wu lays worktrees out as `<worktree dir>/<name>/<repository folder>`, so the folder alone would always show the repository's name.
+    let repository_folder = worktrees_dir.parent()?.parent()?.file_name()?;
+    let named_folder = if folder == repository_folder {
+        cwd.parent()?.file_name()?
+    } else {
+        folder
+    };
+    Some(named_folder.to_string_lossy().into_owned())
 }
 
 const CONTENT_WIDTH: f32 = 736.;
@@ -4963,11 +4972,16 @@ mod tests {
             "gitdir: {}",
             root.join("main/.git/worktrees/linked").display()
         );
+        let nested_pointer = format!(
+            "gitdir: {}",
+            root.join("main/.git/worktrees/abc123").display()
+        );
         fs.insert_tree(
             &root,
             serde_json::json!({
                 "main": { ".git": {} },
                 "linked": { ".git": linked_pointer },
+                "worktrees": { "abc123": { "main": { ".git": nested_pointer } } },
                 "submodule": { ".git": "gitdir: ../main/.git/modules/submodule" },
                 "plain": {},
             }),
@@ -4977,6 +4991,7 @@ mod tests {
         for (folder, expected) in [
             ("main", None),
             ("linked", Some("linked")),
+            ("worktrees/abc123/main", Some("abc123")),
             ("submodule", None),
             ("plain", None),
         ] {

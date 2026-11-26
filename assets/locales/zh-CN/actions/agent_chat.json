@@ -35,6 +35,10 @@
     "name": "新建 Claude 对话",
     "description": "开始新的 Claude Code 对话。"
   },
+  "agent_chat::NewClaudeChatInWorktree": {
+    "name": "在新工作树中新建 Claude 对话",
+    "description": "在新的 git 工作树中开始新的 Claude Code 对话，当前检出保持不变。"
+  },
   "agent_chat::NewCodexChat": {
     "name": "新建 Codex 对话",
     "description": "开始新的 Codex 对话。"

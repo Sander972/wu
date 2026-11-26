@@ -40,6 +40,8 @@ actions!(
         ToggleFocus,
         /// Starts a new Claude Code chat.
         NewClaudeChat,
+        /// Starts a new Claude Code chat in a new git worktree, leaving your current checkout untouched.
+        NewClaudeChatInWorktree,
         /// Starts a new Codex chat.
         NewCodexChat,
         /// Starts a new OpenCode chat.
