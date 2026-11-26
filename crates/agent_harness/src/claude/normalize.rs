@@ -243,6 +243,8 @@ pub(crate) struct Normalizer {
     // The CLI retries up to ten times; one notice per stretch of failures is enough.
     retry_reported: bool,
     last_model: Option<String>,
+    // A frame that only reads the cache says nothing about its lifetime, so the last one that wrote it stands.
+    one_hour_cache: bool,
     spawn_by_task_id: std::collections::HashMap<String, String>,
     spawn_by_tool_id: std::collections::HashMap<String, String>,
     spawn_tool_ids: std::collections::HashSet<String>,
@@ -257,6 +259,7 @@ impl Normalizer {
             compacting: false,
             retry_reported: false,
             last_model: None,
+            one_hour_cache: false,
             spawn_by_task_id: std::collections::HashMap::new(),
             spawn_by_tool_id: std::collections::HashMap::new(),
             spawn_tool_ids: std::collections::HashSet::new(),
@@ -674,12 +677,24 @@ impl Normalizer {
                     .collect();
                 self.last_model = f.message.model.clone().or(self.last_model.take());
                 if let Some(usage) = &f.message.usage {
-                    out.push(AgentEvent::PromptCache {
-                        one_hour: usage
-                            .pointer("/cache_creation/ephemeral_1h_input_tokens")
-                            .and_then(Value::as_u64)
-                            .is_some_and(|tokens| tokens > 0),
-                    });
+                    let tokens_of = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+                    let cache_creation = tokens_of("cache_creation_input_tokens");
+                    let cache_read = tokens_of("cache_read_input_tokens");
+                    let carries_tokens = tokens_of("input_tokens")
+                        .saturating_add(cache_read)
+                        .saturating_add(cache_creation)
+                        > 0;
+                    if carries_tokens && f.message.model.as_deref() != Some("<synthetic>") {
+                        if cache_creation > 0 || cache_read == 0 {
+                            self.one_hour_cache = usage
+                                .pointer("/cache_creation/ephemeral_1h_input_tokens")
+                                .and_then(Value::as_u64)
+                                .is_some_and(|tokens| tokens > 0);
+                        }
+                        out.push(AgentEvent::PromptCache {
+                            one_hour: self.one_hour_cache,
+                        });
+                    }
                     let fields = [
                         "input_tokens",
                         "cache_read_input_tokens",
@@ -1748,6 +1763,29 @@ mod context_tests {
         assert_eq!(one_hour(r#"{"input_tokens":1,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":500}}"#), Some(false));
         assert_eq!(one_hour(r#"{"input_tokens":1}"#), Some(false));
         assert_eq!(one_hour("null"), None);
+    }
+    #[test]
+    fn frames_without_real_usage_leave_the_prompt_cache_alone() {
+        let mut normalizer = Normalizer::new();
+        let mut one_hour = |model: &str, usage: &str| {
+            let frame = format!(r#"{{"type":"assistant","message":{{"model":"{model}","content":[],"usage":{usage}}}}}"#);
+            normalizer
+                .normalize(super::super::wire::parse_frame(&frame).unwrap(), false)
+                .into_iter()
+                .find_map(|event| match event {
+                    AgentEvent::PromptCache { one_hour } => Some(one_hour),
+                    _ => None,
+                })
+        };
+        let wrote_one_hour = r#"{"input_tokens":1,"cache_creation_input_tokens":500,"cache_creation":{"ephemeral_1h_input_tokens":500,"ephemeral_5m_input_tokens":0}}"#;
+        assert_eq!(one_hour("primary", wrote_one_hour), Some(true));
+        assert_eq!(one_hour("primary", r#"{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":3}"#), None);
+        assert_eq!(one_hour("<synthetic>", wrote_one_hour), None);
+        let read_only = r#"{"input_tokens":1,"cache_read_input_tokens":900,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0}}"#;
+        assert_eq!(one_hour("primary", read_only), Some(true), "a read-only frame keeps the lifetime of the last write");
+        let wrote_five_minutes = r#"{"input_tokens":1,"cache_creation_input_tokens":500,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":500}}"#;
+        assert_eq!(one_hour("primary", wrote_five_minutes), Some(false));
+        assert_eq!(one_hour("primary", read_only), Some(false));
     }
     #[test]
     fn context_counts_cached_prompt_and_matches_primary_model() {

@@ -51,6 +51,14 @@ fn is_emoji_part(character: char) -> bool {
     matches!(character, '\u{1F000}'..='\u{1FAFF}' | '\u{2190}'..='\u{2BFF}' | '\u{FE0F}')
 }
 
+fn removed_notice(count: usize) -> String {
+    if count == 1 {
+        t!("Removed 1 invisible character").to_string()
+    } else {
+        t!("Removed {count} invisible characters", count = count).to_string()
+    }
+}
+
 /// Drops invisible characters and counts them; a zero-width joiner between two emoji parts stays so emoji sequences survive.
 pub(crate) fn strip_invisible(text: &str) -> (String, usize) {
     let characters: Vec<char> = text.chars().collect();
@@ -363,7 +371,7 @@ impl ChatView {
                     workspace.show_toast(
                         Toast::new(
                             NotificationId::unique::<ChatView>(),
-                            t!("Removed {count} invisible characters", count = removed).to_string(),
+                            removed_notice(removed),
                         )
                         .autohide(),
                         cx,
@@ -534,6 +542,12 @@ impl ChatView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_removed_notice_is_singular_for_one_character() {
+        assert_eq!(removed_notice(1), "Removed 1 invisible character");
+        assert_eq!(removed_notice(3), "Removed 3 invisible characters");
+    }
 
     #[test]
     fn strip_invisible_counts_and_keeps_visible_text() {

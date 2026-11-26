@@ -245,6 +245,7 @@
   "Remove from favorites": "取消星标",
   "Remove from group": "移出分组",
   "Remove from saved": "取消收藏",
+  "Removed 1 invisible character": "已移除 1 个不可见字符",
   "Removed marketplace {name}.": "已移除市场 {name}。",
   "Removed {count} invisible characters": "已移除 {count} 个不可见字符",
   "Removed {name} from {scope} config. Running sessions keep it until restarted.": "已从{scope}配置中移除 {name}。正在运行的会话在重启前仍会保留它。",
