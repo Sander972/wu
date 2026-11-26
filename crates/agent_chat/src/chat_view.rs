@@ -26,7 +26,7 @@ pub(crate) use editor_context::{
 use crate::{
     AgentChatSettings, AgentKind, FocusLastMessage, MarkChatUnread, MoveChatToPanel,
     MoveChatToTab, RenameChat, Send, Stop,
-    SubmitAnswer, ToggleThinkingBlocks,
+    SubmitAnswer, ToggleFocusView, ToggleThinkingBlocks,
     chat_style::{
         Chip, accent, flavour_seed, flavour_word, format_elapsed, gradient_spinner, hairline, ink,
         mix, page, text_faint, ui, wash, working_animation,
@@ -37,11 +37,11 @@ use crate::{
         ToolStatus,
     },
     slash_commands::{AppCommand, CommandToken, app_command_for_text},
-    usage_rings::{ContextCard, UsageCard, context_chip, usage_chip},
+    usage_rings::{ContextCard, UsageCard, context_chip, context_chip_shown, usage_chip},
 };
 use agent_harness::{ToolCall, UserInputAnswer, UserInputQuestion, view};
 use i18n::{t, tc};
-use settings::{AgentChatSendKey, Settings as _};
+use settings::{AgentChatSendKey, Settings as _, SettingsStore};
 use gpui::Font;
 use theme_settings::ThemeSettings;
 use collections::{HashMap, HashSet};
@@ -54,7 +54,7 @@ use gpui::{
     PromptButton, PromptLevel, Render,
     ScrollHandle, SharedString, StyleRefinement, Styled, ObjectFit, Subscription, Svg,
     ease_out_quint, Task, TextAlign, TextRun, TextStyleRefinement, Transformation,
-    UnderlineStyle, WeakEntity, Window, canvas, div, img, percentage, point, px, radians, size,
+    UnderlineStyle, UpdateGlobal as _, WeakEntity, Window, canvas, div, img, percentage, point, px, radians, size,
     svg,
 };
 use markdown::{
@@ -987,6 +987,17 @@ impl ChatView {
         cx.notify();
     }
 
+    fn toggle_focus_view(&mut self, _: &ToggleFocusView, _: &mut Window, cx: &mut Context<Self>) {
+        let focus = !AgentChatSettings::get_global(cx).compact_transcript;
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.agent_chat.get_or_insert_default().compact_transcript = Some(focus);
+            })
+        });
+        self.store
+            .update(cx, |store, cx| store.apply_view_mode(focus, cx));
+    }
+
     fn focus_last_message(
         &mut self,
         _: &FocusLastMessage,
@@ -1116,6 +1127,9 @@ impl ChatView {
     }
 
     fn glide_to_bottom(&mut self, cx: &mut Context<Self>) {
+        if !AgentChatSettings::get_global(cx).scroll_to_bottom_on_send {
+            return;
+        }
         let start = self.scroll_top();
         self._glide = cx.spawn(async move |this, cx| {
             let frames = (GLIDE.as_millis() / GLIDE_FRAME.as_millis()).max(1) as u32;
@@ -1864,6 +1878,9 @@ impl ChatView {
     }
 
     fn render_message_time(&self, at: i64, cx: &Context<Self>) -> Option<AnyElement> {
+        if !AgentChatSettings::get_global(cx).show_message_timestamps {
+            return None;
+        }
         let time = chrono::DateTime::from_timestamp(at, 0).filter(|_| at > 0)?;
         Some(
             h_flex()
@@ -4467,6 +4484,7 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::dismiss_commands))
             .on_action(cx.listener(Self::accept_prompt_suggestion))
             .on_action(cx.listener(Self::toggle_dictation))
+            .on_action(cx.listener(Self::toggle_focus_view))
             .on_action(cx.listener(Self::rename_chat))
             .on_action(cx.listener(Self::toggle_thinking_blocks))
             .on_action(cx.listener(Self::focus_last_message))
@@ -6211,6 +6229,122 @@ mod tests {
             let _ = window.draw(cx);
         });
         assert!(!paused(cx));
+    }
+
+    async fn focus_chat<'a>(
+        cx: &'a mut TestAppContext,
+    ) -> (
+        Entity<AgentSession>,
+        Entity<ChatView>,
+        &'a mut VisualTestContext,
+    ) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                session.clone(),
+                store.clone(),
+                project,
+                WeakEntity::new_invalid(),
+                window,
+                cx,
+            )
+        });
+        view.update_in(cx, |view, window, cx| {
+            window.focus(&view.composer.focus_handle(cx), cx)
+        });
+        (session, view, cx)
+    }
+
+    #[gpui::test]
+    async fn toggle_focus_view_writes_the_setting_and_notifies_runs(cx: &mut TestAppContext) {
+        let (session, view, cx) = focus_chat(cx).await;
+        let mut receiver = crate::session::tests::attach_live_run(&session, cx);
+        let compact = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| AgentChatSettings::get_global(cx).compact_transcript)
+        };
+        let view_mode_request = |receiver: &mut tokio::sync::mpsc::Receiver<agent_harness::Steer>| {
+            match receiver.try_recv() {
+                Ok(agent_harness::Steer::Control(call)) => call.request,
+                _ => panic!("expected an apply_flag_settings control request"),
+            }
+        };
+        assert!(!compact(cx));
+
+        view.update_in(cx, |view, window, cx| {
+            view.toggle_focus_view(&ToggleFocusView, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(compact(cx));
+        assert_eq!(
+            view_mode_request(&mut receiver),
+            serde_json::json!({ "subtype": "apply_flag_settings", "settings": { "viewMode": "focus" } })
+        );
+
+        view.update_in(cx, |view, window, cx| {
+            view.toggle_focus_view(&ToggleFocusView, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(!compact(cx));
+        assert_eq!(
+            view_mode_request(&mut receiver),
+            serde_json::json!({ "subtype": "apply_flag_settings", "settings": { "viewMode": null } })
+        );
+    }
+
+    #[gpui::test]
+    async fn escape_stops_only_when_enabled_and_working(cx: &mut TestAppContext) {
+        let (session, view, cx) = focus_chat(cx).await;
+        cx.update(|_, cx| {
+            cx.bind_keys([KeyBinding::new(
+                "escape",
+                Stop,
+                Some("AgentComposer && escape_stops && !command_menu > Editor"),
+            )]);
+        });
+        let working = |cx: &mut VisualTestContext| {
+            session.read_with(cx, |session, _| session.is_working())
+        };
+        let press_escape = |cx: &mut VisualTestContext| {
+            view.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            cx.simulate_keystrokes("escape");
+        };
+
+        press_escape(cx);
+        assert!(!working(cx), "an idle chat has nothing to stop");
+
+        feed_events(&session, Vec::new(), cx);
+        assert!(working(cx));
+        press_escape(cx);
+        assert!(!working(cx), "Escape stops the working agent");
+
+        update_chat_settings_in(cx, |settings| settings.escape_stops = Some(false));
+        feed_events(&session, Vec::new(), cx);
+        press_escape(cx);
+        assert!(working(cx), "Escape does nothing when the setting is off");
+    }
+
+    fn update_chat_settings_in(
+        cx: &mut VisualTestContext,
+        update: impl FnOnce(&mut settings::AgentChatSettingsContent),
+    ) {
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    update(content.agent_chat.get_or_insert_default())
+                })
+            })
+        });
     }
 
     #[gpui::test]

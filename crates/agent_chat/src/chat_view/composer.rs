@@ -433,6 +433,9 @@ impl ChatView {
         if AgentChatSettings::get_global(cx).send_with == AgentChatSendKey::ModifierEnter {
             key_context.add("send_with_modifier");
         }
+        if AgentChatSettings::get_global(cx).escape_stops && self.session.read(cx).is_working() {
+            key_context.add("escape_stops");
+        }
         if show_commands {
             key_context.add("command_menu");
         } else if self.shown_prompt_suggestion(cx).is_some() {
@@ -656,26 +659,34 @@ impl ChatView {
                             .offset(point(px(0.), px(-6.))),
                         )
                     })
-                    .child(
-                        PopoverMenu::new(SharedString::from(format!(
-                            "agent-context-usage-{}",
-                            cx.entity_id()
-                        )))
-                        .trigger(
-                            Chip::new(
-                                "agent-context-chip",
-                                6.,
-                                context_chip(context_fraction, cx),
+                    .when(
+                        context_chip_shown(
+                            context_fraction,
+                            AgentChatSettings::get_global(cx).context_usage_threshold,
+                        ),
+                        |this| {
+                            this.child(
+                                PopoverMenu::new(SharedString::from(format!(
+                                    "agent-context-usage-{}",
+                                    cx.entity_id()
+                                )))
+                                .trigger(
+                                    Chip::new(
+                                        "agent-context-chip",
+                                        6.,
+                                        context_chip(context_fraction, cx),
+                                    )
+                                    .hover_background(ring_hover),
+                                )
+                                .menu(move |_, cx| {
+                                    let session = session_entity.clone();
+                                    Some(cx.new(|cx| ContextCard::new(context, Some(session), cx)))
+                                })
+                                .anchor(Anchor::BottomRight)
+                                .attach(Anchor::TopRight)
+                                .offset(point(px(0.), px(-6.))),
                             )
-                            .hover_background(ring_hover),
-                        )
-                        .menu(move |_, cx| {
-                            let session = session_entity.clone();
-                            Some(cx.new(|cx| ContextCard::new(context, Some(session), cx)))
-                        })
-                        .anchor(Anchor::BottomRight)
-                        .attach(Anchor::TopRight)
-                        .offset(point(px(0.), px(-6.))),
+                        },
                     )
                     .children(self.render_move_to_panel(cx)),
             )

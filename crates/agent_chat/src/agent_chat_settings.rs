@@ -1,8 +1,8 @@
-use agent_harness::{PermissionMode, ReasoningLevel};
+use agent_harness::{ClaudeLaunch, PermissionMode, ReasoningLevel};
 use settings::{
-    AgentChatAgent, AgentChatDefaultEffort, AgentChatWhileWorking, AntigravityPermissionDefault,
-    ClaudeCodePermissionDefault, CodexPermissionDefault, ContextTokens, DockSide,
-    OpencodePermissionDefault, RegisterSetting, Settings,
+    AgentChatAgent, AgentChatDefaultEffort, AgentChatSpinnerVerbsMode, AgentChatWhileWorking,
+    AntigravityPermissionDefault, ClaudeCodePermissionDefault, CodexPermissionDefault,
+    ContextTokens, DockSide, OpencodePermissionDefault, RegisterSetting, Settings,
 };
 pub use settings::{AgentChatModelPickerLayout, AgentChatSendKey};
 
@@ -43,6 +43,12 @@ pub struct AgentChatSettings {
     pub enable_new_conversation_shortcut: bool,
     pub enable_reopen_closed_session_shortcut: bool,
     pub archive_inactive_days: u32,
+    pub escape_stops: bool,
+    pub scroll_to_bottom_on_send: bool,
+    pub show_message_timestamps: bool,
+    pub context_usage_threshold: u32,
+    pub allow_bypass_permissions: bool,
+    pub claude_launch: ClaudeLaunch,
     pub commit_message: CommitMessageSettings,
 }
 
@@ -55,10 +61,32 @@ pub struct CommitMessageSettings {
 
 impl AgentChatSettings {
     pub fn default_permission(&self, kind: AgentKind) -> PermissionMode {
-        self.default_permissions
+        let mode = self
+            .default_permissions
             .iter()
             .find(|(agent, _)| *agent == kind)
-            .map_or(PermissionMode::Auto, |(_, mode)| *mode)
+            .map_or(PermissionMode::Auto, |(_, mode)| *mode);
+        self.allowed_permission(kind, mode)
+    }
+
+    /// Bypass is only Claude Code's to hide: the other agents' full access is not what `allow_bypass_permissions` is about.
+    pub fn allowed_permission(&self, kind: AgentKind, mode: PermissionMode) -> PermissionMode {
+        if kind == AgentKind::Claude
+            && mode == PermissionMode::FullAccess
+            && !self.allow_bypass_permissions
+        {
+            PermissionMode::Auto
+        } else {
+            mode
+        }
+    }
+
+    pub fn permission_choices(&self, kind: AgentKind) -> Vec<PermissionMode> {
+        PermissionMode::choices(kind.harness_id())
+            .iter()
+            .copied()
+            .filter(|mode| self.allowed_permission(kind, *mode) == *mode)
+            .collect()
     }
 
     pub fn agents(&self) -> &[AgentKind] {
@@ -145,6 +173,28 @@ impl Settings for AgentChatSettings {
                 .enable_reopen_closed_session_shortcut
                 .unwrap_or(true),
             archive_inactive_days: content.archive_inactive_sessions.unwrap_or_default().days(),
+            escape_stops: content.escape_stops.unwrap_or(true),
+            scroll_to_bottom_on_send: content.scroll_to_bottom_on_send.unwrap_or(true),
+            show_message_timestamps: content.show_message_timestamps.unwrap_or(true),
+            context_usage_threshold: content.context_usage_threshold.unwrap_or(50).min(100),
+            allow_bypass_permissions: content.allow_bypass_permissions.unwrap_or(true),
+            claude_launch: {
+                let spinner_verbs = content.spinner_verbs.unwrap_or_default();
+                ClaudeLaunch {
+                    environment: content
+                        .environment_variables
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|variable| (variable.name, variable.value))
+                        .collect(),
+                    process_wrapper: content
+                        .process_wrapper
+                        .filter(|wrapper| !wrapper.trim().is_empty()),
+                    spinner_verbs: spinner_verbs.verbs.unwrap_or_default(),
+                    replace_spinner_verbs: spinner_verbs.mode
+                        == Some(AgentChatSpinnerVerbsMode::Replace),
+                }
+            },
             commit_message: {
                 let commit_message = content.commit_message.unwrap_or_default();
                 CommitMessageSettings {
@@ -229,5 +279,98 @@ impl AgentKind {
             AgentKind::Opencode => AgentChatAgent::Opencode,
             AgentKind::Antigravity => AgentChatAgent::Antigravity,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings_with(
+        update: impl FnOnce(&mut settings::AgentChatSettingsContent),
+    ) -> AgentChatSettings {
+        let mut content = settings::SettingsContent::default();
+        update(content.agent_chat.get_or_insert_default());
+        AgentChatSettings::from_settings(&content)
+    }
+
+    #[test]
+    fn bypass_is_hidden_when_not_allowed() {
+        let bypass_by_default = |allowed: Option<bool>| {
+            settings_with(|content| {
+                content.allow_bypass_permissions = allowed;
+                content
+                    .default_permission
+                    .get_or_insert_default()
+                    .claude_code = Some(ClaudeCodePermissionDefault::Bypass);
+                content.default_permission.get_or_insert_default().codex =
+                    Some(CodexPermissionDefault::FullAccess);
+            })
+        };
+
+        let allowed = bypass_by_default(None);
+        assert_eq!(
+            allowed.default_permission(AgentKind::Claude),
+            PermissionMode::FullAccess
+        );
+        assert!(
+            allowed
+                .permission_choices(AgentKind::Claude)
+                .contains(&PermissionMode::FullAccess)
+        );
+
+        let denied = bypass_by_default(Some(false));
+        assert_eq!(
+            denied.default_permission(AgentKind::Claude),
+            PermissionMode::Auto,
+            "a configured Bypass default falls back to Auto"
+        );
+        assert_eq!(
+            denied.allowed_permission(AgentKind::Claude, PermissionMode::FullAccess),
+            PermissionMode::Auto,
+            "a chat that stored Bypass falls back too"
+        );
+        let choices = denied.permission_choices(AgentKind::Claude);
+        assert!(!choices.contains(&PermissionMode::FullAccess));
+        assert_eq!(
+            choices.len(),
+            PermissionMode::choices(agent_harness::HarnessId::ClaudeCode).len() - 1
+        );
+
+        assert_eq!(
+            denied.default_permission(AgentKind::Codex),
+            PermissionMode::FullAccess,
+            "other agents keep their full access"
+        );
+        assert!(
+            denied
+                .permission_choices(AgentKind::Codex)
+                .contains(&PermissionMode::FullAccess)
+        );
+    }
+
+    #[test]
+    fn launch_settings_reach_the_claude_launch() {
+        let configured = settings_with(|content| {
+            content.process_wrapper = Some("  ".into());
+            content.environment_variables = Some(vec![settings::AgentChatEnvironmentVariable {
+                name: "HTTPS_PROXY".into(),
+                value: "http://localhost:8080".into(),
+            }]);
+            content.spinner_verbs = Some(settings::AgentChatSpinnerVerbsContent {
+                mode: Some(settings::AgentChatSpinnerVerbsMode::Replace),
+                verbs: Some(vec!["Pondering".into()]),
+            });
+        });
+        assert_eq!(
+            configured.claude_launch,
+            ClaudeLaunch {
+                environment: vec![("HTTPS_PROXY".into(), "http://localhost:8080".into())],
+                process_wrapper: None,
+                spinner_verbs: vec!["Pondering".into()],
+                replace_spinner_verbs: true,
+            }
+        );
+        assert_eq!(settings_with(|_| {}).claude_launch, ClaudeLaunch::default());
     }
 }

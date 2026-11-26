@@ -173,6 +173,25 @@
     "enable_reopen_closed_session_shortcut": true,
     // Archives chats you haven't touched for this many days: 0 (off), 1, 2, 7 or 14. Open, pinned, unread and running chats are kept.
     "archive_inactive_sessions": 14,
+    // Pressing Escape in the chat box stops the agent while it works.
+    "escape_stops": true,
+    // Scrolls the chat to the bottom when you send a message.
+    "scroll_to_bottom_on_send": true,
+    // Shows the time each message was sent.
+    "show_message_timestamps": true,
+    // Shows the context usage indicator once this percentage of the context window is used; 0 shows it from the first reply.
+    "context_usage_threshold": 50,
+    // Claude Code only. "mode" is "append" (add to the default verbs) or "replace".
+    "spinner_verbs": {
+      "mode": "append",
+      "verbs": [],
+    },
+    // Claude Code only. Environment variables added to the Claude Code process, as { "name": "...", "value": "..." }. They win over Wu's own, except CLAUDE_CODE_SSE_PORT and CLAUDE_CODE_RESUME_*.
+    "environment_variables": [],
+    // Claude Code only. A program that starts Claude Code, run with the path of `claude` as its first argument (never through a shell).
+    "process_wrapper": null,
+    // Claude Code only. When off, the Bypass permission mode is hidden and a chat that used it falls back to Auto.
+    "allow_bypass_permissions": true,
     // How the Git panel writes commit messages.
     "commit_message": {
       // "claude_code", "codex", "opencode" or "antigravity". When unset, the first installed agent.

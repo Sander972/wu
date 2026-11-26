@@ -1219,6 +1219,38 @@ pub struct AgentChatSettingsContent {
     ///
     /// Default: 14
     pub archive_inactive_sessions: Option<AgentChatArchiveAfter>,
+    /// Pressing Escape in the chat box stops the agent while it works. When off, only the Stop button does.
+    ///
+    /// Default: true
+    pub escape_stops: Option<bool>,
+    /// Scroll the chat to the bottom when you send a message. When off, the chat stays where you left it.
+    ///
+    /// Default: true
+    pub scroll_to_bottom_on_send: Option<bool>,
+    /// Show the time each message was sent.
+    ///
+    /// Default: true
+    pub show_message_timestamps: Option<bool>,
+    /// Show the context usage indicator below the chat box once this percentage of the context window is used. 0 shows it from the first reply.
+    ///
+    /// Default: 50
+    pub context_usage_threshold: Option<u32>,
+    /// Verbs the spinner cycles through while Claude Code works. "append" adds them to the defaults and "replace" uses only yours. Applies to Claude Code.
+    ///
+    /// Default: { "mode": "append", "verbs": [] }
+    pub spinner_verbs: Option<AgentChatSpinnerVerbsContent>,
+    /// Environment variables added to every Claude Code process, after Wu's own, so yours win. `CLAUDE_CODE_SSE_PORT` and `CLAUDE_CODE_RESUME_*` are ignored.
+    ///
+    /// Default: []
+    pub environment_variables: Option<Vec<AgentChatEnvironmentVariable>>,
+    /// A program that starts Claude Code: Wu runs it with the path of `claude` as its first argument, followed by Claude Code's own arguments. Never run through a shell.
+    ///
+    /// Default: unset
+    pub process_wrapper: Option<String>,
+    /// Offer the Bypass permission mode (full access) for Claude Code. When off, it is hidden from the mode picker and `default_permission`, and a chat that had it falls back to Auto.
+    ///
+    /// Default: true
+    pub allow_bypass_permissions: Option<bool>,
     /// How the Git panel writes commit messages.
     pub commit_message: Option<AgentChatCommitMessageContent>,
 }
@@ -1282,6 +1314,34 @@ impl TryFrom<u32> for AgentChatArchiveAfter {
             other => Err(format!("{other} is not one of 0, 1, 2, 7 or 14")),
         }
     }
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct AgentChatSpinnerVerbsContent {
+    /// Whether the verbs are added to the defaults or replace them.
+    pub mode: Option<AgentChatSpinnerVerbsMode>,
+    /// The verbs to show.
+    pub verbs: Option<Vec<String>>,
+}
+
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentChatSpinnerVerbsMode {
+    #[default]
+    Append,
+    Replace,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct AgentChatEnvironmentVariable {
+    /// The variable's name.
+    pub name: String,
+    /// The variable's value.
+    pub value: String,
 }
 
 #[with_fallible_options]

@@ -217,8 +217,17 @@ impl ClaudeHarness {
         request: &RunRequest,
         discovered: Option<&[crate::Model]>,
     ) -> Command {
-        let mut cmd = crate::process::command(exe);
+        let wrapper = request
+            .launch
+            .process_wrapper
+            .as_deref()
+            .filter(|wrapper| !wrapper.trim().is_empty());
+        let mut cmd =
+            crate::process::command(wrapper.map_or(exe.as_os_str(), std::ffi::OsStr::new));
         crate::compose_child_path(&mut cmd, exe);
+        if wrapper.is_some() {
+            cmd.arg(exe);
+        }
         cmd.args([
             "--print",
             "--input-format",
@@ -268,6 +277,11 @@ impl ClaudeHarness {
                 "CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS",
                 crate::INTERRUPTED_TURN_MAX_AGE.as_millis().to_string(),
             );
+        }
+        for (name, value) in &request.launch.environment {
+            if user_may_set_environment_variable(name, value) {
+                cmd.env(name, value);
+            }
         }
         // Headless sessions only connect the Chrome extension when asked to.
         cmd.arg(if request.chrome {
@@ -931,6 +945,7 @@ impl ClaudeHarness {
             ephemeral: resume.is_none(),
             resume_interrupted: false,
             prompt_suggestions: false,
+            launch: Default::default(),
             context: Vec::new(),
         };
         let mut cmd = self.build_command(&exe, &launch, None);
@@ -2164,6 +2179,16 @@ fn updated_input_with_answers(
     Value::Object(updated)
 }
 
+/// Wu strips the IDE port and the resume variables on purpose, so a user variable can't bring them back, and a name the OS rejects would fail the whole launch.
+fn user_may_set_environment_variable(name: &str, value: &str) -> bool {
+    let name_upper = name.to_ascii_uppercase();
+    !name.is_empty()
+        && !name.contains(['=', ' '])
+        && !value.contains(' ')
+        && name_upper != "CLAUDE_CODE_SSE_PORT"
+        && !name_upper.starts_with("CLAUDE_CODE_RESUME_")
+}
+
 fn flag_settings(request: &RunRequest) -> serde_json::Map<String, Value> {
     let mut settings = serde_json::Map::new();
     if option_is_on(&request.model_options, "fastMode") {
@@ -2179,6 +2204,15 @@ fn flag_settings(request: &RunRequest) -> serde_json::Map<String, Value> {
     if let Some(tokens) = request.auto_compact_tokens {
         settings.insert("autoCompactEnabled".into(), Value::Bool(true));
         settings.insert("autoCompactWindow".into(), tokens.into());
+    }
+    if !request.launch.spinner_verbs.is_empty() {
+        settings.insert(
+            "spinnerVerbs".into(),
+            serde_json::json!({
+                "mode": if request.launch.replace_spinner_verbs { "replace" } else { "append" },
+                "verbs": request.launch.spinner_verbs,
+            }),
+        );
     }
     settings
 }
@@ -2208,6 +2242,7 @@ mod tests {
                 ephemeral: false,
                 resume_interrupted: false,
                 prompt_suggestions: false,
+                launch: Default::default(),
                 context: Vec::new(),
             };
             flag_settings(&launch).get("alwaysThinkingEnabled").cloned()
@@ -2477,6 +2512,7 @@ mod tests {
             ephemeral: false,
             resume_interrupted: false,
             prompt_suggestions: false,
+            launch: Default::default(),
             context: Vec::new(),
         };
         request.model_options.insert("thinking".into(), json!("off"));
@@ -2507,6 +2543,7 @@ mod tests {
             ephemeral: false,
             resume_interrupted: false,
             prompt_suggestions: false,
+            launch: Default::default(),
             context: Vec::new(),
         };
         let harness = ClaudeHarness::new();
@@ -2546,6 +2583,7 @@ mod tests {
             ephemeral: false,
             resume_interrupted: false,
             prompt_suggestions: false,
+            launch: Default::default(),
             context: Vec::new(),
         };
         let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
@@ -2576,6 +2614,7 @@ mod tests {
             ephemeral: false,
             resume_interrupted: false,
             prompt_suggestions: false,
+            launch: Default::default(),
             context: Vec::new(),
         };
         let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
@@ -2609,6 +2648,7 @@ mod tests {
             ephemeral: false,
             resume_interrupted: false,
             prompt_suggestions: false,
+            launch: Default::default(),
             context: Vec::new(),
         };
         let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
@@ -2622,6 +2662,133 @@ mod tests {
             envs.iter()
                 .all(|(key, _)| *key != "CLAUDE_CODE_RESUME_INTERRUPTED_TURN"),
             "a normal launch never asks to continue a turn"
+        );
+    }
+
+    fn launch_request(launch: crate::ClaudeLaunch) -> RunRequest {
+        RunRequest {
+            prompt: "hi".into(),
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            permission: PermissionMode::Ask,
+            resume: None,
+            fork: None,
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            auto_compact_tokens: None,
+            chrome: false,
+            drop_prompt: None,
+            ephemeral: false,
+            resume_interrupted: false,
+            prompt_suggestions: false,
+            launch,
+            context: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn user_environment_variables_are_applied_last() {
+        // SAFETY: only this test uses this variable name, and nothing else reads it.
+        unsafe { std::env::set_var("CLAUDE_CODE_RESUME_TEST_USER_ENV", "1") };
+        let environment = |pairs: &[(&str, &str)]| crate::ClaudeLaunch {
+            environment: pairs
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        let request = launch_request(environment(&[
+            ("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "false"),
+            ("MY_PROXY", "http://localhost:1"),
+            ("CLAUDE_CODE_SSE_PORT", "1234"),
+            ("claude_code_resume_interrupted_turn", "1"),
+            ("CLAUDE_CODE_RESUME_TEST_USER_ENV", "1"),
+            ("", "empty name"),
+            ("A=B", "equals sign"),
+        ]));
+        let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
+        let envs: std::collections::HashMap<_, _> = command.as_std().get_envs().collect();
+        let value = |name: &str| envs.get(std::ffi::OsStr::new(name)).copied().flatten();
+        assert_eq!(
+            value("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"),
+            Some(std::ffi::OsStr::new("false")),
+            "a user value beats wu's own"
+        );
+        assert_eq!(
+            value("MY_PROXY"),
+            Some(std::ffi::OsStr::new("http://localhost:1"))
+        );
+        for stripped in [
+            "CLAUDE_CODE_SSE_PORT",
+            "CLAUDE_CODE_RESUME_TEST_USER_ENV",
+            "CLAUDE_CODE_RESUME_INTERRUPTED_TURN",
+            "claude_code_resume_interrupted_turn",
+        ] {
+            assert_eq!(value(stripped), None, "{stripped} stays removed or unset");
+        }
+        assert!(!envs.contains_key(std::ffi::OsStr::new("")));
+        assert!(!envs.contains_key(std::ffi::OsStr::new("A=B")));
+    }
+
+    #[test]
+    fn process_wrapper_receives_the_executable_first() {
+        let harness = ClaudeHarness::new();
+        let plain = harness.build_command(
+            &PathBuf::from("claude"),
+            &launch_request(Default::default()),
+            None,
+        );
+        assert_eq!(plain.as_std().get_program(), "claude");
+        let plain_args: Vec<_> = plain.as_std().get_args().collect();
+
+        let wrapped = harness.build_command(
+            &PathBuf::from("claude"),
+            &launch_request(crate::ClaudeLaunch {
+                process_wrapper: Some("/opt/my tools/wrapper".into()),
+                ..Default::default()
+            }),
+            None,
+        );
+        assert_eq!(wrapped.as_std().get_program(), "/opt/my tools/wrapper");
+        let wrapped_args: Vec<_> = wrapped.as_std().get_args().collect();
+        assert_eq!(
+            wrapped_args.first().copied(),
+            Some(std::ffi::OsStr::new("claude"))
+        );
+        assert_eq!(&wrapped_args[1..], plain_args.as_slice());
+
+        let blank = harness.build_command(
+            &PathBuf::from("claude"),
+            &launch_request(crate::ClaudeLaunch {
+                process_wrapper: Some("  ".into()),
+                ..Default::default()
+            }),
+            None,
+        );
+        assert_eq!(blank.as_std().get_program(), "claude");
+    }
+
+    #[test]
+    fn spinner_verbs_append_and_replace() {
+        let settings = |verbs: &[&str], replace: bool| {
+            flag_settings(&launch_request(crate::ClaudeLaunch {
+                spinner_verbs: verbs.iter().map(|verb| verb.to_string()).collect(),
+                replace_spinner_verbs: replace,
+                ..Default::default()
+            }))
+            .get("spinnerVerbs")
+            .cloned()
+        };
+        assert_eq!(settings(&[], true), None, "no verbs leaves the CLI's own");
+        assert_eq!(
+            settings(&["Pondering"], false),
+            Some(json!({ "mode": "append", "verbs": ["Pondering"] }))
+        );
+        assert_eq!(
+            settings(&["Pondering", "Brewing"], true),
+            Some(json!({ "mode": "replace", "verbs": ["Pondering", "Brewing"] }))
         );
     }
 
@@ -2644,6 +2811,7 @@ mod tests {
             ephemeral: false,
             resume_interrupted: false,
             prompt_suggestions: false,
+            launch: Default::default(),
             context: Vec::new(),
         };
         let harness = ClaudeHarness::new();

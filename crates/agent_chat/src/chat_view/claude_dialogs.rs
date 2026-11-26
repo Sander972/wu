@@ -2244,6 +2244,7 @@ impl ChatView {
             | AppCommand::Bookmarks
             | AppCommand::Bug
             | AppCommand::Config
+            | AppCommand::FocusView
             | AppCommand::Tasks => return,
         };
         let session = self.session.clone();

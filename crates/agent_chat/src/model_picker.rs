@@ -599,7 +599,7 @@ impl ModelPicker {
         let harness = kind.harness_id();
         let wash = selected_row(cx);
         let ring = selected_ring(cx);
-        let rows = PermissionMode::choices(harness).iter().map(|&mode| {
+        let rows = AgentChatSettings::get_global(cx).permission_choices(kind).into_iter().map(|mode| {
             let selected = mode == current;
             menu_row(
                 SharedString::from(format!("picker-permission-{mode:?}")),

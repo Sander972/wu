@@ -131,6 +131,7 @@ async fn run_once(
         ephemeral: true,
         resume_interrupted: false,
         prompt_suggestions: false,
+        launch: Default::default(),
         context: Vec::new(),
     };
     let (steering_tx, steering) = tokio::sync::mpsc::channel(1);

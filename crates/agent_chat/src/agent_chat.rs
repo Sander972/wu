@@ -72,6 +72,8 @@ actions!(
         MarkChatUnread,
         /// Expands or collapses every thought process in the chat.
         ToggleThinkingBlocks,
+        /// Hides or shows the tool calls and other activity between your prompts and the agent's replies.
+        ToggleFocusView,
         /// Shows or hides the chat panel.
         ToggleChatPanel,
         /// Moves the chat out of its tab and into the chat panel.

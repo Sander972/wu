@@ -163,6 +163,32 @@ pub struct RunRequest {
     /// Asks the agent to suggest the next prompt after each turn. Only Claude Code supports it.
     #[serde(default)]
     pub prompt_suggestions: bool,
+    /// How Claude Code is started, from the user's settings. Other agents ignore it.
+    #[serde(default, skip_serializing_if = "ClaudeLaunch::is_default")]
+    pub launch: ClaudeLaunch,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeLaunch {
+    /// Added to the process environment after Wu's own, so they win, except `CLAUDE_CODE_SSE_PORT` and `CLAUDE_CODE_RESUME_*`, which Wu controls for safety.
+    #[serde(default)]
+    pub environment: Vec<(String, String)>,
+    /// Started instead of `claude`, with the path of `claude` as its first argument.
+    #[serde(default)]
+    pub process_wrapper: Option<String>,
+    /// Verbs the spinner shows while Claude Code works.
+    #[serde(default)]
+    pub spinner_verbs: Vec<String>,
+    /// Whether `spinner_verbs` replace Claude Code's own instead of adding to them.
+    #[serde(default)]
+    pub replace_spinner_verbs: bool,
+}
+
+impl ClaudeLaunch {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// How long after a chat was cut off mid-turn its turn may still run again.

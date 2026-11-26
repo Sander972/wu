@@ -2,7 +2,7 @@ use super::editor_context::{applied_line_suffix, mention_text_with_lines, open_t
 use super::{ChatView, claude_dialogs::show_toast, ui};
 use crate::{
     AcceptCommand, AgentKind, DismissCommands, NewAntigravityChat, NewClaudeChat, NewCodexChat,
-    NewOpencodeChat, SelectNextCommand, SelectPreviousCommand, Send, ToggleFocus,
+    NewOpencodeChat, SelectNextCommand, SelectPreviousCommand, Send, ToggleFocus, ToggleFocusView,
     agent_panel::AgentPanel,
     chat_style::{MENU_ITEM_RADIUS, icon, ink, popover_card, selected_row, working_animation},
     slash_commands::{
@@ -849,6 +849,7 @@ impl ChatView {
                     })
                     .log_err();
             }
+            AppCommand::FocusView => self.toggle_focus_view(&ToggleFocusView, window, cx),
             AppCommand::Tasks => self.show_background_tasks(window, cx),
             AppCommand::Settings | AppCommand::Diff | AppCommand::Files | AppCommand::Terminal => {
                 let Some(name) = command.action_name() else {

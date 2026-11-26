@@ -7857,7 +7857,7 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
-    fn chat_section() -> [SettingsPageItem; 13] {
+    fn chat_section() -> [SettingsPageItem; 16] {
         [
             SettingsPageItem::SectionHeader(n!("Chat")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -8089,6 +8089,57 @@ fn agent_chat_page() -> SettingsPage {
                             .agent_chat
                             .get_or_insert_default()
                             .archive_inactive_sessions = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Escape Stops Agent"),
+                description: n!(
+                    "Pressing Escape in the chat box stops the agent while it works. When off, only the Stop button does."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.escape_stops"),
+                    pick: |settings_content| {
+                        settings_content.agent_chat.as_ref()?.escape_stops.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.agent_chat.get_or_insert_default().escape_stops = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Scroll to Bottom on Send"),
+                description: n!(
+                    "Scroll the chat to the bottom when you send a message. When off, the chat stays where you left it."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.scroll_to_bottom_on_send"),
+                    pick: |settings_content| {
+                        settings_content.agent_chat.as_ref()?.scroll_to_bottom_on_send.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.agent_chat.get_or_insert_default().scroll_to_bottom_on_send = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Show Message Timestamps"),
+                description: n!(
+                    "Show the time each message was sent."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.show_message_timestamps"),
+                    pick: |settings_content| {
+                        settings_content.agent_chat.as_ref()?.show_message_timestamps.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.agent_chat.get_or_insert_default().show_message_timestamps = value;
                     },
                 }),
                 metadata: None,
@@ -8623,7 +8674,7 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
-    fn context_section() -> [SettingsPageItem; 3] {
+    fn context_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SectionHeader(n!("Context")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -8665,6 +8716,30 @@ fn agent_chat_page() -> SettingsPage {
                             .agent_chat
                             .get_or_insert_default()
                             .auto_compact_limit = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Context Usage Threshold"),
+                description: n!(
+                    "Show the context usage indicator below the chat box once this percentage of the context window is used. 0 shows it from the first reply."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.context_usage_threshold"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent_chat
+                            .as_ref()?
+                            .context_usage_threshold
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .context_usage_threshold = value;
                     },
                 }),
                 metadata: None,
@@ -8769,6 +8844,93 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
+    fn claude_code_section() -> [SettingsPageItem; 5] {
+        [
+            SettingsPageItem::SectionHeader(n!("Claude Code")),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Allow Bypass Permissions"),
+                description: n!(
+                    "Offer the Bypass permission mode for Claude Code. When off, it is hidden from the mode picker, and a chat that used it falls back to Auto."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.allow_bypass_permissions"),
+                    pick: |settings_content| {
+                        settings_content.agent_chat.as_ref()?.allow_bypass_permissions.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.agent_chat.get_or_insert_default().allow_bypass_permissions = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Process Wrapper"),
+                description: n!(
+                    "A program that starts Claude Code. Wu runs it with the path of claude as its first argument, never through a shell. Applies from the next message."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.process_wrapper"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent_chat
+                            .as_ref()?
+                            .process_wrapper
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .process_wrapper = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Environment Variables"),
+                description: n!(
+                    "Variables added to every Claude Code process, after Wu's own, so yours win. Applies from the next message."
+                ),
+                field: Box::new(
+                    SettingField {
+                        json_path: Some("agent_chat.environment_variables"),
+                        pick: |settings_content| {
+                            settings_content.agent_chat.as_ref()?.environment_variables.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.agent_chat.get_or_insert_default().environment_variables = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Spinner Verbs"),
+                description: n!(
+                    "The verbs the spinner shows while Claude Code works. Mode append adds them to the defaults and replace uses only yours."
+                ),
+                field: Box::new(
+                    SettingField {
+                        json_path: Some("agent_chat.spinner_verbs"),
+                        pick: |settings_content| {
+                            settings_content.agent_chat.as_ref()?.spinner_verbs.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.agent_chat.get_or_insert_default().spinner_verbs = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     SettingsPage {
         title: AGENT_CHAT_PAGE,
         items: concat_sections![
@@ -8777,6 +8939,7 @@ fn agent_chat_page() -> SettingsPage {
             new_chats_section(),
             agents_section(),
             context_section(),
+            claude_code_section(),
             commit_message_section(),
             notifications_section()
         ],

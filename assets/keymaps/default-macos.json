@@ -1333,6 +1333,13 @@
     "context": "AgentComposer > Editor",
     "bindings": {
       "cmd-d": "agent_chat::ToggleDictation",
+      "ctrl-alt-f": "agent_chat::ToggleFocusView",
+    },
+  },
+  {
+    "context": "AgentComposer && escape_stops && !command_menu > Editor",
+    "bindings": {
+      "escape": "agent_chat::Stop",
     },
   },
   {
@@ -1367,6 +1374,7 @@
     "bindings": {
       "cmd-f": "buffer_search::Deploy",
       "ctrl-o": "agent_chat::ToggleThinkingBlocks",
+      "ctrl-alt-f": "agent_chat::ToggleFocusView",
     },
   },
   {

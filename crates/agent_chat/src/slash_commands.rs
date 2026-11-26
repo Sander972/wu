@@ -109,6 +109,7 @@ pub(crate) enum AppCommand {
     Bookmarks,
     Bug,
     Config,
+    FocusView,
     Tasks,
 }
 
@@ -136,7 +137,7 @@ impl CommandSection {
 
 impl AppCommand {
     // Sectioned commands come last and grouped, in the order the menu shows them, so the menu needs no sorting.
-    const ALL: [AppCommand; 30] = [
+    const ALL: [AppCommand; 31] = [
         AppCommand::New,
         AppCommand::Resume,
         AppCommand::Settings,
@@ -169,6 +170,7 @@ impl AppCommand {
         AppCommand::Logout,
         AppCommand::Bug,
         AppCommand::Config,
+        AppCommand::FocusView,
         AppCommand::Model,
     ];
 
@@ -184,7 +186,7 @@ impl AppCommand {
             | AppCommand::Sandbox
             | AppCommand::Plugins => Some(CommandSection::Customize),
             AppCommand::Export { .. } | AppCommand::Bookmarks => Some(CommandSection::Context),
-            AppCommand::Logout | AppCommand::Bug | AppCommand::Config => {
+            AppCommand::Logout | AppCommand::Bug | AppCommand::Config | AppCommand::FocusView => {
                 Some(CommandSection::Settings)
             }
             AppCommand::Model => Some(CommandSection::Model),
@@ -237,6 +239,7 @@ impl AppCommand {
             AppCommand::Bookmarks => "bookmarks",
             AppCommand::Bug => "bug",
             AppCommand::Config => "config",
+            AppCommand::FocusView => "focus",
             AppCommand::Tasks => "tasks",
         }
     }
@@ -272,6 +275,9 @@ impl AppCommand {
             AppCommand::Bookmarks => t!("Wu: show saved messages"),
             AppCommand::Bug => t!("Wu: report a problem"),
             AppCommand::Config => t!("Wu: open agent chat settings"),
+            AppCommand::FocusView => {
+                t!("Wu: hide tool calls and activity, showing only prompts and replies")
+            }
             AppCommand::Tasks => t!("Wu: show running background tasks"),
         }
     }
@@ -308,6 +314,7 @@ impl AppCommand {
             | AppCommand::Bookmarks
             | AppCommand::Bug
             | AppCommand::Config
+            | AppCommand::FocusView
             | AppCommand::Tasks => None,
         }
     }
@@ -623,7 +630,7 @@ mod tests {
         assert_eq!(names_in(CommandSection::Context), ["export", "bookmarks"]);
         assert_eq!(
             names_in(CommandSection::Settings),
-            ["logout", "bug", "config"]
+            ["logout", "bug", "config", "focus"]
         );
         assert_eq!(names_in(CommandSection::Model), ["model"]);
         let mut order: Vec<CommandSection> = items.iter().filter_map(|item| item.section).collect();

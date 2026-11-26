@@ -92,6 +92,11 @@ pub(crate) fn context_chip(fraction: Option<f32>, cx: &App) -> gpui::Div {
     ring_chip_content(fraction, color, color, cx)
 }
 
+/// The chip stays out of the way until the context is `threshold` percent full; 0 shows it from the start.
+pub(crate) fn context_chip_shown(fraction: Option<f32>, threshold: u32) -> bool {
+    threshold == 0 || fraction.is_some_and(|fraction| fraction * 100. >= threshold as f32)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UsageLevel {
     Normal,
@@ -675,6 +680,18 @@ mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
     use ui::{PopoverMenu, PopoverMenuHandle};
+
+    #[test]
+    fn context_chip_respects_the_threshold() {
+        assert!(!context_chip_shown(Some(0.49), 50));
+        assert!(context_chip_shown(Some(0.5), 50));
+        assert!(context_chip_shown(Some(0.9), 50));
+        assert!(!context_chip_shown(None, 50), "an unknown size stays hidden");
+        assert!(context_chip_shown(None, 0), "0 shows it from the first reply");
+        assert!(context_chip_shown(Some(0.), 0));
+        assert!(!context_chip_shown(Some(0.99), 100));
+        assert!(context_chip_shown(Some(1.), 100));
+    }
 
     struct Host {
         card: PopoverMenuHandle<ContextCard>,

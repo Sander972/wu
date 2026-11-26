@@ -1279,6 +1279,12 @@
     },
   },
   {
+    "context": "AgentComposer && escape_stops && !command_menu > Editor",
+    "bindings": {
+      "escape": "agent_chat::Stop",
+    },
+  },
+  {
     "context": "AgentComposer && prompt_suggestion && !command_menu > Editor",
     "bindings": {
       "tab": "agent_chat::AcceptPromptSuggestion",
@@ -1311,6 +1317,7 @@
       "find": "buffer_search::Deploy",
       "ctrl-f": "buffer_search::Deploy",
       "ctrl-o": "agent_chat::ToggleThinkingBlocks",
+      "ctrl-alt-f": "agent_chat::ToggleFocusView",
     },
   },
   {

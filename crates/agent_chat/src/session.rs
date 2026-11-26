@@ -2628,8 +2628,16 @@ impl AgentSession {
                 prompt.text.clone()
             }
         };
+        let chat_settings = AgentChatSettings::get_global(cx);
+        let allowed = chat_settings.allowed_permission(self.kind(), self.metadata.settings.permission);
+        if allowed != self.metadata.settings.permission {
+            self.metadata.settings.permission = allowed;
+            self.save_metadata(cx);
+        }
         let settings = self.metadata.settings.clone();
-        let prompt_suggestions = AgentChatSettings::get_global(cx).prompt_suggestions;
+        let chat_settings = AgentChatSettings::get_global(cx);
+        let prompt_suggestions = chat_settings.prompt_suggestions;
+        let launch = chat_settings.claude_launch.clone();
         self.run_suggests_prompts = prompt_suggestions;
         let request = RunRequest {
             prompt: text,
@@ -2649,6 +2657,7 @@ impl AgentSession {
             context: prompt.context.clone(),
             resume_interrupted: self.continuing_turn && prompt.is_empty(),
             prompt_suggestions,
+            launch,
         };
         let (steering_tx, steering_rx) = tokio::sync::mpsc::channel(32);
         let interrupt = CancellationToken::new();
@@ -4035,6 +4044,27 @@ impl AgentStore {
             store.load_saved_chats(cx);
         }
         store
+    }
+
+    /// Tells every running Claude Code process the transcript view mode; chats without a live run have nothing to tell, since the flag settings only exist in a running process.
+    pub fn apply_view_mode(&mut self, focus: bool, cx: &mut Context<Self>) {
+        let request = serde_json::json!({
+            "subtype": "apply_flag_settings",
+            "settings": { "viewMode": focus.then_some("focus") },
+        });
+        let sessions: Vec<Entity<AgentSession>> = self
+            .live
+            .values()
+            .cloned()
+            .chain(self.released.values().filter_map(WeakEntity::upgrade))
+            .collect();
+        for session in sessions {
+            if session.read(cx).kind() == AgentKind::Claude && session.read(cx).has_live_run() {
+                session
+                    .update(cx, |session, cx| session.control(request.clone(), cx))
+                    .detach_and_log_err(cx);
+            }
+        }
     }
 
     fn loaded_session(&self, id: &str) -> Option<Entity<AgentSession>> {

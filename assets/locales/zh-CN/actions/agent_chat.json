@@ -87,6 +87,10 @@
     "name": "切换焦点",
     "description": "切换智能体面板的焦点。"
   },
+  "agent_chat::ToggleFocusView": {
+    "name": "切换专注视图",
+    "description": "隐藏或显示你的提示词与智能体回复之间的工具调用和其他活动。"
+  },
   "agent_chat::ToggleThinkingBlocks": {
     "name": "切换思考块",
     "description": "展开或折叠对话中的所有思考过程。"
