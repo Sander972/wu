@@ -21,6 +21,10 @@ Rules that tests or the user enforce. Pitfalls and workarounds are in [[known-is
 - Run `rustfmt --edition 2024 <file>`, not `cargo fmt -p <crate>`. The tree isn't rustfmt-clean, so `cargo fmt -p` reformats unrelated files (on 2026-11-24 it rewrote `pane.rs` and most of `settings_ui/src/page_data.rs`; it happened again the same day, touching `pane.rs`, `crates/wu/build.rs`, `crates/wu/src/reliability.rs`).
 - If it slips: in auto mode `git checkout -- <file>` is denied by the classifier, so tell the user the exact revert command. In bypass-permissions mode it ran fine (2026-11-24, reverted `pane.rs`, `crates/wu/build.rs`, `crates/wu/src/reliability.rs` after the user said "fix all"). Only revert a file whose whole diff is formatting (check `git diff <file>` first).
 
+## `release.yml` needs the remote-server artifacts
+
+- The `bundle_mac`, `bundle_linux` and `bundle_windows` jobs upload `target/wu-remote-server-<os>-<arch>.gz` with `if-no-files-found: error`. Since the bundle scripts build `remote_server` only on request, CI must keep passing `-r` / `--remote-server` / `-RemoteServer`. Details: [[linux-build]], [[windows-build]].
+
 ## Workflow preference
 
 - After UI changes, the user wants to see them in the running debug app ("run the dev app"). Procedure: [[windows-build]].

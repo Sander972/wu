@@ -29,6 +29,16 @@ cargo build -p wu
 
 - `script/bundle-windows.ps1 -Channel dev|stable` (`-c`); without it the channel comes from `crates/wu/RELEASE_CHANNEL`.
 - The parameter has `[ValidateSet('dev', 'stable')]` and is lowercased: `ValidateSet` ignores case, but `ReleaseChannel::from_str` only accepts lowercase, and a capitalized value builds a `wu.exe` that panics at startup.
+- `remote_server` (`target/wu-remote-server-windows-<arch>.gz`) is built only with `-RemoteServer` (`-r`); `build-dev.ps1`/`build-stable.ps1` forward it. Same opt-in on `script/bundle-linux --remote-server` ([[linux-build]]) and `script/bundle-mac -r`; `release.yml` passes them.
+
+## Syntax-check bundle scripts without building
+
+```sh
+bash -n script/bundle-linux && bash -n script/bundle-mac
+pwsh -NoProfile -Command '$t=$null;$e=$null; [System.Management.Automation.Language.Parser]::ParseFile("script/bundle-windows.ps1",[ref]$t,[ref]$e) | Out-Null; $e.Count'
+```
+
+The pwsh one prints the parse error count (`0` = OK); `$t`/`$e` must be initialized or `[ref]` fails.
 
 ## Rebuild one package with the bundle's cache
 

@@ -8,6 +8,11 @@ tags: [windows, build, linker, inno-setup]
 
 Windows build pitfalls and their workarounds. Procedures live in [[windows-build]].
 
+## New shell scripts lose the exec bit on Windows
+
+- Symptom: a `.sh` created on Windows is committed as `100644` and won't run directly on Linux/macOS.
+- Fix: `git add --chmod=+x <file>`, check with `git ls-files -s <file>` (`100755`). A later `git reset` on the untracked file drops the mode, so stage it last. Seen on 2026-11-25 with `build-dev.sh` / `build-stable.sh` ([[linux-build]]).
+
 ## Drive E: full stops builds and file writes
 
 - Symptom: `failed to create directory target\debug\.fingerprint\...` with `Spazio su disco insufficiente. (os error 112)`, and editor writes fail with `ENOSPC`.
