@@ -383,7 +383,10 @@ fn create_lock_directory(directory: &Path) -> std::io::Result<()> {
 
 /// Written under another name and renamed into place, so the CLI never reads a half-written lock file.
 fn write_lock_file(path: &Path, folders: &[PathBuf], auth_token: &str) -> std::io::Result<()> {
-    let temporary_path = path.with_extension("lock.tmp");
+    // Named after this process, so a crash's leftover, which holds the auth token, can be told from another wu's write in progress and removed.
+    let mut temporary_path = path.as_os_str().to_owned();
+    temporary_path.push(format!(".wu-{}.tmp", std::process::id()));
+    let temporary_path = PathBuf::from(temporary_path);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -421,6 +424,13 @@ pub(crate) fn remove_stale_lock_files(
     let mut removed = 0;
     for entry in std::fs::read_dir(directory)? {
         let path = entry?.path();
+        if let Some(pid) = temporary_lock_pid(&path) {
+            if !is_alive(pid) {
+                std::fs::remove_file(&path)?;
+                removed += 1;
+            }
+            continue;
+        }
         if path.extension() != Some("lock".as_ref()) {
             continue;
         }
@@ -440,6 +450,13 @@ pub(crate) fn remove_stale_lock_files(
         }
     }
     Ok(removed)
+}
+
+/// The pid in the name `write_lock_file` gives its temporary file, `<port>.lock.wu-<pid>.tmp`.
+fn temporary_lock_pid(path: &Path) -> Option<u32> {
+    let name = path.file_name()?.to_str()?;
+    let (_, rest) = name.split_once(".lock.wu-")?;
+    rest.strip_suffix(".tmp")?.parse().ok()
 }
 
 fn process_is_alive(pid: u32) -> bool {
@@ -1145,6 +1162,38 @@ mod tests {
     }
 
     #[test]
+    fn removes_temporary_lock_files_a_crashed_wu_left() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        for name in [
+            "10001.lock.wu-1.tmp",
+            "10002.lock.wu-2.tmp",
+            "10003.lock.tmp",
+            "10004.lock.wu-x.tmp",
+            "other.tmp",
+        ] {
+            std::fs::write(directory.path().join(name), "{\"authToken\":").expect("write");
+        }
+
+        let removed = remove_stale_lock_files(directory.path(), |pid| pid == 2);
+
+        assert_eq!(removed.expect("directory is readable"), 1);
+        let mut left = std::fs::read_dir(directory.path())
+            .expect("directory is readable")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "10002.lock.wu-2.tmp",
+                "10003.lock.tmp",
+                "10004.lock.wu-x.tmp",
+                "other.tmp"
+            ]
+        );
+    }
+
+    #[test]
     fn removes_stale_lock_files() {
         let directory = tempfile::tempdir().expect("temp dir");
         let write = |name: &str, contents: String| {
@@ -1724,16 +1773,18 @@ mod tests {
 
         let closed = open_diff_call(&setup.tools, "a.rs", "closed by the user");
         setup.cx.run_until_parked();
-        focus_only_diff_tab(&mut setup);
-        setup
+        let review = focus_only_diff_tab(&mut setup);
+        let pane = setup
             .workspace
-            .update_in(setup.cx, |workspace, window, cx| {
-                workspace.active_pane().update(cx, |pane, cx| {
-                    pane.close_active_item(&Default::default(), window, cx)
-                })
-            })
-            .await
-            .expect("the tab closes");
+            .read_with(setup.cx, |workspace, _| workspace.pane_for(&review))
+            .expect("the tab has a pane");
+        // Holding the tab would keep it from being released, which is what answers the call.
+        drop(review);
+        pane.update_in(setup.cx, |pane, window, cx| {
+            pane.close_active_item(&Default::default(), window, cx)
+        })
+        .await
+        .expect("the tab closes");
         setup.cx.run_until_parked();
         assert_eq!(
             texts(closed.now_or_never()),
@@ -1763,6 +1814,65 @@ mod tests {
         assert!(
             diff_tabs(&mut setup).is_empty(),
             "the tab closes once claude stops waiting"
+        );
+    }
+
+    #[gpui::test]
+    async fn rejecting_every_change_of_an_open_diff_rejects_it(cx: &mut TestAppContext) {
+        let mut setup = diff_setup(cx).await;
+        let opening = open_diff_call(&setup.tools, "a.rs", "every change rejected");
+        setup.cx.run_until_parked();
+        focus_only_diff_tab(&mut setup);
+
+        setup.cx.dispatch_action(crate::RejectChangeAtCursor);
+        setup.cx.run_until_parked();
+
+        assert_eq!(
+            texts(opening.now_or_never()),
+            ["DIFF_REJECTED", "every change rejected"]
+        );
+    }
+
+    #[gpui::test]
+    async fn open_diff_shows_beside_a_focused_tab_without_taking_focus(cx: &mut TestAppContext) {
+        let mut setup = diff_setup(cx).await;
+        let focused = setup
+            .workspace
+            .update_in(setup.cx, |workspace, window, cx| {
+                workspace.open_abs_path(
+                    PathBuf::from(path!("/project/a.rs")),
+                    workspace::OpenOptions::default(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("the file opens")
+            .downcast::<Editor>()
+            .expect("an editor");
+        setup
+            .cx
+            .update(|window, cx| window.focus(&focused.focus_handle(cx), cx));
+        setup.cx.run_until_parked();
+
+        let _opening = open_diff_call(&setup.tools, "b.rs", "beside");
+        setup.cx.run_until_parked();
+
+        let tabs = diff_tabs(&mut setup);
+        assert_eq!(tabs.len(), 1);
+        let shown = setup.workspace.read_with(setup.cx, |workspace, cx| {
+            workspace.panes().iter().any(|pane| {
+                pane.read(cx)
+                    .active_item()
+                    .is_some_and(|item| item.item_id() == tabs[0].entity_id())
+            })
+        });
+        assert!(shown, "the diff tab is the active tab of its pane");
+        assert!(
+            setup
+                .cx
+                .update(|window, cx| focused.focus_handle(cx).is_focused(window)),
+            "the tab being typed in keeps focus"
         );
     }
 

@@ -29,7 +29,7 @@ use theme::ActiveTheme as _;
 use ui::{Button, ButtonStyle, Icon, IconName, prelude::*};
 use util::ResultExt as _;
 use workspace::{
-    MultiWorkspace, Workspace,
+    MultiWorkspace, SplitDirection, Workspace,
     item::{Item, ItemEvent},
     notifications::NotifyTaskExt as _,
 };
@@ -232,6 +232,7 @@ async fn open_review_tab(
             .act_as_type(TypeId::of::<SplittableEditor>(), &diff_view, cx)
             .and_then(|editor| editor.downcast::<SplittableEditor>().ok())
             .context("the diff view has no editor")?;
+        let for_terminal = matches!(requester, Requester::Terminal { .. });
         let review = cx.new(|cx| {
             let renderer = Arc::new(ProposedHunkRenderer {
                 review: cx.weak_entity(),
@@ -270,8 +271,20 @@ async fn open_review_tab(
             }
         });
         // An auto-opened review must neither take focus nor cover the chat tab being typed in (the pane would then hand focus to the review): keys meant for the chat would become a hand-edit that Accept sends.
-        let pane = workspace.active_pane().clone();
-        let activate = focus || !pane.focus_handle(cx).contains_focused(window, cx);
+        let mut pane = workspace.active_pane().clone();
+        let pane_has_focus = pane.focus_handle(cx).contains_focused(window, cx);
+        // `claude` waits on openDiff's tab, so it must show; next to a focused terminal tab it goes in another pane, without taking the keys meant for the terminal.
+        if for_terminal && pane_has_focus && !focus {
+            let focused = window.focused(cx);
+            pane = match workspace.panes().iter().find(|other| **other != pane) {
+                Some(other) => other.clone(),
+                None => workspace.split_pane(pane, SplitDirection::Right, window, cx),
+            };
+            if let Some(focused) = focused {
+                window.focus(&focused, cx);
+            }
+        }
+        let activate = focus || for_terminal || !pane_has_focus;
         pane.update(cx, |pane, cx| {
             pane.add_item_inner(
                 Box::new(review.clone()),
@@ -331,15 +344,18 @@ impl ProposedEditReview {
     fn accept(&mut self, _: &AcceptProposedChanges, window: &mut Window, cx: &mut Context<Self>) {
         let buffer = self.new_buffer.read(cx);
         let final_text = buffer.text();
-        if let Requester::Terminal { answer, .. } = &mut self.requester {
-            // The buffer keeps only `\n`, so the contents go back with the line endings `claude` sent.
-            let final_text = if buffer.line_ending() == LineEnding::Windows {
-                final_text.replace('\n', "\r\n")
+        if let Requester::Terminal { answer, tab_name } = &mut self.requester {
+            // Rejecting every change one by one ends here too, and leaves nothing to save.
+            let result = if final_text == self.original {
+                [DIFF_REJECTED.into(), tab_name.clone()]
+            } else if buffer.line_ending() == LineEnding::Windows {
+                // The buffer keeps only `\n`, so the contents go back with the line endings `claude` sent.
+                [FILE_SAVED.into(), final_text.replace('\n', "\r\n")]
             } else {
-                final_text
+                [FILE_SAVED.into(), final_text]
             };
             if let Some(answer) = answer.take() {
-                answer.send([FILE_SAVED.into(), final_text]).ok();
+                answer.send(result).ok();
             }
             return;
         }
