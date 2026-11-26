@@ -6543,24 +6543,17 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    async fn plugin_ui_attaches_only_with_the_capability_and_detaches_when_hidden(
-        cx: &mut TestAppContext,
-    ) {
-        let (session, view, cx) = focus_chat(cx).await;
-        let mut receiver = crate::session::tests::attach_live_run(&session, cx);
-        let draw = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-            cx.run_until_parked();
-        };
-        draw(cx);
-        assert!(receiver.try_recv().is_err(), "nothing is sent without the capability");
+    fn draw_plugin_chat(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+    }
 
+    fn announce_plugin_drawing(session: &Entity<AgentSession>, cx: &mut VisualTestContext) {
         feed_events(
-            &session,
+            session,
             vec![AgentEvent::SessionStarted {
                 harness: agent_harness::HarnessId::ClaudeCode,
                 model: String::new(),
@@ -6572,11 +6565,64 @@ mod tests {
             }],
             cx,
         );
-        draw(cx);
-        let Ok(agent_harness::Steer::Control(attach)) = receiver.try_recv() else {
-            panic!("expected a ui_attach request");
-        };
+    }
+
+    fn next_control(
+        receiver: &mut tokio::sync::mpsc::Receiver<agent_harness::Steer>,
+    ) -> agent_harness::ControlCall {
+        match receiver.try_recv() {
+            Ok(agent_harness::Steer::Control(call)) => call,
+            _ => panic!("expected a control request"),
+        }
+    }
+
+    /// A live Claude chat that announced plugin drawing, drawn once, with its `ui_attach` request.
+    async fn plugin_chat(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<AgentSession>,
+        Entity<ChatView>,
+        tokio::sync::mpsc::Receiver<agent_harness::Steer>,
+        agent_harness::ControlCall,
+        &mut VisualTestContext,
+    ) {
+        let (session, view, cx) = focus_chat(cx).await;
+        let mut receiver = crate::session::tests::attach_live_run(&session, cx);
+        draw_plugin_chat(cx);
+        assert!(
+            receiver.try_recv().is_err(),
+            "nothing is sent without the capability"
+        );
+        announce_plugin_drawing(&session, cx);
+        draw_plugin_chat(cx);
+        let attach = next_control(&mut receiver);
         assert_eq!(attach.request["subtype"], "ui_attach");
+        (session, view, receiver, attach, cx)
+    }
+
+    fn render_tool_use(
+        view: &Entity<ChatView>,
+        instance_id: &str,
+        cx: &mut VisualTestContext,
+    ) -> Option<Vec<String>> {
+        view.update(cx, |view, cx| {
+            view.plugin_ui
+                .render(
+                    &view.session,
+                    "ToolUse",
+                    instance_id,
+                    serde_json::json!({}),
+                    cx,
+                )
+                .map(|rendered| rendered.drawn_by.clone())
+        })
+    }
+
+    #[gpui::test]
+    async fn plugin_ui_attaches_only_with_the_capability_and_detaches_when_hidden(
+        cx: &mut TestAppContext,
+    ) {
+        let (_session, view, mut receiver, attach, cx) = plugin_chat(cx).await;
         assert_eq!(attach.request["surface"], "vscode");
         let client_id = attach.request["client_id"].clone();
         assert!(client_id.is_string());
@@ -6584,7 +6630,7 @@ mod tests {
             .reply
             .send(Ok(serde_json::json!({ "surfaces": ["vscode"] })))
             .expect("the chat waits for the reply");
-        draw(cx);
+        draw_plugin_chat(cx);
         assert!(
             receiver.try_recv().is_err(),
             "an attached chat doesn't attach again"
@@ -6592,12 +6638,98 @@ mod tests {
 
         view.update_in(cx, |view, window, cx| Item::deactivated(view, window, cx));
         cx.run_until_parked();
-        let Ok(agent_harness::Steer::Control(detach)) = receiver.try_recv() else {
-            panic!("expected a ui_detach request");
-        };
         assert_eq!(
-            detach.request,
+            next_control(&mut receiver).request,
             serde_json::json!({ "subtype": "ui_detach", "client_id": client_id })
+        );
+    }
+
+    #[gpui::test]
+    async fn plugin_ui_refused_attach_sends_no_render_or_detach(cx: &mut TestAppContext) {
+        let (_session, view, mut receiver, attach, cx) = plugin_chat(cx).await;
+        assert_eq!(render_tool_use(&view, "toolu_1", cx), None);
+        assert!(
+            receiver.try_recv().is_err(),
+            "nothing is drawn before the attach is answered"
+        );
+        attach
+            .reply
+            .send(Err("ui_attach: surface must be \"desktop\"".into()))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        assert_eq!(render_tool_use(&view, "toolu_1", cx), None);
+        view.update_in(cx, |view, window, cx| Item::deactivated(view, window, cx));
+        cx.run_until_parked();
+        assert!(
+            receiver.try_recv().is_err(),
+            "a refused attach is never drawn into or detached"
+        );
+    }
+
+    #[gpui::test]
+    async fn plugin_ui_render_caches_and_drops_stale_answers(cx: &mut TestAppContext) {
+        let (_session, view, mut receiver, attach, cx) = plugin_chat(cx).await;
+        attach
+            .reply
+            .send(Ok(serde_json::json!({ "surfaces": ["vscode"] })))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        let answer = serde_json::json!({
+            "tree": { "type": "Text", "children": ["drawn"] },
+            "props": {},
+            "rewritten": true,
+            "hooked": true,
+            "drawn_by": ["wu-draw-test"],
+        });
+
+        assert_eq!(render_tool_use(&view, "toolu_1", cx), None);
+        let render = next_control(&mut receiver);
+        assert_eq!(render.request["subtype"], "ui_render");
+        assert_eq!(render.request["instance_id"], "toolu_1");
+        assert_eq!(render_tool_use(&view, "toolu_1", cx), None);
+        assert!(
+            receiver.try_recv().is_err(),
+            "a render in flight isn't asked for again"
+        );
+        render
+            .reply
+            .send(Ok(answer.clone()))
+            .expect("the chat waits for the reply");
+        cx.run_until_parked();
+        assert_eq!(
+            render_tool_use(&view, "toolu_1", cx),
+            Some(vec!["wu-draw-test".to_owned()])
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "a cached drawing isn't asked for again"
+        );
+
+        assert_eq!(render_tool_use(&view, "toolu_2", cx), None);
+        let stale = next_control(&mut receiver);
+        view.update(cx, |view, cx| {
+            view.apply_plugin_ui_event(
+                &serde_json::json!({
+                    "subtype": "ui_invalidate",
+                    "instances": [{ "surface": "vscode", "component": "ToolUse", "instance_id": "toolu_2" }],
+                }),
+                cx,
+            )
+        });
+        stale
+            .reply
+            .send(Ok(answer))
+            .expect("the chat waits for the reply");
+        cx.run_until_parked();
+        assert_eq!(render_tool_use(&view, "toolu_2", cx), None);
+        assert_eq!(
+            next_control(&mut receiver).request["instance_id"],
+            "toolu_2",
+            "the invalidated drawing is asked for again"
+        );
+        assert_eq!(
+            render_tool_use(&view, "toolu_1", cx),
+            Some(vec!["wu-draw-test".to_owned()])
         );
     }
 

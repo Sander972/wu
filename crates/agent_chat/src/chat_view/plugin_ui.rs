@@ -1,5 +1,5 @@
 // shortcut: Tasks 48-49 draw the trees, panes, statuses and toasts kept here; drop this allow once they read them.
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use collections::HashMap;
 use editor::MultiBufferOffset;
-use gpui::{App, AppContext as _, Context, Entity, SharedString, Task, TaskExt as _, Window};
+use gpui::{App, Context, Entity, SharedString, Task, TaskExt as _, Window};
 use serde_json::{Value, json};
 use util::ResultExt as _;
 
@@ -110,7 +110,8 @@ fn known_node(kind: &str, node: &Value, depth: usize, budget: &mut usize) -> Opt
     let label = |name: &str| prop_text(node, name).map(SharedString::from);
     Some(match kind {
         // Recursion is bounded by the depth check; a deeper box falls back to its text, read without recursion.
-        "Box" if depth < MAX_DEPTH => {
+        // The CLI schema allows `div`, `span` and `b` as aliases of `Box` and `Text`.
+        "Box" | "div" if depth < MAX_DEPTH => {
             let mut children = Vec::new();
             for child in node_children(node) {
                 if *budget == 0 {
@@ -124,11 +125,11 @@ fn known_node(kind: &str, node: &Value, depth: usize, budget: &mut usize) -> Opt
                     .is_some_and(|direction| direction.starts_with("column")),
             }
         }
-        "Text" => UiNode::Text {
+        "Text" | "span" | "b" => UiNode::Text {
             text: text_content(node, budget),
             style: TextStyleHint {
                 dim: prop_flag(node, "dimColor"),
-                bold: prop_flag(node, "bold"),
+                bold: kind == "b" || prop_flag(node, "bold"),
             },
         },
         "Button" => UiNode::Button {
@@ -281,12 +282,23 @@ impl Rendered {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Attachment {
+    Detached,
+    /// Sent with the number of that attach, so an answer to an earlier one is ignored.
+    Pending(u64),
+    Attached,
+    /// Not asked again until the chat is shown again, so a refusing agent isn't asked every frame.
+    Refused,
+}
+
 /// One chat view's attachment to its agent's plugin drawing, and what the plugins drew so far in the current run.
 pub(crate) struct PluginUi {
     client_id: String,
     /// The run this state belongs to; each run is a new agent process that knows nothing of the last one.
     run: u64,
-    attached: bool,
+    attachment: Attachment,
+    attaches_sent: u64,
     pub statuses: BTreeMap<String, SharedString>,
     pub toasts: VecDeque<Toast>,
     pub panes: Vec<PaneInfo>,
@@ -302,7 +314,8 @@ impl PluginUi {
         Self {
             client_id: uuid::Uuid::new_v4().to_string(),
             run: 0,
-            attached: false,
+            attachment: Attachment::Detached,
+            attaches_sent: 0,
             statuses: BTreeMap::new(),
             toasts: VecDeque::new(),
             panes: Vec::new(),
@@ -331,7 +344,7 @@ impl PluginUi {
     }
 
     fn wants_attach(&self, session: &AgentSession) -> bool {
-        !self.attached
+        self.attachment == Attachment::Detached
             && session.has_live_run()
             && session.kind() == AgentKind::Claude
             && Self::available(session.capabilities())
@@ -344,8 +357,9 @@ impl PluginUi {
         rows: u32,
         cx: &mut Context<ChatView>,
     ) -> Task<Result<()>> {
-        // A refused attach is not retried until the chat is shown again, so a refusing agent isn't asked every frame.
-        self.attached = true;
+        self.attaches_sent += 1;
+        let number = self.attaches_sent;
+        self.attachment = Attachment::Pending(number);
         let request = json!({
             "subtype": "ui_attach",
             "surface": SURFACE,
@@ -354,15 +368,28 @@ impl PluginUi {
             "answers": ["ui_copy", "ui_prompt_read", "ui_prompt_fill", "ui_prompt_suggest"],
         });
         let answer = session.update(cx, |session, cx| session.control(request, cx));
-        cx.background_spawn(async move {
-            answer.await?;
-            Ok(())
+        cx.spawn(async move |this, cx| {
+            let answer = answer.await;
+            this.update(cx, |view, cx| {
+                let plugin_ui = &mut view.plugin_ui;
+                if plugin_ui.attachment == Attachment::Pending(number) {
+                    plugin_ui.attachment = if answer.is_ok() {
+                        Attachment::Attached
+                    } else {
+                        Attachment::Refused
+                    };
+                    cx.notify();
+                }
+            })?;
+            answer.map(|_| ())
         })
     }
 
     pub fn detach(&mut self, session: &Entity<AgentSession>, cx: &mut App) {
         self.follow_run(session.read(cx).runs_started());
-        if !std::mem::take(&mut self.attached) {
+        let attachment = std::mem::replace(&mut self.attachment, Attachment::Detached);
+        // A pending attach is detached too: the agent handles both in the order they were sent.
+        if !matches!(attachment, Attachment::Attached | Attachment::Pending(_)) {
             return;
         }
         self.cache.clear();
@@ -390,7 +417,7 @@ impl PluginUi {
         if self.cache.contains_key(&key) {
             return self.cache.get(&key);
         }
-        if !self.attached || self.requested.contains_key(&key) {
+        if self.attachment != Attachment::Attached || self.requested.contains_key(&key) {
             return None;
         }
         self.requests_sent += 1;
@@ -693,7 +720,8 @@ mod tests {
             "part": {"plugin": "outer"},
             "children": [
                 {"type": "Markdown", "props": {"text": "**hi**"}, "press": {"plugin": "p", "handle": 1}},
-                {"type": "div", "children": ["a", {"type": "span", "children": ["b"]}], "part": {"plugin": "inner"}},
+                {"type": "div", "children": ["a", {"type": "b", "children": ["b"]}, {"type": "Button", "props": {"key": "go", "label": "Go"}, "press": {"plugin": "p", "handle": 7}}], "part": {"plugin": "inner"}},
+                {"type": "Client", "children": ["client"]},
                 {"type": "Button", "props": {"label": "No press"}},
                 {"type": "Button", "props": {"label": "Bad handle"}, "press": {"plugin": "p", "handle": "1"}},
                 {"type": "Text", "children": ["x", {"type": "Text", "children": ["y"]}]},
@@ -716,7 +744,31 @@ mod tests {
             children,
             vec![
                 unknown("Markdown", "**hi**"),
-                unknown("div", "ab"),
+                UiNode::Group {
+                    children: vec![
+                        UiNode::Text {
+                            text: "a".into(),
+                            style: TextStyleHint::default()
+                        },
+                        UiNode::Text {
+                            text: "b".into(),
+                            style: TextStyleHint {
+                                dim: false,
+                                bold: true
+                            }
+                        },
+                        UiNode::Button {
+                            label: "Go".into(),
+                            target: Target {
+                                plugin: "p".into(),
+                                handle: 7.into(),
+                                key: Some("go".into())
+                            }
+                        },
+                    ],
+                    horizontal: true
+                },
+                unknown("Client", "client"),
                 unknown("Button", "No press"),
                 unknown("Button", "Bad handle"),
                 UiNode::Text {
