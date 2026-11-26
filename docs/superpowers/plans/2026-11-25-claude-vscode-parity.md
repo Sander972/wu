@@ -14,7 +14,7 @@
 
 - Done and reviewed: **all 50 tasks** (Phases 0-10), every phase-end check, and the final whole-branch review with its fix wave. Open: Task 50 Steps 2-3 (the side-by-side GUI walkthrough against VS Code), left to a human. See `claude-parity_hand-off.md` at the repo root.
 - Additional rulings since Task 32: Task 33's first auto-archive pass waits 60 s after launch; Task 48 plugin links open without a confirm prompt (like reply links); Phase 10 uses `surface: "vscode"` by the user's decision (temporary, one `SURFACE` constant); every commit also passes a non-test `cargo check`.
-- The executor's ledger The executor's ledger (git-ignored) is `.superpowers/sdd/2026-11-25-claude-vscode-parity/progress.md`: it holds every ruling, deferred minor finding and the list of manual GUI checks still to run.
+- The executor's ledger (git-ignored) is `.superpowers/sdd/2026-11-25-claude-vscode-parity/progress.md`: it holds every ruling, deferred minor finding and the list of manual GUI checks still to run.
 - Rulings that change this plan's text:
   - `HIDDEN_COMMANDS` hides the CLI's built-in commands, and a visible CLI command with the same name pushes wu's native command to `/wu:<name>`. Wherever a task says "remove `<name>` from `HIDDEN_COMMANDS`", do the opposite: every native `AppCommand` name must be in the list (enforced by the test `claude_never_shadows_a_wu_command`). Task 32's `no_native_command_is_hidden` test is replaced by that test.
   - Task 25: `claude mcp add/remove` use the extension's argument order (`--scope S --transport T -- name target...`, stdio commands split on whitespace).
