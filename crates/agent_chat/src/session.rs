@@ -1679,6 +1679,7 @@ impl AgentSession {
             return;
         }
         self.continuing_turn = true;
+        self.prompt_suggestion = None;
         self.working = true;
         self.working_since = Some(Instant::now());
         self.run_failed = false;
@@ -3215,6 +3216,7 @@ impl AgentSession {
     fn resume_working(&mut self) {
         if !self.working {
             self.editable_prompt = None;
+            self.prompt_suggestion = None;
             self.working = true;
             self.working_since = Some(Instant::now());
         }
@@ -8790,6 +8792,48 @@ done
             session.read_with(cx, |session, _| !session.is_working())
         });
         session.read_with(cx, |session, _| assert_eq!(session.prompt_suggestion(), None));
+    }
+
+    #[gpui::test]
+    async fn a_turn_the_agent_starts_on_its_own_drops_the_suggestion(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.apply_event(
+                AgentEvent::PromptSuggestion {
+                    suggestion: "run the tests".into(),
+                },
+                cx,
+            );
+            assert_eq!(session.prompt_suggestion(), Some("run the tests"));
+            session.apply_event(AgentEvent::TextDelta { text: "hi".into() }, cx);
+            assert!(session.is_working());
+            assert_eq!(session.prompt_suggestion(), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn resuming_a_cut_off_turn_drops_the_suggestion(cx: &mut TestAppContext) {
+        let (_directory, store, id) = chat_cut_off(2, cx);
+        let session = reopen(&store, &id, cx).await;
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+        session.update(cx, |session, cx| {
+            session.apply_event(
+                AgentEvent::PromptSuggestion {
+                    suggestion: "run the tests".into(),
+                },
+                cx,
+            );
+            session.update_metadata(|metadata| metadata.interrupted_at = Some(now()), cx);
+            session.continue_cut_off_turn(cx);
+            assert!(session.is_continuing_turn());
+            assert_eq!(session.prompt_suggestion(), None);
+        });
     }
 
     pub(crate) fn enqueue(session: &Entity<AgentSession>, text: &str, cx: &mut TestAppContext) {
