@@ -2176,7 +2176,10 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(pane_ids(&plugin_ui), ["a", "b", "c", "d", "e"]);
-        assert_eq!(plugin_ui.panes[0].plugin, "p", "a repeated id keeps its first entry");
+        assert_eq!(
+            plugin_ui.panes[0].plugin, "p",
+            "a repeated id keeps its first entry"
+        );
         let backgrounds = plugin_ui
             .panes
             .iter()
