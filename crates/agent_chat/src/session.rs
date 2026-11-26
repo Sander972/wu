@@ -2205,7 +2205,22 @@ impl AgentSession {
                     .then(|| turn_settings(&self.metadata.settings)),
                 context: prompt.context.clone(),
             };
-            if run.steering.try_send(Steer::Message(steer)).is_ok() {
+            let handed = match run.steering.try_send(Steer::Message(steer)) {
+                Ok(()) => true,
+                // A busy agent still reads its steering channel, so the message waits for room instead of a second process starting.
+                Err(tokio::sync::mpsc::error::TrySendError::Full(steer)) => {
+                    let steering = run.steering.clone();
+                    cx.background_spawn(async move {
+                        if steering.send(steer).await.is_err() {
+                            log::warn!("the agent ended before taking a queued message");
+                        }
+                    })
+                    .detach();
+                    true
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+            };
+            if handed {
                 self.unsent_settings = false;
                 if new_turn {
                     self.turn_prompts = 1;
@@ -6284,6 +6299,40 @@ pub(crate) mod tests {
             session.release_when_idle(Duration::ZERO, cx);
             assert!(session.run.is_none());
         });
+    }
+
+    #[gpui::test]
+    async fn a_full_steering_channel_keeps_the_run(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let (steering, mut receiver) = tokio::sync::mpsc::channel(1);
+        session.update(cx, |session, cx| {
+            session.run = Some(ActiveRun {
+                steering,
+                interrupt: CancellationToken::new(),
+                stopping_turn: false,
+                stop_acknowledged: None,
+                stop_timeout: None,
+                permission: tokio::sync::watch::channel(PermissionMode::Ask).0,
+                _events: Task::ready(()),
+            });
+            session.hand_to_agent("first".into(), true, cx);
+            session.hand_to_agent("second".into(), false, cx);
+            assert!(session.run.is_some());
+            assert_eq!(session.runs_started(), 0, "no second process starts");
+        });
+        let mut received = Vec::new();
+        for _ in 0..2 {
+            cx.run_until_parked();
+            match receiver.try_recv() {
+                Ok(Steer::Message(message)) => received.push(message.prompt),
+                _ => panic!("expected a steered message"),
+            }
+        }
+        assert_eq!(received, ["first", "second"]);
     }
 
     #[gpui::test]
