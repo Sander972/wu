@@ -1,6 +1,6 @@
 use crate::{
     AgentChatSettings, AgentKind, MoveChatToPanel, MoveChatToTab, ToggleChatPanel,
-    agent_panel::{agent_chat_enabled, create_session, store_for},
+    agent_panel::{agent_chat_enabled, create_session, open_in_terminal_if_set, store_for},
     chat_view::ChatView,
     session::{AgentSession, AgentStore},
 };
@@ -221,6 +221,9 @@ fn new_chat_in_panel(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    if open_in_terminal_if_set(workspace, kind, window, cx) {
+        return;
+    }
     let Some(session) = create_session(workspace, kind, cx) else {
         return;
     };

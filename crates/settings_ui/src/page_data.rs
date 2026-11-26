@@ -7857,7 +7857,7 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
-    fn chat_section() -> [SettingsPageItem; 16] {
+    fn chat_section() -> [SettingsPageItem; 17] {
         [
             SettingsPageItem::SectionHeader(n!("Chat")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -8140,6 +8140,23 @@ fn agent_chat_page() -> SettingsPage {
                     },
                     write: |settings_content, value, _| {
                         settings_content.agent_chat.get_or_insert_default().show_message_timestamps = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Use Terminal"),
+                description: n!(
+                    "Open new Claude Code chats as a terminal tab running claude instead of a chat view."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.use_terminal"),
+                    pick: |settings_content| {
+                        settings_content.agent_chat.as_ref()?.use_terminal.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.agent_chat.get_or_insert_default().use_terminal = value;
                     },
                 }),
                 metadata: None,

@@ -93,6 +93,7 @@ pub fn init(cx: &mut App) {
             })
             .register_action(|workspace, _: &NewChatInTab, window, cx| {
                 if agent_chat_enabled(cx)
+                    && !open_in_terminal_if_set(workspace, AgentKind::Claude, window, cx)
                     && let Some(session) = create_session(workspace, AgentKind::Claude, cx)
                 {
                     let store = store_for(workspace, cx);
@@ -143,9 +144,68 @@ fn new_chat(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    if open_in_terminal_if_set(workspace, kind, window, cx) {
+        return;
+    }
     if let Some(session) = create_session(workspace, kind, cx) {
         open_chat(workspace, session, window, cx);
     }
+}
+
+/// Starts a new Claude chat as `claude` in a terminal tab when `use_terminal` is on; returns whether it did.
+pub(crate) fn open_in_terminal_if_set(
+    workspace: &mut Workspace,
+    kind: AgentKind,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> bool {
+    if kind != AgentKind::Claude
+        || !AgentChatSettings::get_global(cx).use_terminal
+        || workspace.project().read(cx).is_via_remote_server()
+    {
+        return false;
+    }
+    let cwd = chat_roots(workspace.project(), cx)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| paths::home_dir().clone());
+    let id = task::TaskId(format!("agent-chat-terminal-{}", uuid::Uuid::new_v4()));
+    spawn_agent_terminal(workspace, kind, None, cwd, id, window, cx);
+    true
+}
+
+fn spawn_agent_terminal(
+    workspace: &mut Workspace,
+    kind: AgentKind,
+    native_session_id: Option<&str>,
+    cwd: PathBuf,
+    id: task::TaskId,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let (command, args) = terminal_command(kind, native_session_id);
+    let label = kind.label().to_string();
+    let cwd = Some(cwd);
+    let shell = workspace.project().read(cx).terminal_settings(&cwd, cx).shell.clone();
+    workspace
+        .spawn_in_terminal(
+            task::SpawnInTerminal {
+                id,
+                full_label: label.clone(),
+                label: label.clone(),
+                command: Some(command.to_string()),
+                args,
+                command_label: label,
+                cwd,
+                use_new_terminal: true,
+                allow_concurrent_runs: true,
+                shell,
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+        .detach();
 }
 
 pub(crate) fn create_session(
@@ -1394,9 +1454,8 @@ impl AgentPanel {
         };
         let session = session.read(cx);
         let metadata = session.metadata();
-        let (command, args) = terminal_command(metadata.kind, metadata.native_session_id.as_deref());
-        let cwd = Some(metadata.cwd.clone());
-        let label = metadata.kind.label().to_string();
+        let (kind, native_session_id) = (metadata.kind, metadata.native_session_id.clone());
+        let cwd = metadata.cwd.clone();
         let id = task::TaskId(format!("agent-chat-terminal-{}", metadata.id));
         // Two processes appending to one agent session corrupt its history.
         if session.is_working() {
@@ -1413,26 +1472,7 @@ impl AgentPanel {
             return;
         }
         workspace.update(cx, |workspace, cx| {
-            let shell = workspace.project().read(cx).terminal_settings(&cwd, cx).shell.clone();
-            workspace
-                .spawn_in_terminal(
-                    task::SpawnInTerminal {
-                        id,
-                        full_label: label.clone(),
-                        label: label.clone(),
-                        command: Some(command.to_string()),
-                        args,
-                        command_label: label,
-                        cwd,
-                        use_new_terminal: true,
-                        allow_concurrent_runs: true,
-                        shell,
-                        ..Default::default()
-                    },
-                    window,
-                    cx,
-                )
-                .detach();
+            spawn_agent_terminal(workspace, kind, native_session_id.as_deref(), cwd, id, window, cx)
         });
     }
 
@@ -3375,6 +3415,72 @@ mod tests {
             assert_eq!(metadata.cwd, root);
             assert_eq!(metadata.branch.as_deref(), expected, "{root:?}");
         }
+    }
+
+    #[gpui::test]
+    async fn use_terminal_opens_a_terminal_tab(cx: &mut TestAppContext) {
+        struct RecordingTerminals(std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<String>)>>>);
+        impl workspace::TerminalProvider for RecordingTerminals {
+            fn spawn(
+                &self,
+                task: task::SpawnInTerminal,
+                _window: &mut Window,
+                _cx: &mut App,
+            ) -> gpui::Task<Option<Result<std::process::ExitStatus>>> {
+                if let Ok(mut spawned) = self.0.lock() {
+                    spawned.push((task.command.unwrap_or_default(), task.args));
+                }
+                gpui::Task::ready(None)
+            }
+        }
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        make_global(&store, cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(util::path!("/proj"), serde_json::json!({ "a.txt": "" }))
+            .await;
+        let project =
+            project::Project::test(fs, [std::path::Path::new(util::path!("/proj"))], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        let spawned = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        workspace.update(cx, |workspace, _| {
+            workspace.set_terminal_provider(RecordingTerminals(spawned.clone()))
+        });
+        let new_claude_chat = |cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                new_chat(workspace, AgentKind::Claude, window, cx)
+            });
+            cx.run_until_parked();
+        };
+        let chat_tabs = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| workspace.items_of_type::<ChatView>(cx).count())
+        };
+
+        new_claude_chat(cx);
+        assert_eq!(chat_tabs(cx), 1, "a chat view opens while the setting is off");
+        assert!(spawned.lock().expect("recorded terminals").is_empty());
+
+        cx.update(|_, cx| {
+            <settings::SettingsStore as gpui::UpdateGlobal>::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.agent_chat.get_or_insert_default().use_terminal = Some(true);
+                })
+            })
+        });
+        new_claude_chat(cx);
+        assert_eq!(chat_tabs(cx), 1, "no second chat view opens");
+        assert_eq!(
+            *spawned.lock().expect("recorded terminals"),
+            [("claude".to_string(), Vec::<String>::new())]
+        );
     }
 
     #[test]

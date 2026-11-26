@@ -467,8 +467,8 @@ impl ChatView {
         let pill = div()
             .key_context(key_context)
             .relative()
-            .capture_action(cx.listener(|this, _: &editor::actions::Paste, _, cx| {
-                if this.paste_images(cx) {
+            .capture_action(cx.listener(|this, _: &editor::actions::Paste, window, cx| {
+                if this.paste_images(window, cx) {
                     cx.stop_propagation();
                 }
             }))
@@ -615,6 +615,7 @@ impl ChatView {
             .plan_usage(kind)
             .and_then(|state| state.usage.as_ref())
             .and_then(|usage| usage.used_fraction());
+        let cache_minutes = session.prompt_cache_minutes_left();
         let store = self.store.clone();
         let chat = cx.weak_entity();
         let session_entity = self.session.clone();
@@ -636,6 +637,14 @@ impl ChatView {
                     .pl(px(4.))
                     .pr(px(10.))
                     .gap(px(4.))
+                    .when_some(cache_minutes, |this, minutes| {
+                        this.child(
+                            div()
+                                .text_size(ui(11.))
+                                .text_color(text_faint(cx))
+                                .child(t!("Cache {minutes}m", minutes = minutes)),
+                        )
+                    })
                     .when(kind.has_plan_usage(), |this| {
                         this.child(
                             PopoverMenu::new(SharedString::from(format!(

@@ -12,6 +12,7 @@ use i18n::t;
 use std::path::{Path, PathBuf};
 use ui::{IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
+use workspace::{Toast, notifications::NotificationId};
 
 const MAX_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
 // Claude's 5 MB limit applies to the base64 text, which is a third larger than the file.
@@ -33,6 +34,42 @@ pub(crate) fn is_image_path(path: &Path) -> bool {
                 "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "svg"
             )
         })
+}
+
+/// Zero-width, bidi-control and tag characters can hide text from the reader while the model still reads it.
+fn is_invisible(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
+}
+
+fn is_emoji_part(character: char) -> bool {
+    matches!(character, '\u{1F000}'..='\u{1FAFF}' | '\u{2190}'..='\u{2BFF}' | '\u{FE0F}')
+}
+
+/// Drops invisible characters and counts them; a zero-width joiner between two emoji parts stays so emoji sequences survive.
+pub(crate) fn strip_invisible(text: &str) -> (String, usize) {
+    let characters: Vec<char> = text.chars().collect();
+    let mut kept = String::with_capacity(text.len());
+    let mut removed = 0;
+    for (index, &character) in characters.iter().enumerate() {
+        let joins_emoji = character == '\u{200D}'
+            && index
+                .checked_sub(1)
+                .and_then(|previous| characters.get(previous))
+                .is_some_and(|previous| is_emoji_part(*previous))
+            && characters.get(index + 1).is_some_and(|next| is_emoji_part(*next));
+        if is_invisible(character) && !joins_emoji {
+            removed += 1;
+        } else {
+            kept.push(character);
+        }
+    }
+    (kept, removed)
 }
 
 pub(crate) fn is_pdf(path: &Path) -> bool {
@@ -288,8 +325,8 @@ impl ChatView {
         .detach();
     }
 
-    /// Returns true when the clipboard held an image, so the editor's own paste should not run.
-    pub(super) fn paste_images(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Returns true when the clipboard held an image, or text with invisible characters that were pasted without them, so the editor's own paste should not run.
+    pub(super) fn paste_images(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(item) = cx.read_from_clipboard() else {
             return false;
         };
@@ -312,7 +349,28 @@ impl ChatView {
             .filter(|path| self.accepts_attachment(path, cx))
             .collect();
         if images.is_empty() && files.is_empty() {
-            return false;
+            let Some((clean, removed)) = item
+                .text()
+                .map(|text| strip_invisible(&text))
+                .filter(|(_, removed)| *removed > 0)
+            else {
+                return false;
+            };
+            self.composer
+                .update(cx, |editor, cx| editor.insert(&clean, window, cx));
+            self.workspace
+                .update(cx, |workspace, cx| {
+                    workspace.show_toast(
+                        Toast::new(
+                            NotificationId::unique::<ChatView>(),
+                            t!("Removed {count} invisible characters", count = removed).to_string(),
+                        )
+                        .autohide(),
+                        cx,
+                    )
+                })
+                .log_err();
+            return true;
         }
         if !images.is_empty() {
             self.stage(Pending::Clipboard(images), cx);
@@ -476,6 +534,19 @@ impl ChatView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_invisible_counts_and_keeps_visible_text() {
+        assert_eq!(strip_invisible("a\u{200B}b\u{202E}c"), ("abc".to_string(), 2));
+        assert_eq!(strip_invisible("\u{2066}x\u{2069}\u{E0041}"), ("x".to_string(), 3));
+        assert_eq!(strip_invisible("plain, 日本語"), ("plain, 日本語".to_string(), 0));
+        let family = "👨\u{200D}👩\u{200D}👧";
+        assert_eq!(strip_invisible(family), (family.to_string(), 0));
+        let heart = "❤\u{FE0F}\u{200D}🔥";
+        assert_eq!(strip_invisible(heart), (heart.to_string(), 0));
+        assert_eq!(strip_invisible("a\u{200D}b"), ("ab".to_string(), 1));
+        assert_eq!(strip_invisible("👨\u{200D}"), ("👨".to_string(), 1));
+    }
 
     #[gpui::test]
     async fn files_dropped_on_the_chat_tab_attach_instead_of_opening(

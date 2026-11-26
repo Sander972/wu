@@ -46,6 +46,7 @@ pub struct AgentChatSettings {
     pub escape_stops: bool,
     pub scroll_to_bottom_on_send: bool,
     pub show_message_timestamps: bool,
+    pub use_terminal: bool,
     pub context_usage_threshold: u32,
     pub allow_bypass_permissions: bool,
     pub claude_launch: ClaudeLaunch,
@@ -176,6 +177,7 @@ impl Settings for AgentChatSettings {
             escape_stops: content.escape_stops.unwrap_or(true),
             scroll_to_bottom_on_send: content.scroll_to_bottom_on_send.unwrap_or(true),
             show_message_timestamps: content.show_message_timestamps.unwrap_or(true),
+            use_terminal: content.use_terminal.unwrap_or(false),
             context_usage_threshold: content.context_usage_threshold.unwrap_or(50).min(100),
             allow_bypass_permissions: content.allow_bypass_permissions.unwrap_or(true),
             claude_launch: {

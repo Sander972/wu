@@ -39,6 +39,13 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 /// A side question is answered by the model, like the extension's own five minute wait.
 const SIDE_QUESTION_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Whole minutes left in the prompt cache, rounded up so a live cache never reads as 0; `None` once it expired.
+fn cache_minutes_left(one_hour: bool, elapsed: Duration) -> Option<u64> {
+    let lifetime = if one_hour { PROMPT_CACHE_LONG } else { PROMPT_CACHE_SHORT };
+    let left = lifetime.checked_sub(elapsed).filter(|left| !left.is_zero())?;
+    Some(left.as_secs().div_ceil(60))
+}
+
 fn control_timeout(request: &serde_json::Value) -> Duration {
     match request["subtype"].as_str() {
         Some("side_question") => SIDE_QUESTION_TIMEOUT,
@@ -50,6 +57,9 @@ const REWIND_IDLE_POLL: Duration = Duration::from_millis(100);
 const SAVE_INTERVAL_WHILE_WORKING: Duration = Duration::from_secs(5);
 const RUN_INPUT_BATCH: usize = 128;
 const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const PROMPT_CACHE_SHORT: Duration = Duration::from_secs(5 * 60);
+const PROMPT_CACHE_LONG: Duration = Duration::from_secs(60 * 60);
+const PROMPT_CACHE_TICK: Duration = Duration::from_secs(30);
 const AUTO_ARCHIVE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const AUTO_ARCHIVE_STARTUP_DELAY: Duration = Duration::from_secs(60);
 const IDLE_RECHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -1232,6 +1242,9 @@ pub struct AgentSession {
     continuing_turn: bool,
     prompt_suggestion: Option<String>,
     prompt_suggestions_paused: bool,
+    /// When the last assistant message touched the prompt cache, and whether that cache lives for an hour.
+    prompt_cache: Option<(Instant, bool)>,
+    prompt_cache_ticker: Task<()>,
     /// Whether the live run was started asking for suggestions.
     run_suggests_prompts: bool,
     run_failed: bool,
@@ -1318,6 +1331,8 @@ impl AgentSession {
             continuing_turn: false,
             prompt_suggestion: None,
             prompt_suggestions_paused: false,
+            prompt_cache: None,
+            prompt_cache_ticker: Task::ready(()),
             run_suggests_prompts: false,
             run_failed: false,
             harness,
@@ -1502,6 +1517,11 @@ impl AgentSession {
 
     pub fn is_working(&self) -> bool {
         self.working
+    }
+
+    pub fn prompt_cache_minutes_left(&self) -> Option<u64> {
+        let (touched, one_hour) = self.prompt_cache?;
+        cache_minutes_left(one_hour, touched.elapsed())
     }
 
     pub fn prompt_suggestion(&self) -> Option<&str> {
@@ -3041,6 +3061,23 @@ impl AgentSession {
                 // A frame that arrives once the next turn has started belongs to the turn before it.
                 self.prompt_suggestion =
                     (!self.working && !suggestion.trim().is_empty()).then_some(suggestion);
+            }
+            AgentEvent::PromptCache { one_hour } => {
+                self.prompt_cache = Some((Instant::now(), one_hour));
+                self.prompt_cache_ticker = cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor().timer(PROMPT_CACHE_TICK).await;
+                        let Ok(live) = this.update(cx, |this, cx| {
+                            cx.notify();
+                            this.prompt_cache_minutes_left().is_some()
+                        }) else {
+                            return;
+                        };
+                        if !live {
+                            return;
+                        }
+                    }
+                });
             }
             AgentEvent::GeneratedImage { path, .. } => {
                 self.transcript.text_block_open = false;
@@ -5741,6 +5778,26 @@ fn load_all_metadata(directory: &Path) -> Result<Vec<SessionMetadata>> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn cache_clock_minutes() {
+        use super::cache_minutes_left;
+        use std::time::Duration;
+        let seconds = Duration::from_secs;
+        for (one_hour, elapsed, expected) in [
+            (false, seconds(0), Some(5)),
+            (false, seconds(61), Some(4)),
+            (false, seconds(299), Some(1)),
+            (false, seconds(300), None),
+            (false, seconds(3000), None),
+            (true, seconds(0), Some(60)),
+            (true, seconds(600), Some(50)),
+            (true, seconds(3599), Some(1)),
+            (true, seconds(3600), None),
+        ] {
+            assert_eq!(cache_minutes_left(one_hour, elapsed), expected, "{one_hour} {elapsed:?}");
+        }
+    }
+
     use super::*;
     use gpui::TestAppContext;
 

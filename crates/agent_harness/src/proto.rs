@@ -562,6 +562,11 @@ pub enum AgentEvent {
     Compacting {
         active: bool,
     },
+    /// A main-thread assistant message just went out; the prompt cache it touched lives for an hour when `one_hour`, else five minutes.
+    #[serde(rename_all = "camelCase")]
+    PromptCache {
+        one_hour: bool,
+    },
     /// The agent's guess at what the user sends next; an empty string withdraws it.
     PromptSuggestion {
         suggestion: String,

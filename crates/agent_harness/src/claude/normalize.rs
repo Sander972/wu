@@ -141,6 +141,11 @@ pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
             old_string: opt_str_field(input, "old_string"),
             new_string: opt_str_field(input, "new_string"),
         },
+        "NotebookEdit" => ToolCall::EditFile {
+            path: str_field(input, "notebook_path"),
+            old_string: None,
+            new_string: opt_str_field(input, "new_source"),
+        },
         "Grep" => ToolCall::Search {
             pattern: str_field(input, "pattern"),
             path: opt_str_field(input, "path"),
@@ -669,6 +674,12 @@ impl Normalizer {
                     .collect();
                 self.last_model = f.message.model.clone().or(self.last_model.take());
                 if let Some(usage) = &f.message.usage {
+                    out.push(AgentEvent::PromptCache {
+                        one_hour: usage
+                            .pointer("/cache_creation/ephemeral_1h_input_tokens")
+                            .and_then(Value::as_u64)
+                            .is_some_and(|tokens| tokens > 0),
+                    });
                     let fields = [
                         "input_tokens",
                         "cache_read_input_tokens",
@@ -858,6 +869,21 @@ impl Normalizer {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn notebook_edit_renders_as_an_edit() {
+        assert_eq!(
+            decode_tool_use(
+                "NotebookEdit",
+                &json!({"notebook_path": "/a.ipynb", "cell_id": "c1", "new_source": "print(1)", "edit_mode": "replace"})
+            ),
+            ToolCall::EditFile {
+                path: "/a.ipynb".into(),
+                old_string: None,
+                new_string: Some("print(1)".into())
+            }
+        );
+    }
 
     #[test]
     fn decodes_typed_tools() {
@@ -1704,6 +1730,25 @@ mod tests {
 #[cfg(test)]
 mod context_tests {
     use super::*;
+
+    #[test]
+    fn assistant_usage_reports_the_prompt_cache_lifetime() {
+        let mut normalizer = Normalizer::new();
+        let mut one_hour = |usage: &str| {
+            let frame = format!(r#"{{"type":"assistant","message":{{"model":"primary","content":[],"usage":{usage}}}}}"#);
+            normalizer
+                .normalize(super::super::wire::parse_frame(&frame).unwrap(), false)
+                .into_iter()
+                .find_map(|event| match event {
+                    AgentEvent::PromptCache { one_hour } => Some(one_hour),
+                    _ => None,
+                })
+        };
+        assert_eq!(one_hour(r#"{"input_tokens":1,"cache_creation":{"ephemeral_1h_input_tokens":500,"ephemeral_5m_input_tokens":0}}"#), Some(true));
+        assert_eq!(one_hour(r#"{"input_tokens":1,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":500}}"#), Some(false));
+        assert_eq!(one_hour(r#"{"input_tokens":1}"#), Some(false));
+        assert_eq!(one_hour("null"), None);
+    }
     #[test]
     fn context_counts_cached_prompt_and_matches_primary_model() {
         let mut normalizer = Normalizer::new();

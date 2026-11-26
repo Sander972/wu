@@ -378,6 +378,7 @@
   "Open a single-file diff view.": "打开单文件差异视图。",
   "Open directories as a new workspace in the current Wu window's sidebar.": "在当前 Wu 窗口的侧边栏中将文件夹作为新工作区打开。",
   "Open files with a single click.": "单击打开文件。",
+  "Open new Claude Code chats as `claude` in a terminal tab instead of a chat view.\n\nDefault: false": "将新的 Claude Code 聊天作为运行 `claude` 的终端标签页打开，而不是聊天视图。\n\n默认值：false",
   "Open paths in a new window unless they are subpaths of an existing project.": "在新窗口中打开路径，除非它们是现有项目的子路径。",
   "Open projects in a new window.": "在新窗口中打开项目。",
   "Open projects in the current Wu window.": "在当前 Wu 窗口中打开项目。",

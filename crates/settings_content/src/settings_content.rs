@@ -1231,6 +1231,10 @@ pub struct AgentChatSettingsContent {
     ///
     /// Default: true
     pub show_message_timestamps: Option<bool>,
+    /// Open new Claude Code chats as `claude` in a terminal tab instead of a chat view.
+    ///
+    /// Default: false
+    pub use_terminal: Option<bool>,
     /// Show the context usage indicator below the chat box once this percentage of the context window is used. 0 shows it from the first reply.
     ///
     /// Default: 50

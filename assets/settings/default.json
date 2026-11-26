@@ -179,6 +179,8 @@
     "scroll_to_bottom_on_send": true,
     // Shows the time each message was sent.
     "show_message_timestamps": true,
+    // Opens new Claude Code chats as `claude` in a terminal tab instead of a chat view.
+    "use_terminal": false,
     // Shows the context usage indicator once this percentage of the context window is used; 0 shows it from the first reply.
     "context_usage_threshold": 50,
     // Claude Code only. "mode" is "append" (add to the default verbs) or "replace".

@@ -3023,11 +3023,19 @@ impl ChatView {
             Entry::Tool(tool) => self.render_run_in_background(&tool.id, cx),
             _ => None,
         };
+        let sent = match entry {
+            Entry::Tool(tool) if tool.status != ToolStatus::Failed => {
+                sent_files(&tool.call, &self.session.read(cx).metadata().cwd)
+            }
+            _ => Vec::new(),
+        };
+        // The files a SendUserFile call delivered are the point of the row, so it starts open and the toggle closes it.
         let expanded = match entry {
             Entry::Thinking(_) => self.thought_open(&key),
-            _ => self.expanded_rows.contains(&key),
+            _ => self.expanded_rows.contains(&key) != !sent.is_empty(),
         };
         let body = expanded.then(|| match entry {
+            Entry::Tool(tool) if !sent.is_empty() => self.render_sent_files(&tool.id, sent, cx),
             Entry::Tool(tool) => self.render_tool_detail(tool, cx),
             Entry::Thinking(markdown) => v_flex()
                 .w_full()
@@ -3324,6 +3332,46 @@ impl ChatView {
         })
     }
 
+    fn render_sent_files(
+        &self,
+        tool_id: &str,
+        files: Vec<std::path::PathBuf>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().colors().text_muted;
+        let text = cx.theme().colors().text;
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .child(detail_separator())
+            .children(files.into_iter().enumerate().map(|(index, path)| {
+                let label = path.to_string_lossy().into_owned();
+                h_flex()
+                    .id(SharedString::from(format!("agent-sent-file-{tool_id}-{index}")))
+                    .h(px(BLOB_AFFORDANCE_HEIGHT))
+                    .min_w_0()
+                    .gap(px(6.))
+                    .text_size(px(TOOL_TEXT_SIZE))
+                    .text_color(muted)
+                    .cursor_pointer()
+                    .hover(move |style| style.text_color(text))
+                    .child(icon(IconName::FileDoc, 12.))
+                    .child(div().min_w_0().truncate().child(label))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_file_in_side_pane(
+                            links::FileTarget {
+                                path: path.clone(),
+                                line: None,
+                            },
+                            window,
+                            cx,
+                        )
+                    }))
+            }))
+            .into_any_element()
+    }
+
     fn render_tool_detail(&self, tool: &ToolEntry, cx: &Context<Self>) -> AnyElement {
         let faint = text_faint(cx);
         let show_all = self.full_output.contains(&tool.id);
@@ -3522,6 +3570,27 @@ fn format_bytes(bytes: usize) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / (1024. * 1024.))
     }
+}
+
+/// The files a `SendUserFile` call hands to the user, resolved against the chat's folder.
+fn sent_files(call: &ToolCall, cwd: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let ToolCall::Unknown { name, input } = call else {
+        return Vec::new();
+    };
+    if name != "SendUserFile" {
+        return Vec::new();
+    }
+    input
+        .as_ref()
+        .and_then(|input| input.get("files")?.as_array())
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|file| file.as_str())
+                .map(|file| cwd.join(file))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn subagent_title(call: &ToolCall) -> SharedString {
@@ -6539,6 +6608,70 @@ mod tests {
         });
         view.update_in(cx, |view, window, cx| view.close_side_pane(window, cx));
         assert!(view.read_with(cx, |view, _| view.side_pane_content().is_none()));
+    }
+
+    #[gpui::test]
+    async fn send_user_file_row_opens_the_file(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/proj",
+            serde_json::json!({ "report.md": "# Report\n" }),
+        )
+        .await;
+        let project = project::Project::test(fs, [std::path::Path::new("/proj")], cx).await;
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, "/proj".into(), cx)
+        });
+        let call = ToolCall::Unknown {
+            name: "SendUserFile".into(),
+            input: Some(serde_json::json!({
+                "files": ["report.md", "/abs/out.png"],
+                "caption": "Here"
+            })),
+        };
+        let cwd = std::path::Path::new("/proj");
+        assert_eq!(
+            sent_files(&call, cwd),
+            [cwd.join("report.md"), std::path::PathBuf::from("/abs/out.png")]
+        );
+        let other = ToolCall::Unknown { name: "Bash".into(), input: call_input(&call) };
+        assert!(sent_files(&other, cwd).is_empty());
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                session.clone(),
+                store.clone(),
+                project,
+                WeakEntity::new_invalid(),
+                window,
+                cx,
+            )
+        });
+        let path = sent_files(&call, cwd).swap_remove(0);
+        view.update_in(cx, |view, window, cx| {
+            view.open_file_in_side_pane(links::FileTarget { path, line: None }, window, cx)
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let Some(side_pane::SidePaneContent::File { editor, .. }) = view.side_pane_content()
+            else {
+                panic!("expected the sent file in the side pane");
+            };
+            assert_eq!(editor.read(cx).text(cx), "# Report\n");
+        });
+    }
+
+    fn call_input(call: &ToolCall) -> Option<serde_json::Value> {
+        match call {
+            ToolCall::Unknown { input, .. } => input.clone(),
+            _ => None,
+        }
     }
 
     #[gpui::test]
