@@ -1,5 +1,8 @@
 use super::{ChatView, composer::open_path};
-use crate::{session::AgentSession, slash_commands::AppCommand};
+use crate::{
+    session::{AgentSession, AgentStore},
+    slash_commands::AppCommand,
+};
 use editor::Editor;
 use gpui::{
     App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, PromptButton,
@@ -283,6 +286,7 @@ const MCP_TRANSPORTS: &[&str] = &["http", "sse", "stdio"];
 const MCP_SCOPES: &[&str] = &["local", "user", "project"];
 const RULE_BEHAVIORS: &[&str] = &["allow", "ask", "deny"];
 const RULE_SOURCES: &[&str] = &["userSettings", "localSettings"];
+const PLUGIN_SCOPES: &[&str] = &["user", "project", "local"];
 const EDIT_RULES: [&str; 2] = ["edit-permission-rules", "--json"];
 const RELOAD_ATTEMPTS: usize = 8;
 const RELOAD_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
@@ -354,6 +358,123 @@ pub(crate) fn mcp_sections(response: &Value, live_run: bool) -> Vec<DialogSectio
         push_grouped(&mut sections, scope.unwrap_or_else(|| t!("Servers")), row);
     }
     sections
+}
+
+fn plugin_action(label: SharedString, arguments: &[&str], confirmation: SharedString) -> RowAction {
+    RowAction::Shell {
+        label,
+        arguments: arguments
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect(),
+        input: None,
+        confirmation,
+    }
+}
+
+pub(crate) fn plugin_rows(list_json: &Value) -> Vec<DialogRow> {
+    list_json
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|plugin| {
+            let id = text(plugin, "id")?;
+            let id_text: &str = &id;
+            let scope = text(plugin, "scope");
+            let enabled = plugin["enabled"] == true;
+            let mut actions = Vec::new();
+            // A managed plugin is set by an administrator, so it can't be switched here.
+            if scope.as_deref() != Some("managed") {
+                actions.push(if enabled {
+                    plugin_action(
+                        t!("Disable"),
+                        &["plugin", "disable", id_text],
+                        t!("Disabled {id}.", id = id_text),
+                    )
+                } else {
+                    plugin_action(
+                        t!("Enable"),
+                        &["plugin", "enable", id_text],
+                        t!("Enabled {id}.", id = id_text),
+                    )
+                });
+            }
+            // Built-in and skills-directory plugins have no marketplace install to remove.
+            if let Some(scope) = scope
+                .as_deref()
+                .filter(|scope| PLUGIN_SCOPES.contains(scope))
+                && !id_text.ends_with("@builtin")
+                && !id_text.ends_with("@skills-dir")
+            {
+                actions.push(plugin_action(
+                    t!("Uninstall"),
+                    &["plugin", "uninstall", id_text, "--scope", scope],
+                    t!("Uninstalled {id}.", id = id_text),
+                ));
+            }
+            let detail: Vec<String> = [
+                text(plugin, "version").filter(|version| version != "unknown"),
+                scope,
+            ]
+            .into_iter()
+            .flatten()
+            .map(|part| part.to_string())
+            .collect();
+            Some(DialogRow {
+                detail: (!detail.is_empty()).then(|| detail.join(" · ").into()),
+                badge: (!enabled).then(|| t!("Disabled")),
+                actions,
+                ..DialogRow::new(id)
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn marketplace_rows(list_json: &Value) -> Vec<DialogRow> {
+    list_json
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|marketplace| {
+            let name = text(marketplace, "name")?;
+            let name_text: &str = &name;
+            Some(DialogRow {
+                detail: ["repo", "url", "path", "source"]
+                    .into_iter()
+                    .find_map(|key| text(marketplace, key)),
+                actions: vec![
+                    plugin_action(
+                        t!("Refresh"),
+                        &["plugin", "marketplace", "update", name_text],
+                        t!("Updated {name}.", name = name_text),
+                    ),
+                    plugin_action(
+                        t!("Remove"),
+                        &["plugin", "marketplace", "remove", name_text],
+                        t!("Removed marketplace {name}.", name = name_text),
+                    ),
+                ],
+                ..DialogRow::new(name)
+            })
+        })
+        .collect()
+}
+
+fn install_plugin_arguments(scope: &str, id: &str) -> Vec<String> {
+    ["plugin", "install", id, "--scope", scope]
+        .map(String::from)
+        .into()
+}
+
+/// The CLI would read a leading dash as an option of its own.
+fn plugin_input_error(value: &str, empty: SharedString) -> Option<SharedString> {
+    if value.is_empty() {
+        Some(empty)
+    } else if value.starts_with('-') {
+        Some(t!("The value can't start with a dash."))
+    } else {
+        None
+    }
 }
 
 fn add_server_arguments(transport: &str, scope: &str, name: &str, target: &str) -> Vec<String> {
@@ -507,10 +628,55 @@ fn output_style_sections(styles: &Value, settings: &Value, live_run: bool) -> Ve
 
 type Reload = Box<dyn Fn(&mut App) -> Task<anyhow::Result<Vec<DialogSection>>>>;
 
+#[derive(Clone, Copy, PartialEq)]
+enum PluginTab {
+    Plugins,
+    Marketplaces,
+}
+
+impl PluginTab {
+    fn form(self) -> FormKind {
+        match self {
+            PluginTab::Plugins => FormKind::Plugin,
+            PluginTab::Marketplaces => FormKind::Marketplace,
+        }
+    }
+}
+
+fn plugins_reload(session: Entity<AgentSession>, tab: PluginTab) -> Reload {
+    Box::new(move |cx| {
+        let arguments: &[&str] = match tab {
+            PluginTab::Plugins => &["plugin", "list", "--json"],
+            PluginTab::Marketplaces => &["plugin", "marketplace", "list", "--json"],
+        };
+        let output = session.update(cx, |session, cx| {
+            let arguments = arguments
+                .iter()
+                .map(|argument| argument.to_string())
+                .collect();
+            session.run_cli(arguments, None, cx)
+        });
+        cx.spawn(async move |_| {
+            let list: Value = serde_json::from_str(&output.await?)?;
+            let (title, rows) = match tab {
+                PluginTab::Plugins => (t!("Plugins"), plugin_rows(&list)),
+                PluginTab::Marketplaces => (t!("Marketplaces"), marketplace_rows(&list)),
+            };
+            Ok(if rows.is_empty() {
+                Vec::new()
+            } else {
+                vec![DialogSection { title, rows }]
+            })
+        })
+    })
+}
+
 #[derive(Clone, Copy)]
 enum FormKind {
     Server,
     Rule,
+    Plugin,
+    Marketplace,
 }
 
 impl FormKind {
@@ -518,6 +684,8 @@ impl FormKind {
         match self {
             FormKind::Server => t!("Add server"),
             FormKind::Rule => t!("Add rule"),
+            FormKind::Plugin => t!("Install plugin"),
+            FormKind::Marketplace => t!("Add marketplace"),
         }
     }
 }
@@ -587,6 +755,8 @@ pub(crate) struct ClaudeDialog {
     add: Option<FormKind>,
     form: Option<DialogForm>,
     confirmation: Option<SharedString>,
+    plugin_tab: Option<PluginTab>,
+    store: Option<Entity<AgentStore>>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
     _pending: Task<()>,
@@ -618,6 +788,8 @@ impl ClaudeDialog {
             add: None,
             form: None,
             confirmation: None,
+            plugin_tab: None,
+            store: None,
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
             _pending: Task::ready(()),
@@ -724,6 +896,77 @@ impl ClaudeDialog {
         dialog
     }
 
+    fn plugins(
+        session: Entity<AgentSession>,
+        workspace: WeakEntity<Workspace>,
+        store: Entity<AgentStore>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let reload = plugins_reload(session.clone(), PluginTab::Plugins);
+        let mut dialog = Self::new(t!("Plugins"), session, workspace, reload, cx);
+        dialog.plugin_tab = Some(PluginTab::Plugins);
+        dialog.add = Some(FormKind::Plugin);
+        dialog.store = Some(store);
+        dialog
+    }
+
+    fn select_tab(&mut self, tab: PluginTab, cx: &mut Context<Self>) {
+        if self.plugin_tab == Some(tab) {
+            return;
+        }
+        self.plugin_tab = Some(tab);
+        self.reload = plugins_reload(self.session.clone(), tab);
+        self.add = Some(tab.form());
+        self.confirmation = None;
+        self.reload(cx);
+    }
+
+    fn open_install_form(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_form(FormKind::Plugin, window, cx);
+        let editor = match self.form.as_ref().and_then(|form| form.items.first()) {
+            Some(FormItem::Text { editor, .. }) => editor.clone(),
+            _ => return,
+        };
+        editor.update(cx, |editor, cx| editor.set_text(id, window, cx));
+    }
+
+    /// Plugins changed on disk, so the live run reloads them and the slash menu discovers its commands again.
+    fn finish_plugin_change(&mut self, confirmation: SharedString, cx: &mut Context<Self>) {
+        let (kind, cwd) = {
+            let session = self.session.read(cx);
+            (session.kind(), session.metadata().cwd.clone())
+        };
+        if let Some(store) = &self.store {
+            store.update(cx, |store, _| store.invalidate_commands(kind, &cwd));
+        }
+        let reloaded = self.session.read(cx).has_live_run().then(|| {
+            self.session.update(cx, |session, cx| {
+                session.control(json!({ "subtype": "reload_plugins" }), cx)
+            })
+        });
+        self._pending = cx.spawn(async move |this, cx| {
+            let needs_restart = match reloaded {
+                Some(reloaded) => reloaded
+                    .await
+                    .map_or(true, |response| response["error_count"].as_u64() != Some(0)),
+                None => true,
+            };
+            this.update(cx, |this, cx| {
+                this.reload(cx);
+                this.confirmation = Some(if needs_restart {
+                    format!(
+                        "{confirmation} {}",
+                        t!("Restart Claude to apply plugin changes")
+                    )
+                    .into()
+                } else {
+                    confirmation
+                });
+            })
+            .log_err();
+        });
+    }
+
     fn reload(&mut self, cx: &mut Context<Self>) {
         let sections = (self.reload)(cx);
         self.state = DialogState::Loading;
@@ -815,7 +1058,11 @@ impl ClaudeDialog {
             .update(cx, |session, cx| session.run_cli(arguments, input, cx));
         self.settle(
             finished,
-            move |this, (), cx| {
+            move |this, _output, cx| {
+                if this.plugin_tab.is_some() {
+                    this.finish_plugin_change(confirmation, cx);
+                    return;
+                }
                 this.confirmation = Some(confirmation);
                 if wait_for_change {
                     this.reload_until_changed(before, cx);
@@ -866,6 +1113,11 @@ impl ClaudeDialog {
                 text(t!("Rule")),
                 choice_item(t!("Save in"), "claude-rule-source", RULE_SOURCES),
             ],
+            FormKind::Plugin => vec![
+                text(t!("Plugin (name@marketplace)")),
+                choice_item(t!("Scope"), "claude-plugin-scope", PLUGIN_SCOPES),
+            ],
+            FormKind::Marketplace => vec![text(t!("Source (owner/repo, URL or path)"))],
         };
         if let Some(FormItem::Text { editor, .. }) = items
             .iter()
@@ -920,6 +1172,30 @@ impl ClaudeDialog {
                             source = source
                         ),
                     ))
+                }
+            }
+            FormKind::Plugin => {
+                let id = form.text(0, cx);
+                match plugin_input_error(&id, t!("Enter a plugin id.")) {
+                    Some(error) => Err(error),
+                    None => Ok((
+                        install_plugin_arguments(form.choice(1), &id),
+                        None,
+                        t!("Installed {id}.", id = id),
+                    )),
+                }
+            }
+            FormKind::Marketplace => {
+                let source = form.text(0, cx);
+                match plugin_input_error(&source, t!("Enter a marketplace source.")) {
+                    Some(error) => Err(error),
+                    None => Ok((
+                        ["plugin", "marketplace", "add", &source]
+                            .map(String::from)
+                            .into(),
+                        None,
+                        t!("Added marketplace {source}.", source = source),
+                    )),
                 }
             }
         };
@@ -1085,6 +1361,23 @@ impl ClaudeDialog {
             .into_any_element()
     }
 
+    fn render_tabs(&self, selected: PluginTab, cx: &mut Context<Self>) -> AnyElement {
+        let tab_button = |label: SharedString, tab: PluginTab, cx: &mut Context<Self>| {
+            ToggleButtonSimple::new(
+                label,
+                cx.listener(move |this, _, _, cx| this.select_tab(tab, cx)),
+            )
+            .selected(selected == tab)
+        };
+        let buttons = [
+            tab_button(t!("Plugins"), PluginTab::Plugins, cx),
+            tab_button(t!("Marketplaces"), PluginTab::Marketplaces, cx),
+        ];
+        ToggleButtonGroup::single_row("claude-plugin-tabs", buttons)
+            .selected_index(usize::from(selected == PluginTab::Marketplaces))
+            .into_any_element()
+    }
+
     fn render_form(&self, form: &DialogForm, cx: &mut Context<Self>) -> Section {
         let heading = |label: &SharedString| {
             Label::new(label.clone())
@@ -1232,6 +1525,9 @@ impl Render for ClaudeDialog {
                 Section::new().child(Label::new(confirmation.clone()).color(Color::Success)),
             );
         }
+        if let (Some(tab), None) = (self.plugin_tab, &self.form) {
+            sections.insert(0, Section::new().child(self.render_tabs(tab, cx)));
+        }
         let failed = matches!(self.state, DialogState::Failed(_));
         let can_add = self
             .add
@@ -1293,6 +1589,29 @@ impl Render for ClaudeDialog {
 }
 
 impl ChatView {
+    /// Opens the plugins dialog, with the install form filled in when `install` names a plugin.
+    pub(crate) fn show_plugins_dialog(
+        &mut self,
+        install: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session = self.session.clone();
+        let store = self.store.clone();
+        let weak_workspace = self.workspace.clone();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, move |window, cx| {
+                    let mut dialog = ClaudeDialog::plugins(session, weak_workspace, store, cx);
+                    if let Some(id) = install {
+                        dialog.open_install_form(id, window, cx);
+                    }
+                    dialog
+                })
+            })
+            .log_err();
+    }
+
     pub(super) fn show_claude_dialog(
         &mut self,
         command: &AppCommand,
@@ -1330,6 +1649,7 @@ impl ChatView {
             AppCommand::OutputStyle => Box::new(ClaudeDialog::output_styles),
             AppCommand::Mcp => Box::new(ClaudeDialog::mcp),
             AppCommand::Permissions => Box::new(ClaudeDialog::permissions),
+            AppCommand::Plugins => return self.show_plugins_dialog(None, window, cx),
             AppCommand::Model
             | AppCommand::New
             | AppCommand::Resume
@@ -1867,6 +2187,98 @@ mod tests {
                 "/repo/.claude/settings.json"
             ))]
         );
+    }
+
+    fn shell_arguments(action: &RowAction) -> Vec<&str> {
+        match action {
+            RowAction::Shell { arguments, .. } => arguments.iter().map(String::as_str).collect(),
+            other => panic!("unexpected action {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plugin_rows_parse_the_recorded_list() {
+        let recorded: Value =
+            serde_json::from_str(include_str!("fixtures/plugin-list.json")).expect("valid JSON");
+        let rows = plugin_rows(&recorded);
+        assert_eq!(rows.len(), recorded.as_array().map_or(0, Vec::len));
+        assert_eq!(rows[0].label, "code-simplifier@claude-plugins-official");
+        assert_eq!(rows[0].badge, None);
+        assert_eq!(action_labels(&rows[0]), [t!("Disable"), t!("Uninstall")]);
+        assert_eq!(
+            shell_arguments(&rows[0].actions[0]),
+            [
+                "plugin",
+                "disable",
+                "code-simplifier@claude-plugins-official"
+            ]
+        );
+        assert_eq!(
+            shell_arguments(&rows[0].actions[1]),
+            [
+                "plugin",
+                "uninstall",
+                "code-simplifier@claude-plugins-official",
+                "--scope",
+                "user"
+            ]
+        );
+        assert_eq!(rows[0].detail.as_deref(), Some("1.0.0 · user"));
+
+        let row = |id: &str| {
+            rows.iter()
+                .find(|row| row.label == id)
+                .expect("the plugin is listed")
+        };
+        let disabled = row("cc-plugin-telemetry@builtin");
+        assert_eq!(disabled.badge, Some(t!("Disabled")));
+        assert_eq!(action_labels(disabled), [t!("Enable")]);
+        assert_eq!(
+            shell_arguments(&disabled.actions[0]),
+            ["plugin", "enable", "cc-plugin-telemetry@builtin"]
+        );
+        assert_eq!(row("cc-plugin-sec-default@builtin").actions, []);
+        assert_eq!(
+            action_labels(row("review-loop@skills-dir")),
+            [t!("Disable")]
+        );
+    }
+
+    #[test]
+    fn marketplace_rows_refresh_and_remove_by_name() {
+        let rows = marketplace_rows(&json!([
+            { "name": "humanizer", "source": "github", "repo": "blader/humanizer" },
+            { "name": "local", "source": "directory", "path": "/work/market" }
+        ]));
+        assert_eq!(rows[0].detail.as_deref(), Some("blader/humanizer"));
+        assert_eq!(rows[1].detail.as_deref(), Some("/work/market"));
+        assert_eq!(action_labels(&rows[0]), [t!("Refresh"), t!("Remove")]);
+        assert_eq!(
+            shell_arguments(&rows[0].actions[0]),
+            ["plugin", "marketplace", "update", "humanizer"]
+        );
+        assert_eq!(
+            shell_arguments(&rows[0].actions[1]),
+            ["plugin", "marketplace", "remove", "humanizer"]
+        );
+        assert_eq!(marketplace_rows(&json!({})), []);
+    }
+
+    #[test]
+    fn install_builds_arguments_with_scope() {
+        assert_eq!(
+            install_plugin_arguments("project", "ponytail@ponytail"),
+            [
+                "plugin",
+                "install",
+                "ponytail@ponytail",
+                "--scope",
+                "project"
+            ]
+        );
+        assert!(plugin_input_error("ponytail@ponytail", "empty".into()).is_none());
+        assert!(plugin_input_error("", "empty".into()).is_some());
+        assert!(plugin_input_error("--scope", "empty".into()).is_some());
     }
 
     #[gpui::test]

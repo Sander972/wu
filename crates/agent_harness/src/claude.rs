@@ -398,6 +398,7 @@ const HIDDEN_COMMANDS: &[&str] = &[
     "permissions",
     "plan",
     "plugin",
+    "plugins",
     "privacy-settings",
     "quit",
     "recap",

@@ -1,0 +1,113 @@
+[
+  {
+    "id": "code-simplifier@claude-plugins-official",
+    "version": "1.0.0",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "~/claude/plugins/cache/claude-plugins-official/code-simplifier/1.0.0",
+    "installedAt": "2026-06-04T07:02:58.174Z",
+    "lastUpdated": "2026-06-04T07:02:58.174Z",
+    "projectEnabled": false
+  },
+  {
+    "id": "context7@claude-plugins-official",
+    "version": "0fbfda5a91f4",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "~/claude/plugins/cache/claude-plugins-official/context7/0fbfda5a91f4",
+    "installedAt": "2026-06-04T07:02:58.081Z",
+    "lastUpdated": "2026-11-26T08:04:34.709Z",
+    "mcpServers": {
+      "context7": {
+        "type": "http",
+        "url": "https://mcp.context7.com/mcp?client=claude-code-plugin"
+      }
+    },
+    "projectEnabled": false
+  },
+  {
+    "id": "humanizer@humanizer",
+    "version": "4.0.0",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "~/claude/plugins/cache/humanizer/humanizer/4.0.0",
+    "installedAt": "2026-10-22T13:09:47.048Z",
+    "lastUpdated": "2026-11-17T07:57:01.881Z",
+    "projectEnabled": false
+  },
+  {
+    "id": "impeccable@impeccable",
+    "version": "4.9.2",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "~/claude/plugins/cache/impeccable/impeccable/4.9.2",
+    "installedAt": "2026-05-15T13:19:36.887Z",
+    "lastUpdated": "2026-11-17T07:56:59.832Z",
+    "projectEnabled": false
+  },
+  {
+    "id": "ponytail@ponytail",
+    "version": "5.3.3",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "~/claude/plugins/cache/ponytail/ponytail/5.3.3",
+    "installedAt": "2026-09-28T13:00:56.958Z",
+    "lastUpdated": "2026-11-09T10:22:21.773Z",
+    "projectEnabled": false,
+    "hasUserConfig": true
+  },
+  {
+    "id": "superpowers@claude-plugins-official",
+    "version": "7.0.2",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "~/claude/plugins/cache/claude-plugins-official/superpowers/7.0.2",
+    "installedAt": "2026-06-04T07:01:18.354Z",
+    "lastUpdated": "2026-11-13T07:49:48.137Z",
+    "projectEnabled": false
+  },
+  {
+    "id": "review-loop@skills-dir",
+    "version": "0.1.0",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "~/claude/skills/review-system"
+  },
+  {
+    "id": "cc-plugin-agents-md@builtin",
+    "version": "unknown",
+    "scope": "user",
+    "enabled": true,
+    "hasUserConfig": true
+  },
+  {
+    "id": "cc-plugin-plugin-authoring@builtin",
+    "version": "unknown",
+    "scope": "user",
+    "enabled": true
+  },
+  {
+    "id": "cc-plugin-privacy@builtin",
+    "version": "unknown",
+    "scope": "user",
+    "enabled": true
+  },
+  {
+    "id": "cc-plugin-sec-default@builtin",
+    "version": "unknown",
+    "scope": "managed",
+    "enabled": true
+  },
+  {
+    "id": "cc-plugin-telemetry@builtin",
+    "version": "unknown",
+    "scope": "user",
+    "enabled": false
+  },
+  {
+    "id": "cc-plugin-you-should-know@builtin",
+    "version": "unknown",
+    "scope": "user",
+    "enabled": false
+  }
+]

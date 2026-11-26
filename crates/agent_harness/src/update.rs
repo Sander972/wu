@@ -52,13 +52,13 @@ pub async fn update_cli(
     })
 }
 
-/// Runs the CLI with `args` as separate arguments, never through a shell, and fails with its stderr when it exits unsuccessfully; `input` is written to its stdin.
+/// Runs the CLI with `args` as separate arguments, never through a shell, and returns its stdout, or fails with its stderr when it exits unsuccessfully; `input` is written to its stdin.
 pub async fn run_cli(
     executable: &Path,
     args: &[String],
     cwd: &Path,
     input: Option<&str>,
-) -> Result<(), CliFailed> {
+) -> Result<String, CliFailed> {
     let output = run(
         executable,
         args,
@@ -70,7 +70,7 @@ pub async fn run_cli(
     .await
     .map_err(CliFailed)?;
     if output.status.success() {
-        return Ok(());
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     Err(CliFailed(match stderr.trim() {

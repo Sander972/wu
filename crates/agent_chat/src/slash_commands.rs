@@ -99,10 +99,11 @@ pub(crate) enum AppCommand {
     OutputStyle,
     Mcp,
     Permissions,
+    Plugins,
 }
 
 impl AppCommand {
-    const ALL: [AppCommand; 19] = [
+    const ALL: [AppCommand; 20] = [
         AppCommand::Model,
         AppCommand::New,
         AppCommand::Resume,
@@ -125,6 +126,7 @@ impl AppCommand {
         AppCommand::OutputStyle,
         AppCommand::Mcp,
         AppCommand::Permissions,
+        AppCommand::Plugins,
     ];
 
     fn name(&self) -> &'static str {
@@ -148,6 +150,7 @@ impl AppCommand {
             AppCommand::OutputStyle => "output-style",
             AppCommand::Mcp => "mcp",
             AppCommand::Permissions => "permissions",
+            AppCommand::Plugins => "plugins",
         }
     }
 
@@ -172,6 +175,7 @@ impl AppCommand {
             AppCommand::OutputStyle => t!("Wu: choose an output style"),
             AppCommand::Mcp => t!("Wu: manage MCP servers"),
             AppCommand::Permissions => t!("Wu: manage permission rules"),
+            AppCommand::Plugins => t!("Wu: manage plugins and marketplaces"),
         }
     }
 
@@ -196,7 +200,8 @@ impl AppCommand {
             | AppCommand::Sandbox
             | AppCommand::OutputStyle
             | AppCommand::Mcp
-            | AppCommand::Permissions => None,
+            | AppCommand::Permissions
+            | AppCommand::Plugins => None,
         }
     }
 }
@@ -310,10 +315,18 @@ mod tests {
 
     #[test]
     fn mentions_and_skills_have_their_own_rules() {
-        let kind = |text: &str| completion_token(text, text.len()).map(|(kind, token)| (kind, token.query));
-        assert_eq!(kind("see @src/ma"), Some((TokenKind::Mention, "src/ma".into())));
+        let kind = |text: &str| {
+            completion_token(text, text.len()).map(|(kind, token)| (kind, token.query))
+        };
+        assert_eq!(
+            kind("see @src/ma"),
+            Some((TokenKind::Mention, "src/ma".into()))
+        );
         assert_eq!(kind("mail me@example.com"), None);
-        assert_eq!(kind("use $review"), Some((TokenKind::Skill, "review".into())));
+        assert_eq!(
+            kind("use $review"),
+            Some((TokenKind::Skill, "review".into()))
+        );
         assert_eq!(kind("costs $5"), None);
         assert_eq!(kind("/comp"), Some((TokenKind::Command, "comp".into())));
     }
