@@ -295,7 +295,7 @@ impl ChatView {
         let flavour = flavour_seed(&session.read(cx).metadata().id);
         let composer = cx.new(|cx| {
             let mut editor = Editor::auto_height(1, 10, window, cx);
-            editor.set_placeholder_text(&t!("Ask the agent. @ for files, / for commands"), window, cx);
+            editor.set_placeholder_text(&composer::composer_hint(), window, cx);
             editor.set_bar_cursor_width(px(1.), cx);
             editor.set_text_style_refinement(TextStyleRefinement {
                 font_size: Some(ui(14.).into()),
@@ -6200,13 +6200,8 @@ mod tests {
         let paused = |cx: &mut VisualTestContext| {
             session.read_with(cx, |session, _| session.prompt_suggestions_paused())
         };
-        assert!(paused(cx), "a window that isn't active counts as hidden");
-        cx.update(|window, _| window.activate_window());
-        view.update(cx, |_, cx| cx.notify());
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        // The test window never got focus, and a window without focus still shows the chat.
+        assert!(!cx.update(|window, _| window.is_window_active()));
         assert!(!paused(cx));
         view.update_in(cx, |view, window, cx| Item::deactivated(view, window, cx));
         assert!(paused(cx));

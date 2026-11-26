@@ -1232,6 +1232,8 @@ pub struct AgentSession {
     continuing_turn: bool,
     prompt_suggestion: Option<String>,
     prompt_suggestions_paused: bool,
+    /// Whether the live run was started asking for suggestions.
+    run_suggests_prompts: bool,
     run_failed: bool,
     harness: Arc<dyn Harness>,
     restart_on_next_send: bool,
@@ -1316,6 +1318,7 @@ impl AgentSession {
             continuing_turn: false,
             prompt_suggestion: None,
             prompt_suggestions_paused: false,
+            run_suggests_prompts: false,
             run_failed: false,
             harness,
             restart_on_next_send: false,
@@ -1527,7 +1530,7 @@ impl AgentSession {
     }
 
     fn send_prompt_suggestions_pause(&mut self, cx: &mut Context<Self>) {
-        if self.metadata.kind != AgentKind::Claude {
+        if self.metadata.kind != AgentKind::Claude || !self.run_suggests_prompts {
             return;
         }
         let request = serde_json::json!({
@@ -2030,6 +2033,7 @@ impl AgentSession {
         }
         self.user_stopped = false;
         self.editable_prompt = None;
+        self.prompt_suggestion = None;
         let new_turn = !self.working;
         if self.metadata.title.is_empty() {
             self.metadata.title = title_from(&prompt.text);
@@ -2625,6 +2629,8 @@ impl AgentSession {
             }
         };
         let settings = self.metadata.settings.clone();
+        let prompt_suggestions = AgentChatSettings::get_global(cx).prompt_suggestions;
+        self.run_suggests_prompts = prompt_suggestions;
         let request = RunRequest {
             prompt: text,
             attachments: attachment_paths(&prompt.attachments),
@@ -2642,7 +2648,7 @@ impl AgentSession {
             ephemeral: false,
             context: prompt.context.clone(),
             resume_interrupted: self.continuing_turn && prompt.is_empty(),
-            prompt_suggestions: AgentChatSettings::get_global(cx).prompt_suggestions,
+            prompt_suggestions,
         };
         let (steering_tx, steering_rx) = tokio::sync::mpsc::channel(32);
         let interrupt = CancellationToken::new();
@@ -3025,7 +3031,9 @@ impl AgentSession {
             }
             AgentEvent::TitleChanged { title } => self.adopt_agent_title(&title, cx),
             AgentEvent::PromptSuggestion { suggestion } => {
-                self.prompt_suggestion = (!suggestion.trim().is_empty()).then_some(suggestion);
+                // A frame that arrives once the next turn has started belongs to the turn before it.
+                self.prompt_suggestion =
+                    (!self.working && !suggestion.trim().is_empty()).then_some(suggestion);
             }
             AgentEvent::GeneratedImage { path, .. } => {
                 self.transcript.text_block_open = false;
@@ -8600,6 +8608,34 @@ done
             session.run_ended(cx);
         });
         session.read_with(cx, |session, _| assert_eq!(session.queue().len(), 1));
+    }
+
+    #[gpui::test]
+    async fn a_suggestion_from_the_turn_before_never_outlives_the_next_turn(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let suggest = |text: &str| AgentEvent::PromptSuggestion {
+            suggestion: text.into(),
+        };
+        session.update(cx, |session, cx| {
+            session.apply_event(suggest("run the tests"), cx);
+            assert_eq!(session.prompt_suggestion(), Some("run the tests"));
+            session.enqueue(Prompt::text("scenario:happy"), cx);
+            session.send_next_queued(cx);
+            assert!(session.is_working());
+            assert_eq!(session.prompt_suggestion(), None);
+            session.apply_event(suggest("late"), cx);
+            assert_eq!(session.prompt_suggestion(), None);
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+        session.read_with(cx, |session, _| assert_eq!(session.prompt_suggestion(), None));
     }
 
     pub(crate) fn enqueue(session: &Entity<AgentSession>, text: &str, cx: &mut TestAppContext) {

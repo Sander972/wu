@@ -11,6 +11,10 @@ use workspace::{
     notifications::{NotificationId, NotifyTaskExt as _},
 };
 
+pub(super) fn composer_hint() -> String {
+    t!("Ask the agent. @ for files, / for commands").to_string()
+}
+
 const PERMISSION_DESTINATIONS: [&str; 4] = [
     "localSettings",
     "userSettings",
@@ -379,17 +383,17 @@ impl ChatView {
     }
 
     pub(super) fn sync_prompt_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paused = !window.is_window_active();
-        if self.session.read(cx).prompt_suggestions_paused() != paused {
+        // Only a frame that is being drawn proves the chat is visible; `Item::deactivated` pauses and the next frame resumes. A window that lost focus still shows the chat.
+        if self.session.read(cx).prompt_suggestions_paused() {
             self.session.update(cx, |session, cx| {
-                session.set_prompt_suggestions_paused(paused, cx)
+                session.set_prompt_suggestions_paused(false, cx)
             });
         }
         let wanted = self.shown_prompt_suggestion(cx);
         if wanted != self.suggestion_placeholder {
             let placeholder = wanted
                 .clone()
-                .unwrap_or_else(|| t!("Ask the agent. @ for files, / for commands").to_string());
+                .unwrap_or_else(composer_hint);
             self.composer.update(cx, |editor, cx| {
                 editor.set_placeholder_text(&placeholder, window, cx)
             });
