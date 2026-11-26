@@ -2579,6 +2579,42 @@ mod tests {
     }
 
     #[test]
+    fn chat_runs_never_inherit_resume_variables() {
+        // SAFETY: only this test uses this variable name, and nothing else reads it.
+        unsafe { std::env::set_var("CLAUDE_CODE_RESUME_TEST_INHERITED", "1") };
+        let request = RunRequest {
+            prompt: "hi".into(),
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            permission: PermissionMode::Ask,
+            resume: None,
+            fork: None,
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            auto_compact_tokens: None,
+            chrome: false,
+            drop_prompt: None,
+            ephemeral: false,
+            resume_interrupted: false,
+            context: Vec::new(),
+        };
+        let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
+        let envs: Vec<_> = command.as_std().get_envs().collect();
+        assert!(
+            envs.iter()
+                .any(|(key, value)| *key == "CLAUDE_CODE_RESUME_TEST_INHERITED" && value.is_none()),
+            "an inherited resume variable is removed"
+        );
+        assert!(
+            envs.iter()
+                .all(|(key, _)| *key != "CLAUDE_CODE_RESUME_INTERRUPTED_TURN"),
+            "a normal launch never asks to continue a turn"
+        );
+    }
+
+    #[test]
     fn ephemeral_runs_keep_no_saved_session() {
         let mut request = RunRequest {
             prompt: "hi".into(),
