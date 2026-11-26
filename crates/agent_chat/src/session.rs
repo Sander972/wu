@@ -1598,8 +1598,10 @@ impl AgentSession {
         }
         let answer = self.control(request, cx);
         cx.spawn(async move |this, cx| {
-            let response = answer.await?;
-            let url = if enabled {
+            let link = answer.await.and_then(|response| {
+                if !enabled {
+                    return Ok(None);
+                }
                 let url = response["session_url"]
                     .as_str()
                     .filter(|url| !url.is_empty())
@@ -1608,14 +1610,22 @@ impl AgentSession {
                             t!("Claude Code didn't return a Remote Control link.").to_string()
                         )
                     })?;
-                Some(url.to_string())
-            } else {
-                None
-            };
+                Ok(Some(url.to_string()))
+            });
+            let failed = link.is_err();
             this.update(cx, |this, cx| {
-                this.remote_control_url = url;
+                this.remote_control_url = link.as_ref().ok().cloned().flatten();
+                // A failed or unanswered enable can still have started the bridge, which must not keep exposing the chat without an indicator.
+                if failed && enabled {
+                    this.control(
+                        serde_json::json!({ "subtype": "remote_control", "enabled": false }),
+                        cx,
+                    )
+                    .detach_and_log_err(cx);
+                }
                 cx.notify();
-            })
+            })?;
+            link.map(|_| ())
         })
     }
 
@@ -6199,6 +6209,50 @@ pub(crate) mod tests {
         session.read_with(cx, |session, _| {
             assert_eq!(session.remote_control_url(), None)
         });
+    }
+
+    #[gpui::test]
+    async fn remote_control_disable_clears_the_indicator_even_when_it_fails(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let mut receiver = attach_live_run(&session, cx);
+        session.update(cx, |session, _| {
+            session.remote_control_url = Some("https://claude.ai/code/session_1".into())
+        });
+        let disabling = session.update(cx, |session, cx| session.set_remote_control(false, cx));
+        next_remote_control_call(&mut receiver)
+            .reply
+            .send(Err("bridge unreachable".into()))
+            .expect("the session waits for the reply");
+        assert!(disabling.await.is_err(), "the error still reaches the toast");
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.remote_control_url(), None)
+        });
+    }
+
+    #[gpui::test]
+    async fn a_failed_enable_asks_the_agent_to_stop_remote_control(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let mut receiver = attach_live_run(&session, cx);
+        let enabling = session.update(cx, |session, cx| session.set_remote_control(true, cx));
+        next_remote_control_call(&mut receiver)
+            .reply
+            .send(Ok(serde_json::json!({})))
+            .expect("the session waits for the reply");
+        assert!(enabling.await.is_err());
+        assert_eq!(
+            next_remote_control_call(&mut receiver).request,
+            serde_json::json!({ "subtype": "remote_control", "enabled": false })
+        );
     }
 
     #[gpui::test]

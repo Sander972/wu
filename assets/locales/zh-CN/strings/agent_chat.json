@@ -439,7 +439,7 @@
   "Wu: sign out of Claude": "Wu：退出 Claude 登录",
   "Wu: start a new chat": "Wu：开始新对话",
   "Wu: stop the agent": "Wu：停止智能体",
-  "Wu: turn Remote Control for all sessions on or off": "Wu：为所有会话开启或关闭远程控制",
+  "Wu: turn Remote Control for all sessions on or off (a Claude Code setting that Claude Code applies itself; Wu shows its indicator only for chats started with /remote-control)": "Wu：为所有会话开启或关闭远程控制（这是 Claude Code 的设置，由 Claude Code 自行应用；Wu 只会为通过 /remote-control 启动的对话显示指示器）",
   "Yes": "是",
   "Yes, and auto-accept edits": "是，并自动接受编辑",
   "Yes, and manually approve edits": "是，并手动批准编辑",

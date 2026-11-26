@@ -292,7 +292,9 @@ impl AppCommand {
                 t!("Wu: control this chat from claude.ai or the Claude app")
             }
             AppCommand::RemoteControlStartup => {
-                t!("Wu: turn Remote Control for all sessions on or off")
+                t!(
+                    "Wu: turn Remote Control for all sessions on or off (a Claude Code setting that Claude Code applies itself; Wu shows its indicator only for chats started with /remote-control)"
+                )
             }
         }
     }
