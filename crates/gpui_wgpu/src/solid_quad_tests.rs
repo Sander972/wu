@@ -330,7 +330,7 @@ fn compare_shader_pixels(include_interiors: bool) {
                     });
                 device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
                 rx.recv().unwrap().unwrap();
-                let pixels = readback.slice(..).get_mapped_range().to_vec();
+                let pixels = readback.slice(..).get_mapped_range().unwrap().to_vec();
                 readback.unmap();
                 pixels
             };
