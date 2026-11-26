@@ -33,7 +33,11 @@ pub(super) enum SidePaneContent {
 
 /// A `/btw` question that has no answer in the session yet.
 pub(super) enum PendingSideQuestion {
-    Asking(String),
+    Asking {
+        question: String,
+        // Dropping the task cancels the request and any one-off CLI process behind it.
+        _request: Task<()>,
+    },
     Failed {
         question: String,
         message: SharedString,
@@ -209,16 +213,15 @@ impl ChatView {
         self.side_questions_asked += 1;
         let id = self.side_questions_asked;
         self.pending_side_questions
-            .retain(|(_, pending)| matches!(pending, PendingSideQuestion::Asking(_)));
-        self.pending_side_questions
-            .push((id, PendingSideQuestion::Asking(question.clone())));
+            .retain(|(_, pending)| matches!(pending, PendingSideQuestion::Asking { .. }));
+        let asked = question.clone();
         let reply = self.session.update(cx, |session, cx| {
             session.control(
                 serde_json::json!({ "subtype": "side_question", "question": question }),
                 cx,
             )
         });
-        cx.spawn(async move |this, cx| {
+        let request = cx.spawn(async move |this, cx| {
             let outcome = reply.await;
             this.update(cx, |this, cx| {
                 let answer = outcome
@@ -242,8 +245,14 @@ impl ChatView {
                 cx.notify();
             })
             .log_err();
-        })
-        .detach();
+        });
+        self.pending_side_questions.push((
+            id,
+            PendingSideQuestion::Asking {
+                question: asked,
+                _request: request,
+            },
+        ));
     }
 
     fn render_side_questions(&self, cx: &Context<Self>) -> AnyElement {
@@ -273,7 +282,7 @@ impl ChatView {
             .rev()
             .map(|(_, pending)| {
                 let (question, note) = match pending {
-                    PendingSideQuestion::Asking(question) => (
+                    PendingSideQuestion::Asking { question, .. } => (
                         question.clone(),
                         Label::new(t!("Waiting for an answer…")).color(Color::Muted),
                     ),

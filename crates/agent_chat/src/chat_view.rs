@@ -6581,6 +6581,28 @@ mod tests {
         assert!(view.read_with(cx, |view, _| view.pending_side_questions.is_empty()));
     }
 
+    // The fake CLI is a shell script, and killing its `.cmd` launcher on Windows leaves the script running.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn dropping_a_pending_btw_stops_the_one_off_process(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (view, _session, cx) = side_question_view(directory.path(), cx).await;
+        view.update_in(cx, |view, window, cx| {
+            view.run_app_command(
+                AppCommand::Btw {
+                    question: Some("slow".into()),
+                },
+                window,
+                cx,
+            )
+        });
+        run_until(cx, |_| directory.path().join(".side-started").exists());
+        view.update(cx, |view, _| view.pending_side_questions.clear());
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        assert!(!directory.path().join(".side-answered").exists());
+    }
+
     #[gpui::test]
     async fn btw_without_text_opens_the_pane(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().expect("temporary directory");

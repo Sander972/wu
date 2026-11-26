@@ -392,6 +392,13 @@ case "$first" in
     *'"subtype":"side_question"'*)
       case "$1" in
       *'"question":"nothing'*) reply='{"response":null}' ;;
+      # Lets a test tell a killed process from one that kept running after its question was dropped.
+      *'"question":"slow'*)
+        : > .side-started
+        sleep 2
+        : > .side-answered
+        reply='{"response":"late"}'
+        ;;
       *) reply="{\"response\":\"re: $(printf '%s\n' "$1" | sed 's/.*"question":"\([^"]*\)".*/\1/')\",\"synthetic\":false}" ;;
       esac
       emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":$reply}}"
