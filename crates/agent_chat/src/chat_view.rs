@@ -7110,6 +7110,319 @@ mod tests {
         assert!(cx.debug_bounds("plugin-ui-toast").is_none());
     }
 
+    const PANE: &str = "wu-draw-test-pane";
+
+    fn panes_fixture() -> serde_json::Value {
+        let mut frame: serde_json::Value =
+            serde_json::from_str(include_str!("chat_view/fixtures/plugin_ui/panes.json"))
+                .expect("fixture is JSON");
+        let mut roster = frame["response"]["response"].take();
+        roster["subtype"] = "ui_panes".into();
+        roster
+    }
+
+    fn push_roster(view: &Entity<ChatView>, roster: serde_json::Value, cx: &mut VisualTestContext) {
+        view.update(cx, |view, cx| view.apply_plugin_ui_event(&roster, cx));
+        draw_plugin_chat(cx);
+    }
+
+    fn shows_plugin_panes(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> bool {
+        view.read_with(cx, |view, _| {
+            matches!(
+                view.side_pane_content(),
+                Some(side_pane::SidePaneContent::PluginPanes { .. })
+            )
+        })
+    }
+
+    /// An attached chat that got the recorded pane roster and drew it once, with the drawing requests that frame sent.
+    async fn plugin_pane_chat(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<ChatView>,
+        tokio::sync::mpsc::Receiver<agent_harness::Steer>,
+        Vec<agent_harness::ControlCall>,
+        &mut VisualTestContext,
+    ) {
+        let (_session, view, mut receiver, attach, cx) = plugin_chat(cx).await;
+        attach
+            .reply
+            .send(Ok(serde_json::json!({ "surfaces": ["vscode"] })))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        drain_controls(&mut receiver);
+        push_roster(&view, panes_fixture(), cx);
+        let calls = drain_controls(&mut receiver);
+        (view, receiver, calls, cx)
+    }
+
+    #[gpui::test]
+    async fn roster_updates_add_and_remove_pane_tabs(cx: &mut TestAppContext) {
+        let (view, _receiver, mut calls, cx) = plugin_pane_chat(cx).await;
+        assert!(shows_plugin_panes(&view, cx));
+        assert!(
+            cx.debug_bounds("plugin-ui-pane-tab-wu-draw-test-pane")
+                .is_some()
+        );
+        let render = take_render(&mut calls, "Pane");
+        assert_eq!(render.request["instance_id"], PANE);
+        let props = render.request["props"].clone();
+        assert_eq!(props["title"], "Draw test");
+        assert!(
+            props["bodyColumns"]
+                .as_u64()
+                .is_some_and(|columns| columns > 0)
+        );
+        assert_eq!(
+            render.request["viewport"],
+            serde_json::json!({ "columns": props["bodyColumns"], "rows": props["scroll"]["bodyRows"], "isFullscreen": false }),
+            "the viewport is the pane's size in cells"
+        );
+        let mut frame: serde_json::Value = serde_json::from_str(include_str!(
+            "chat_view/fixtures/plugin_ui/render-pane.json"
+        ))
+        .expect("fixture is JSON");
+        render
+            .reply
+            .send(Ok(frame["response"]["response"].take()))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        assert!(cx.debug_bounds("plugin-ui-caption").is_some());
+        assert!(
+            cx.debug_bounds("plugin-ui-input-Pane:wu-draw-test-pane:wu-draw-test:name")
+                .is_some()
+        );
+
+        let mut roster = panes_fixture();
+        roster["panes"]
+            .as_array_mut()
+            .expect("the roster lists panes")
+            .push(serde_json::json!({ "id": "second", "plugin": "other", "title": "Second" }));
+        push_roster(&view, roster, cx);
+        assert!(
+            cx.debug_bounds("plugin-ui-pane-tab-wu-draw-test-pane")
+                .is_some()
+        );
+        assert!(cx.debug_bounds("plugin-ui-pane-tab-second").is_some());
+
+        push_roster(
+            &view,
+            serde_json::json!({ "subtype": "ui_panes", "panes": [], "shown_id": null }),
+            cx,
+        );
+        assert!(
+            cx.debug_bounds("plugin-ui-pane-tab-wu-draw-test-pane")
+                .is_none()
+        );
+        assert!(!shows_plugin_panes(&view, cx));
+        assert!(view.read_with(cx, |view, _| view.side_pane_content().is_none()));
+    }
+
+    #[gpui::test]
+    async fn showing_a_pane_tab_sends_ui_pane_show(cx: &mut TestAppContext) {
+        let (view, mut receiver, _calls, cx) = plugin_pane_chat(cx).await;
+        let mut roster = panes_fixture();
+        roster["panes"]
+            .as_array_mut()
+            .expect("the roster lists panes")
+            .push(serde_json::json!({ "id": "second", "plugin": "other", "title": "Second" }));
+        push_roster(&view, roster, cx);
+        drain_controls(&mut receiver);
+        assert!(cx.debug_bounds("plugin-ui-pane-tab-second").is_some());
+        // What the tab's click does; the side pane's slide-in runs on real time, so a simulated click can miss it.
+        view.update(cx, |view, cx| {
+            view.plugin_ui.show_pane(&view.session, "second", cx)
+        });
+        cx.run_until_parked();
+        let client_id = view.read_with(cx, |view, _| view.plugin_ui.client_id().to_owned());
+        let show = next_control(&mut receiver);
+        assert_eq!(
+            show.request,
+            serde_json::json!({ "subtype": "ui_pane_show", "id": "second", "surface": "vscode", "client_id": client_id })
+        );
+        show.reply
+            .send(Ok(serde_json::json!({ "shown_id": "second" })))
+            .expect("the chat waits for the reply");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view
+                .plugin_ui
+                .visible_pane()
+                .map(|pane| pane.id.clone())),
+            Some("second".to_owned())
+        );
+    }
+
+    #[gpui::test]
+    async fn escape_closes_only_close_on_escape_panes(cx: &mut TestAppContext) {
+        let (view, mut receiver, _calls, cx) = plugin_pane_chat(cx).await;
+        let pane_focused = |cx: &mut VisualTestContext| {
+            view.update_in(cx, |view, window, cx| match view.side_pane_content() {
+                Some(side_pane::SidePaneContent::PluginPanes { focus_handle }) => {
+                    focus_handle.contains_focused(window, cx)
+                }
+                _ => false,
+            })
+        };
+        let mut roster = panes_fixture();
+        roster["focus_requested_id"] = PANE.into();
+        push_roster(&view, roster.clone(), cx);
+        assert!(pane_focused(cx), "the plugin asked for focus");
+        let focus = next_control(&mut receiver);
+        assert_eq!(focus.request["subtype"], "ui_pane_focus");
+        assert_eq!(focus.request["id"], PANE);
+        draw_plugin_chat(cx);
+        assert!(
+            drain_controls(&mut receiver)
+                .iter()
+                .all(|call| call.request["subtype"] != "ui_pane_focus"),
+            "a focus request moves focus once"
+        );
+
+        cx.dispatch_action(menu::Cancel);
+        cx.run_until_parked();
+        let calls = drain_controls(&mut receiver);
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.request["subtype"] != "ui_close")
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.request["subtype"] == "ui_pane_focus"
+                    && call.request["id"].is_null())
+        );
+        assert!(shows_plugin_panes(&view, cx), "the pane stays open");
+        assert!(!pane_focused(cx), "focus goes back to the chat");
+
+        roster["panes"][0]["close_on_escape"] = true.into();
+        push_roster(&view, roster, cx);
+        assert!(pane_focused(cx));
+        drain_controls(&mut receiver);
+        cx.dispatch_action(menu::Cancel);
+        cx.run_until_parked();
+        let close = next_control(&mut receiver);
+        assert_eq!(close.request["subtype"], "ui_close");
+        assert_eq!(close.request["id"], PANE);
+    }
+
+    #[gpui::test]
+    async fn scrolling_sends_ui_scroll_and_applies_the_returned_offset(cx: &mut TestAppContext) {
+        let (view, mut receiver, mut calls, cx) = plugin_pane_chat(cx).await;
+        take_render(&mut calls, "Pane")
+            .reply
+            .send(Ok(serde_json::json!({
+                "tree": { "type": "Text", "children": ["pane"] },
+                "props": {},
+                "rewritten": false,
+                "hooked": true,
+                "drawn_by": ["wu-draw-test"],
+            })))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        drain_controls(&mut receiver);
+        let client_id = view.read_with(cx, |view, _| view.plugin_ui.client_id().to_owned());
+        let offset = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| view.plugin_ui.pane_offsets.get(PANE).copied())
+        };
+        let scroll = |by: i32, cx: &mut VisualTestContext| {
+            view.update(cx, |view, cx| {
+                view.plugin_ui
+                    .scroll_pane(&view.session, PANE, by, 10, 30, cx)
+            });
+            cx.run_until_parked();
+        };
+
+        scroll(3, cx);
+        let call = next_control(&mut receiver);
+        assert_eq!(
+            call.request,
+            serde_json::json!({
+                "subtype": "ui_scroll",
+                "surface": "vscode",
+                "client_id": client_id,
+                "component": "Pane",
+                "instance_id": PANE,
+                "offset": 0,
+                "by": 3,
+                "body_rows": 10,
+                "content_rows": 30,
+            })
+        );
+        call.reply
+            .send(Ok(serde_json::json!({ "moved": true, "offset": 3 })))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        assert_eq!(offset(cx), Some(3));
+        let render = take_render(&mut drain_controls(&mut receiver), "Pane");
+        assert_eq!(
+            render.request["props"]["scroll"]["offset"], 3,
+            "the pane is drawn again at the new offset"
+        );
+
+        scroll(20, cx);
+        let call = next_control(&mut receiver);
+        assert_eq!(call.request["offset"], 3);
+        call.reply
+            .send(Ok(
+                serde_json::json!({ "moved": false, "offset": 0, "deny": "at the end" }),
+            ))
+            .expect("the chat waits for the reply");
+        cx.run_until_parked();
+        assert_eq!(offset(cx), Some(3), "a denied scroll keeps the offset");
+    }
+
+    #[gpui::test]
+    async fn closing_the_tab_sends_ui_close(cx: &mut TestAppContext) {
+        let (view, mut receiver, _calls, cx) = plugin_pane_chat(cx).await;
+        let client_id = view.read_with(cx, |view, _| view.plugin_ui.client_id().to_owned());
+        view.update_in(cx, |view, window, cx| view.dismiss_side_pane(window, cx));
+        cx.run_until_parked();
+        let close = next_control(&mut receiver);
+        assert_eq!(
+            close.request,
+            serde_json::json!({ "subtype": "ui_close", "id": PANE, "client_id": client_id })
+        );
+        assert!(
+            shows_plugin_panes(&view, cx),
+            "open until the plugin agrees"
+        );
+        close
+            .reply
+            .send(Ok(serde_json::json!({ "closed": true })))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        assert!(view.read_with(cx, |view, _| view.plugin_ui.panes.is_empty()));
+        assert!(view.read_with(cx, |view, _| view.side_pane_content().is_none()));
+    }
+
+    #[gpui::test]
+    async fn panes_vanish_when_the_session_detaches(cx: &mut TestAppContext) {
+        let (view, mut receiver, _calls, cx) = plugin_pane_chat(cx).await;
+        view.update_in(cx, |view, window, cx| Item::deactivated(view, window, cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| view.plugin_ui.panes.is_empty()));
+        draw_plugin_chat(cx);
+        assert!(!shows_plugin_panes(&view, cx));
+        assert!(
+            cx.debug_bounds("plugin-ui-pane-tab-wu-draw-test-pane")
+                .is_none()
+        );
+
+        let attach = drain_controls(&mut receiver)
+            .into_iter()
+            .find(|call| call.request["subtype"] == "ui_attach")
+            .expect("showing the chat again attaches again");
+        attach
+            .reply
+            .send(Ok(serde_json::json!({ "surfaces": ["vscode"] })))
+            .expect("the chat waits for the reply");
+        draw_plugin_chat(cx);
+        push_roster(&view, panes_fixture(), cx);
+        assert!(shows_plugin_panes(&view, cx), "the pane returns");
+    }
+
     #[gpui::test]
     async fn startup_toggle_applies_the_flag_setting(cx: &mut TestAppContext) {
         let (session, view, cx) = focus_chat(cx).await;

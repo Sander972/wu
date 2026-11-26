@@ -1,10 +1,10 @@
-use super::{ChatView, SubagentRef, attachments, links::FileTarget};
+use super::{ChatView, SubagentRef, attachments, links::FileTarget, plugin_ui};
 use crate::chat_style::hairline;
 use editor::Editor;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, Entity, ExternalPaths, FocusHandle,
-    Focusable, IntoElement, ParentElement, SharedString, Styled, Task, Window, canvas,
-    ease_out_quint, px,
+    Focusable, IntoElement, ParentElement, ScrollWheelEvent, SharedString, Styled, Task, Window,
+    canvas, ease_out_quint, px,
 };
 use i18n::t;
 use std::time::Duration;
@@ -18,6 +18,7 @@ const WIDTH_FRACTION: f32 = 0.5;
 const MIN_WIDTH: f32 = 380.;
 const FALLBACK_AVAILABLE_WIDTH: f32 = 960.;
 const HEADER_HEIGHT: f32 = 36.;
+const PLUGIN_PANE_PADDING: f32 = 12.;
 
 pub(super) enum SidePaneContent {
     Subagent {
@@ -29,6 +30,10 @@ pub(super) enum SidePaneContent {
         editor: Entity<Editor>,
     },
     SideQuestions,
+    /// The panes plugins opened, one tab each; which one shows is in `PluginUi`.
+    PluginPanes {
+        focus_handle: FocusHandle,
+    },
 }
 
 /// A `/btw` question that has no answer in the session yet.
@@ -50,6 +55,7 @@ impl SidePaneContent {
             SidePaneContent::Subagent { view, .. } => Some(view.focus_handle(cx)),
             SidePaneContent::File { editor, .. } => Some(editor.focus_handle(cx)),
             SidePaneContent::SideQuestions => None,
+            SidePaneContent::PluginPanes { focus_handle } => Some(focus_handle.clone()),
         }
     }
 }
@@ -77,7 +83,10 @@ impl ChatView {
                 self.side_pane_openings
             }
         };
-        if let Some(focus_handle) = content.focus_handle(cx) {
+        // A plugin pane takes focus only when its plugin asks for it.
+        if !matches!(content, SidePaneContent::PluginPanes { .. })
+            && let Some(focus_handle) = content.focus_handle(cx)
+        {
             window.focus(&focus_handle, cx);
         }
         self.side_pane = Some(SidePane { content, opening });
@@ -352,9 +361,179 @@ impl ChatView {
                 self.open_subagent_in_tab(subagent, window, cx)
             }
             SidePaneContent::File { target, .. } => self.open_file_in_tab(target, window, cx),
-            SidePaneContent::SideQuestions => {}
+            SidePaneContent::SideQuestions | SidePaneContent::PluginPanes { .. } => {}
         }
         cx.notify();
+    }
+
+    /// Opens the side pane for a pane a plugin just opened or showed, closes it once no pane is left, and moves focus where a plugin asked, once.
+    pub(super) fn sync_plugin_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let showing = matches!(
+            self.side_pane_content(),
+            Some(SidePaneContent::PluginPanes { .. })
+        );
+        let reveal = std::mem::take(&mut self.plugin_ui.reveal_panes);
+        if self.plugin_ui.panes.is_empty() {
+            if showing {
+                self.close_side_pane(window, cx);
+            }
+            return;
+        }
+        if reveal && !showing && !self.docked {
+            let focus_handle = cx.focus_handle();
+            self.show_in_side_pane(SidePaneContent::PluginPanes { focus_handle }, window, cx);
+        }
+        let Some(requested) = self.plugin_ui.focus_requested.take() else {
+            return;
+        };
+        let focus_handle = match self.side_pane_content() {
+            Some(SidePaneContent::PluginPanes { focus_handle }) => Some(focus_handle.clone()),
+            _ => None,
+        };
+        // As the extension does, a pane doesn't take focus from a prompt being typed.
+        let takes_focus = self.plugin_ui.visible_pane().map(|pane| &pane.id) == Some(&requested)
+            && self.composer.read(cx).text(cx).is_empty();
+        match focus_handle.filter(|_| takes_focus) {
+            Some(focus_handle) => {
+                window.focus(&focus_handle, cx);
+                self.plugin_ui
+                    .focus_pane(&self.session, Some(&requested), cx);
+            }
+            None => self.plugin_ui.focus_pane(&self.session, None, cx),
+        }
+    }
+
+    /// Escape: a plugin pane closes only when it asked to, otherwise focus goes back to the chat.
+    fn cancel_side_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(
+            self.side_pane_content(),
+            Some(SidePaneContent::PluginPanes { .. })
+        ) {
+            self.close_side_pane(window, cx);
+            return;
+        }
+        let Some(pane) = self.plugin_ui.visible_pane() else {
+            return;
+        };
+        if pane.close_on_escape {
+            self.plugin_ui.close_pane(&self.session, &pane.id, cx);
+        } else {
+            window.focus(&self.focus_handle(cx), cx);
+            self.plugin_ui.focus_pane(&self.session, None, cx);
+        }
+    }
+
+    /// The header's close button: a plugin pane is asked to close, anything else closes at once.
+    pub(super) fn dismiss_side_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(
+            self.side_pane_content(),
+            Some(SidePaneContent::PluginPanes { .. })
+        ) {
+            self.close_side_pane(window, cx);
+            return;
+        }
+        if let Some(pane) = self.plugin_ui.visible_pane() {
+            self.plugin_ui.close_pane(&self.session, &pane.id, cx);
+        }
+    }
+
+    fn render_plugin_pane_tabs(&self, cx: &Context<Self>) -> AnyElement {
+        let visible = self.plugin_ui.visible_pane().map(|pane| pane.id.clone());
+        h_flex()
+            .min_w_0()
+            .flex_1()
+            .gap(px(2.))
+            .overflow_hidden()
+            .children(self.plugin_ui.panes.iter().map(|pane| {
+                let id = pane.id.clone();
+                let selector = format!("plugin-ui-pane-tab-{id}");
+                div().debug_selector(|| selector).child(
+                    Button::new(
+                        SharedString::from(format!("plugin-ui-pane-tab-{id}")),
+                        pane.title.clone(),
+                    )
+                    .label_size(LabelSize::Small)
+                    .toggle_state(visible.as_ref() == Some(&id))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.plugin_ui.show_pane(&this.session, &id, cx)
+                    })),
+                )
+            }))
+            .into_any_element()
+    }
+
+    fn render_plugin_pane(
+        &self,
+        focus_handle: &FocusHandle,
+        width: f32,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let Some(pane) = self.plugin_ui.visible_pane() else {
+            return div().into_any_element();
+        };
+        let rem = f32::from(self.plugin_ui.rem);
+        // shortcut: cells of 0.6 by 1.4 rem, as for the attach viewport; measure them once a plugin needs exact cells.
+        let (cell_width, cell_height) = (rem * 0.6, rem * 1.4);
+        let height = self
+            .root_bounds
+            .get()
+            .map_or(0., |bounds| f32::from(bounds.size.height))
+            - HEADER_HEIGHT;
+        let fit = |space: f32, cell: f32| {
+            ((space - 2. * PLUGIN_PANE_PADDING) / cell).floor().max(1.) as u32
+        };
+        let (columns, rows) =
+            plugin_ui::pane_cells(pane, fit(width, cell_width), fit(height, cell_height));
+        let offset = self
+            .plugin_ui
+            .pane_offsets
+            .get(&pane.id)
+            .copied()
+            .unwrap_or(0);
+        let drawing = self
+            .plugin_drawing(
+                "Pane",
+                &pane.id,
+                || {
+                    serde_json::json!({
+                        "title": pane.title,
+                        "isFocused": self.plugin_ui.focused_pane.as_ref() == Some(&pane.id),
+                        "bodyColumns": columns,
+                        "placement": "dock",
+                        "scroll": { "offset": offset, "bodyRows": rows },
+                        "view": {},
+                    })
+                },
+                &mut None,
+                cx,
+            )
+            .unwrap_or_else(|| plugin_ui::caption(std::slice::from_ref(&pane.plugin), cx));
+        let id = pane.id.clone();
+        let content_rows = self.plugin_ui.pane_content_rows(&id);
+        v_flex()
+            .id("plugin-ui-pane")
+            .track_focus(focus_handle)
+            .size_full()
+            .p(px(PLUGIN_PANE_PADDING))
+            .overflow_hidden()
+            .when_some(pane.background, |this, color| this.bg(color))
+            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
+                let lines = event.delta.pixel_delta(px(cell_height)).y / px(cell_height);
+                // shortcut: a trackpad's small deltas round to no rows; add them up once a plugin pane needs smooth scrolling.
+                let by = -(lines.round() as i32);
+                if by != 0 {
+                    this.plugin_ui
+                        .scroll_pane(&this.session, &id, by, rows, content_rows, cx);
+                }
+            }))
+            .child(
+                div()
+                    .max_w(px(columns as f32 * cell_width))
+                    .max_h(px(rows as f32 * cell_height))
+                    .overflow_hidden()
+                    .child(drawing),
+            )
+            .into_any_element()
     }
 
     pub(super) fn track_root_bounds(&self) -> impl IntoElement {
@@ -403,6 +582,12 @@ impl ChatView {
                     None,
                     self.render_side_questions(cx),
                 ),
+                SidePaneContent::PluginPanes { focus_handle } => (
+                    IconName::Blocks,
+                    SharedString::default(),
+                    None,
+                    self.render_plugin_pane(focus_handle, width, cx),
+                ),
                 SidePaneContent::File { target, editor } => {
                     let cwd = &self.session.read(cx).metadata().cwd;
                     let shown = target.path.strip_prefix(cwd).unwrap_or(&target.path);
@@ -421,6 +606,9 @@ impl ChatView {
                     )
                 }
             };
+        let tabs = matches!(pane.content, SidePaneContent::PluginPanes { .. })
+            .then(|| self.render_plugin_pane_tabs(cx));
+        let plugin_panes = tabs.is_some();
         let header = h_flex()
             .h(px(HEADER_HEIGHT))
             .flex_none()
@@ -431,44 +619,51 @@ impl ChatView {
             .border_b_1()
             .border_color(hairline(0.07, cx))
             .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
-            .child(
-                h_flex()
-                    .min_w_0()
-                    .flex_1()
-                    .gap(px(6.))
-                    .child(
-                        Label::new(title)
-                            .size(LabelSize::Small)
-                            .single_line()
-                            .truncate(),
-                    )
-                    .children(folder.map(|folder| {
-                        Label::new(folder)
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                            .single_line()
-                            .truncate()
-                    })),
-            )
-            .child(
-                IconButton::new("agent-side-pane-open-in-tab", IconName::Maximize)
-                    .icon_size(IconSize::Small)
-                    .tooltip(Tooltip::text(t!("Open in Tab")))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.move_side_pane_to_tab(window, cx)),
-                    ),
-            )
+            .children(tabs)
+            .when(!plugin_panes, |header| {
+                header.child(
+                    h_flex()
+                        .min_w_0()
+                        .flex_1()
+                        .gap(px(6.))
+                        .child(
+                            Label::new(title)
+                                .size(LabelSize::Small)
+                                .single_line()
+                                .truncate(),
+                        )
+                        .children(folder.map(|folder| {
+                            Label::new(folder)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .single_line()
+                                .truncate()
+                        })),
+                )
+            })
+            .when(!plugin_panes, |header| {
+                header.child(
+                    IconButton::new("agent-side-pane-open-in-tab", IconName::Maximize)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text(t!("Open in Tab")))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.move_side_pane_to_tab(window, cx)
+                        })),
+                )
+            })
             .child(
                 IconButton::new("agent-side-pane-close", IconName::Close)
                     .icon_size(IconSize::Small)
                     .tooltip(Tooltip::text(t!("Close")))
-                    .on_click(cx.listener(|this, _, window, cx| this.close_side_pane(window, cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.dismiss_side_pane(window, cx)),
+                    ),
             );
         let pane = div()
             .id("agent-side-pane")
             .key_context("AgentSidePane")
             .on_action(
-                cx.listener(|this, _: &menu::Cancel, window, cx| this.close_side_pane(window, cx)),
+                cx.listener(|this, _: &menu::Cancel, window, cx| this.cancel_side_pane(window, cx)),
             )
             .h_full()
             .flex_none()

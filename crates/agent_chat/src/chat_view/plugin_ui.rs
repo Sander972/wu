@@ -7,8 +7,8 @@ use anyhow::Result;
 use collections::{HashMap, HashSet};
 use editor::{Editor, EditorEvent, MultiBufferOffset};
 use gpui::{
-    AnyElement, App, Context, ElementId, Entity, FontWeight, SharedString, Subscription, Task,
-    TaskExt as _, Window, div, px,
+    AnyElement, App, Context, ElementId, Entity, FontWeight, Hsla, Pixels, Rgba, SharedString,
+    Subscription, Task, TaskExt as _, Window, div, px,
 };
 use i18n::t;
 use serde_json::{Value, json};
@@ -39,6 +39,7 @@ const MAX_OUTPUT_CHARS: usize = 65_536;
 const ABOVE_PROMPT_ROWS: u32 = 12;
 /// The extension asks again for a hooked agent row this often, since its drawing can show time passing.
 const AGENT_ROW_REFRESH: Duration = Duration::from_secs(5);
+const MAX_PANES: usize = 16;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TextStyleHint {
@@ -298,8 +299,52 @@ pub(crate) struct PaneInfo {
     pub plugin: String,
     pub title: String,
     pub close_on_escape: bool,
+    /// Only a color that parses as hex; anything else leaves wu's own background.
+    pub background: Option<Hsla>,
     pub rows: Option<u32>,
     pub columns: Option<u32>,
+}
+
+impl PaneInfo {
+    /// Like the extension, an entry without an `id` or a `plugin` is skipped and a missing title shows the id.
+    fn from_roster(pane: &Value) -> Option<Self> {
+        let id = pane["id"].as_str()?.to_owned();
+        let dimension = |name: &str| {
+            pane[name]
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+        };
+        Some(Self {
+            plugin: pane["plugin"].as_str()?.to_owned(),
+            title: pane["title"].as_str().unwrap_or(&id).to_owned(),
+            close_on_escape: pane["close_on_escape"].as_bool().unwrap_or_default(),
+            background: pane["background_color"]
+                .as_str()
+                .and_then(|color| Rgba::try_from(color).ok())
+                .map(Hsla::from),
+            rows: dimension("rows"),
+            columns: dimension("columns"),
+            id,
+        })
+    }
+}
+
+/// The pane's size in cells: its preferred `columns` and `rows`, never more than the side pane fits.
+pub(crate) fn pane_cells(pane: &PaneInfo, fit_columns: u32, fit_rows: u32) -> (u32, u32) {
+    let clamp = |preferred: Option<u32>, fit: u32| preferred.unwrap_or(fit).min(fit).max(1);
+    (clamp(pane.columns, fit_columns), clamp(pane.rows, fit_rows))
+}
+
+/// How many rows a drawing takes, counting each leaf as one row.
+fn rows_of(node: &UiNode) -> u32 {
+    match node {
+        UiNode::Group {
+            children,
+            horizontal: false,
+        } => children.iter().map(rows_of).sum(),
+        UiNode::Group { children, .. } => children.iter().map(rows_of).max().unwrap_or(0),
+        _ => 1,
+    }
 }
 
 pub(crate) struct Toast {
@@ -401,6 +446,13 @@ pub(crate) struct PluginUi {
     pub toasts: VecDeque<Toast>,
     pub panes: Vec<PaneInfo>,
     pub shown_pane: Option<String>,
+    pub focused_pane: Option<String>,
+    /// Taken by the first frame that sees it, so focus moves once.
+    pub focus_requested: Option<String>,
+    /// A pane appeared or another one was shown: the next frame opens the side pane for it.
+    pub reveal_panes: bool,
+    pub pane_offsets: HashMap<String, u32>,
+    pub rem: Pixels,
     cache: HashMap<Site, Rendered>,
     /// Invalidated drawings: still shown, so the row keeps its height, until the new one arrives.
     stale: HashSet<Site>,
@@ -431,6 +483,11 @@ impl PluginUi {
             toasts: VecDeque::new(),
             panes: Vec::new(),
             shown_pane: None,
+            focused_pane: None,
+            focus_requested: None,
+            reveal_panes: false,
+            pane_offsets: HashMap::default(),
+            rem: px(16.),
             cache: HashMap::default(),
             stale: HashSet::default(),
             requested: HashMap::default(),
@@ -509,6 +566,11 @@ impl PluginUi {
 
     pub fn detach(&mut self, session: &Entity<AgentSession>, cx: &mut App) {
         self.follow_run(session.read(cx).runs_started());
+        self.panes.clear();
+        self.shown_pane = None;
+        self.focused_pane = None;
+        self.focus_requested = None;
+        self.pane_offsets.clear();
         let attachment = std::mem::replace(&mut self.attachment, Attachment::Detached);
         // A pending attach is detached too: the agent handles both in the order they were sent.
         if !matches!(attachment, Attachment::Attached | Attachment::Pending(_)) {
@@ -549,7 +611,10 @@ impl PluginUi {
         self.requested.insert(key.clone(), number);
         self.asked
             .insert(key.clone(), (props.clone(), Instant::now()));
-        let request = json!({
+        let viewport = (component == "Pane").then(|| {
+            json!({ "columns": props["bodyColumns"], "rows": props["scroll"]["bodyRows"], "isFullscreen": false })
+        });
+        let mut request = json!({
             "subtype": "ui_render",
             "surface": SURFACE,
             "client_id": self.client_id,
@@ -557,6 +622,9 @@ impl PluginUi {
             "instance_id": instance_id,
             "props": props,
         });
+        if let Some(viewport) = viewport {
+            request["viewport"] = viewport;
+        }
         let answer = session.update(cx, |session, cx| session.control(request, cx));
         let answered_key = key.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -700,31 +768,139 @@ impl PluginUi {
                 true
             }
             "ui_panes" => {
-                self.panes = event["panes"]
+                let panes = event["panes"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter_map(|pane| {
-                        let dimension = |name: &str| {
-                            pane[name]
-                                .as_u64()
-                                .and_then(|value| u32::try_from(value).ok())
-                        };
-                        Some(PaneInfo {
-                            id: pane["id"].as_str()?.to_owned(),
-                            plugin: pane["plugin"].as_str().unwrap_or_default().to_owned(),
-                            title: pane["title"].as_str().unwrap_or_default().to_owned(),
-                            close_on_escape: pane["close_on_escape"].as_bool().unwrap_or_default(),
-                            rows: dimension("rows"),
-                            columns: dimension("columns"),
-                        })
-                    })
-                    .collect();
-                self.shown_pane = event["shown_id"].as_str().map(str::to_owned);
+                    .filter_map(PaneInfo::from_roster)
+                    .take(MAX_PANES)
+                    .collect::<Vec<_>>();
+                let shown = event["shown_id"].as_str().map(str::to_owned);
+                // The CLI sends the roster again after every attach; only a change opens the side pane.
+                self.reveal_panes |= panes
+                    .iter()
+                    .any(|pane| self.panes.iter().all(|old| old.id != pane.id))
+                    || (shown.is_some() && shown != self.shown_pane);
+                self.panes = panes;
+                self.shown_pane = shown;
+                self.focused_pane = event["focused_id"].as_str().map(str::to_owned);
+                self.focus_requested = event["focus_requested_id"].as_str().map(str::to_owned);
                 true
             }
             _ => false,
         }
+    }
+
+    /// The pane `shown_id` names, or the first one when it names none of them.
+    pub fn visible_pane(&self) -> Option<&PaneInfo> {
+        self.panes
+            .iter()
+            .find(|pane| self.shown_pane.as_ref() == Some(&pane.id))
+            .or(self.panes.first())
+    }
+
+    pub fn pane_content_rows(&self, id: &str) -> u32 {
+        self.cache
+            .get(&("Pane".to_owned(), id.to_owned()))
+            .map_or(0, |rendered| rows_of(&rendered.tree))
+    }
+
+    /// Sends a pane request and applies its answer, unless the chat detached or started another run meanwhile.
+    fn pane_request(
+        &self,
+        session: &Entity<AgentSession>,
+        request: Value,
+        cx: &mut Context<ChatView>,
+        apply: impl FnOnce(&mut PluginUi, &Value) + 'static,
+    ) {
+        if self.attachment != Attachment::Attached {
+            return;
+        }
+        let run = self.run;
+        let answer = session.update(cx, |session, cx| session.control(request, cx));
+        cx.spawn(async move |this, cx| {
+            let answer = answer.await?;
+            this.update(cx, |view, cx| {
+                if view.plugin_ui.run == run && view.plugin_ui.attachment == Attachment::Attached {
+                    apply(&mut view.plugin_ui, &answer);
+                    cx.notify();
+                }
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    pub fn show_pane(&self, session: &Entity<AgentSession>, id: &str, cx: &mut Context<ChatView>) {
+        let request = json!({ "subtype": "ui_pane_show", "id": id, "surface": SURFACE, "client_id": self.client_id });
+        self.pane_request(session, request, cx, |plugin_ui, answer| {
+            plugin_ui.shown_pane = answer["shown_id"].as_str().map(str::to_owned);
+        });
+    }
+
+    /// `None` tells the agent that no pane has focus.
+    pub fn focus_pane(
+        &self,
+        session: &Entity<AgentSession>,
+        id: Option<&str>,
+        cx: &mut Context<ChatView>,
+    ) {
+        let request = json!({ "subtype": "ui_pane_focus", "id": id, "surface": SURFACE, "client_id": self.client_id });
+        self.pane_request(session, request, cx, |plugin_ui, answer| {
+            plugin_ui.focused_pane = answer["focused_id"].as_str().map(str::to_owned);
+        });
+    }
+
+    /// The pane stays until its plugin agrees to close it.
+    pub fn close_pane(&self, session: &Entity<AgentSession>, id: &str, cx: &mut Context<ChatView>) {
+        let request = json!({ "subtype": "ui_close", "id": id, "client_id": self.client_id });
+        let id = id.to_owned();
+        self.pane_request(session, request, cx, move |plugin_ui, answer| {
+            if answer["closed"] != true {
+                return;
+            }
+            plugin_ui.panes.retain(|pane| pane.id != id);
+            if plugin_ui.shown_pane.as_ref() == Some(&id) {
+                plugin_ui.shown_pane = None;
+            }
+            plugin_ui.pane_offsets.remove(&id);
+            plugin_ui.cache.remove(&("Pane".to_owned(), id));
+            plugin_ui.prune_controls();
+        });
+    }
+
+    pub fn scroll_pane(
+        &self,
+        session: &Entity<AgentSession>,
+        id: &str,
+        by: i32,
+        body_rows: u32,
+        content_rows: u32,
+        cx: &mut Context<ChatView>,
+    ) {
+        let request = json!({
+            "subtype": "ui_scroll",
+            "surface": SURFACE,
+            "client_id": self.client_id,
+            "component": "Pane",
+            "instance_id": id,
+            "offset": self.pane_offsets.get(id).copied().unwrap_or(0),
+            "by": by,
+            "body_rows": body_rows,
+            "content_rows": content_rows,
+        });
+        let id = id.to_owned();
+        self.pane_request(session, request, cx, move |plugin_ui, answer| {
+            // A refused scroll leaves the pane where it was.
+            if answer["deny"].is_string() {
+                return;
+            }
+            if let Some(offset) = answer["offset"]
+                .as_u64()
+                .and_then(|offset| u32::try_from(offset).ok())
+            {
+                plugin_ui.pane_offsets.insert(id, offset);
+            }
+        });
     }
 
     /// Drops the toasts whose time is up at `now`; true when any went.
@@ -750,10 +926,12 @@ impl PluginUi {
 
 impl ChatView {
     /// Attaches from draw time, since only a frame being drawn proves the chat is visible; `Item::deactivated` detaches.
-    pub(super) fn sync_plugin_ui(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let session = self.session.read(cx);
-        self.plugin_ui.follow_run(session.runs_started());
-        if !self.plugin_ui.wants_attach(session) {
+    pub(super) fn sync_plugin_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.plugin_ui
+            .follow_run(self.session.read(cx).runs_started());
+        self.plugin_ui.rem = window.rem_size();
+        self.sync_plugin_panes(window, cx);
+        if !self.plugin_ui.wants_attach(self.session.read(cx)) {
             return;
         }
         let viewport = window.viewport_size();
@@ -1424,7 +1602,7 @@ impl Drawing<'_> {
     }
 }
 
-fn caption(drawn_by: &[String], cx: &App) -> AnyElement {
+pub(super) fn caption(drawn_by: &[String], cx: &App) -> AnyElement {
     let text = match drawn_by {
         [plugin] => t!("From the {plugin} plugin", plugin = plugin),
         [others @ .., last] => t!(
@@ -1893,5 +2071,86 @@ mod tests {
 
         plugin_ui.follow_run(1);
         assert!(plugin_ui.statuses.is_empty() && plugin_ui.toasts.is_empty());
+    }
+
+    fn roster(panes: Value, shown_id: Value) -> Value {
+        json!({ "subtype": "ui_panes", "panes": panes, "shown_id": shown_id, "focused_id": null, "focus_requested_id": null })
+    }
+
+    fn pane_ids(plugin_ui: &PluginUi) -> Vec<&str> {
+        plugin_ui
+            .panes
+            .iter()
+            .map(|pane| pane.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn shown_id_selects_the_visible_pane() {
+        let mut plugin_ui = PluginUi::new();
+        assert!(plugin_ui.visible_pane().is_none());
+        let panes = json!([
+            { "id": "a", "plugin": "p", "title": "A" },
+            { "id": "b", "plugin": "p", "title": "B" },
+        ]);
+        let visible = |plugin_ui: &PluginUi| plugin_ui.visible_pane().map(|pane| pane.id.clone());
+        plugin_ui.apply_event(&roster(panes.clone(), json!("b")), Instant::now());
+        assert_eq!(visible(&plugin_ui).as_deref(), Some("b"));
+        plugin_ui.apply_event(&roster(panes.clone(), json!("gone")), Instant::now());
+        assert_eq!(
+            visible(&plugin_ui).as_deref(),
+            Some("a"),
+            "an unknown shown id falls back to the first pane"
+        );
+        plugin_ui.apply_event(&roster(panes, Value::Null), Instant::now());
+        assert_eq!(visible(&plugin_ui).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn invalid_background_color_is_ignored() {
+        let mut plugin_ui = PluginUi::new();
+        plugin_ui.apply_event(
+            &roster(
+                json!([
+                    { "id": "a", "plugin": "p", "background_color": "#ff000080" },
+                    { "id": "b", "plugin": "p", "background_color": "red" },
+                    { "id": "c", "plugin": "p", "background_color": "#zzzzzz" },
+                    { "id": "d", "plugin": "p", "background_color": 7 },
+                    { "id": "e", "plugin": "p", "title": 5, "rows": 99_999_999_999u64, "columns": -3 },
+                    { "plugin": "p", "title": "no id" },
+                    { "id": "f", "title": "no plugin" },
+                    "junk",
+                ]),
+                json!(42),
+            ),
+            Instant::now(),
+        );
+        assert_eq!(pane_ids(&plugin_ui), ["a", "b", "c", "d", "e"]);
+        let backgrounds = plugin_ui
+            .panes
+            .iter()
+            .map(|pane| pane.background.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(backgrounds, [true, false, false, false, false]);
+        let malformed = &plugin_ui.panes[4];
+        assert_eq!(malformed.title, "e", "a pane without a title shows its id");
+        assert_eq!((malformed.rows, malformed.columns), (None, None));
+        assert_eq!(plugin_ui.shown_pane, None);
+    }
+
+    #[test]
+    fn pane_size_is_clamped_to_the_side_pane() {
+        let pane = |rows: Option<u32>, columns: Option<u32>| PaneInfo {
+            id: "a".into(),
+            plugin: "p".into(),
+            title: "A".into(),
+            close_on_escape: false,
+            background: None,
+            rows,
+            columns,
+        };
+        assert_eq!(pane_cells(&pane(None, None), 80, 40), (80, 40));
+        assert_eq!(pane_cells(&pane(Some(5), Some(500)), 80, 40), (80, 5));
+        assert_eq!(pane_cells(&pane(Some(0), Some(u32::MAX)), 80, 40), (80, 1));
     }
 }
