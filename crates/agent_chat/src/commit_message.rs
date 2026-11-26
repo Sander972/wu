@@ -1,8 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use agent_harness::{
-    AgentEvent, CancellationToken, DoneStatus, Harness, Model, PermissionMode, ReasoningLevel,
-    RunControls, RunRequest,
+    AgentEvent, CancellationToken, ClaudeLaunch, DoneStatus, Harness, Model, PermissionMode,
+    ReasoningLevel, RunControls, RunRequest,
 };
 use anyhow::{Result, anyhow};
 use futures::StreamExt as _;
@@ -131,7 +131,7 @@ async fn run_once(
         ephemeral: true,
         resume_interrupted: false,
         prompt_suggestions: false,
-        launch: Default::default(),
+        launch: ClaudeLaunch::current(),
         context: Vec::new(),
     };
     let (steering_tx, steering) = tokio::sync::mpsc::channel(1);

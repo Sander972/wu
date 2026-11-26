@@ -168,6 +168,21 @@ impl ModelContext {
     pub(crate) fn key(&self) -> [u8; 32] {
         Sha256::digest(self.hash.as_bytes()).into()
     }
+    /// Discovery runs with the launch settings' environment and wrapper, so changing them must change the key.
+    pub(crate) fn with_launch(mut self, launch: &crate::ClaudeLaunch) -> Self {
+        if launch.environment.is_empty() && launch.process_wrapper.is_none() {
+            return self;
+        }
+        let mut hash = Sha256::new();
+        field(&mut hash, self.hash.as_bytes());
+        for (key, value) in &launch.environment {
+            field(&mut hash, key.as_bytes());
+            field(&mut hash, value.as_bytes());
+        }
+        field(&mut hash, launch.process_wrapper.as_deref().unwrap_or_default().as_bytes());
+        self.hash = format!("{:x}", hash.finalize());
+        self
+    }
     pub(crate) fn log(&self) {
         tracing::info!(binary_path = %self.binary_path.display(), binary_version = self.binary_version.as_deref().unwrap_or("unknown"), "Model discovery binary");
     }
@@ -194,6 +209,36 @@ mod tests {
         assert!(!first.contains("account"));
         std::fs::remove_file(&file).unwrap();
         assert_eq!(key(), missing);
+    }
+
+    #[test]
+    fn launch_settings_change_the_key_unless_they_are_empty() {
+        let context = || ModelContext {
+            hash: "base".into(),
+            binary_path: PathBuf::new(),
+            binary_version: None,
+        };
+        let launch = |environment: &[(&str, &str)], wrapper: Option<&str>| crate::ClaudeLaunch {
+            environment: environment
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            process_wrapper: wrapper.map(String::from),
+            ..Default::default()
+        };
+        let plain = context().with_launch(&launch(&[], None)).hash;
+        assert_eq!(plain, "base");
+        let with_environment = context()
+            .with_launch(&launch(&[("ANTHROPIC_BASE_URL", "https://one")], None))
+            .hash;
+        let other_environment = context()
+            .with_launch(&launch(&[("ANTHROPIC_BASE_URL", "https://two")], None))
+            .hash;
+        let with_wrapper = context().with_launch(&launch(&[], Some("wsl"))).hash;
+        let hashes = [plain, with_environment, other_environment, with_wrapper];
+        for (index, hash) in hashes.iter().enumerate() {
+            assert!(!hashes[..index].contains(hash));
+        }
     }
 
     #[test]

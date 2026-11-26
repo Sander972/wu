@@ -304,6 +304,7 @@ impl ClaudeHarness {
 
     fn discovery_context(&self) -> Result<crate::ModelContext, HarnessError> {
         crate::model_context::context(self.id(), &self.resolve_executable()?, &[])
+            .map(|context| context.with_launch(&ClaudeLaunch::current()))
     }
 
     async fn initialize(&self) -> Result<Value, HarnessError> {
