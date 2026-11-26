@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::process::Stdio;
 
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const CLI_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, PartialEq)]
 pub enum UpdateOutcome {
@@ -14,6 +15,10 @@ pub enum UpdateOutcome {
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct UpdateFailed(pub String);
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct CliFailed(pub String);
 
 /// `installed_after` finds the CLI again, since an update can install a new copy that takes over.
 pub async fn update_cli(
@@ -26,9 +31,11 @@ pub async fn update_cli(
         &executable,
         args,
         &crate::executable::scratch_dir(),
+        UPDATE_TIMEOUT,
         i18n::t!("The update took too long.").to_string(),
     )
-    .await?;
+    .await
+    .map_err(UpdateFailed)?;
     if !output.status.success() {
         return Err(UpdateFailed(failure_reason(&output)));
     }
@@ -44,19 +51,21 @@ pub async fn update_cli(
 }
 
 /// Runs the CLI with `args` as separate arguments, never through a shell, and fails with its stderr when it exits unsuccessfully.
-pub async fn run_cli(executable: &Path, args: &[String], cwd: &Path) -> Result<(), UpdateFailed> {
+pub async fn run_cli(executable: &Path, args: &[String], cwd: &Path) -> Result<(), CliFailed> {
     let output = run(
         executable,
         args,
         cwd,
+        CLI_COMMAND_TIMEOUT,
         i18n::t!("The command took too long.").to_string(),
     )
-    .await?;
+    .await
+    .map_err(CliFailed)?;
     if output.status.success() {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(UpdateFailed(match stderr.trim() {
+    Err(CliFailed(match stderr.trim() {
         "" => failure_reason(&output),
         stderr => stderr.to_owned(),
     }))
@@ -66,8 +75,9 @@ async fn run(
     executable: &Path,
     args: &[impl AsRef<std::ffi::OsStr>],
     cwd: &Path,
+    timeout: Duration,
     timed_out: String,
-) -> Result<std::process::Output, UpdateFailed> {
+) -> Result<std::process::Output, String> {
     let mut command = crate::process::command(executable);
     command
         .args(args)
@@ -77,10 +87,10 @@ async fn run(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     crate::compose_child_path(&mut command, executable);
-    tokio::time::timeout(UPDATE_TIMEOUT, command.output())
+    tokio::time::timeout(timeout, command.output())
         .await
-        .map_err(|_| UpdateFailed(timed_out))?
-        .map_err(|error| UpdateFailed(error.to_string()))
+        .map_err(|_| timed_out)?
+        .map_err(|error| error.to_string())
 }
 
 async fn version_of(executable: &Path) -> Option<semver::Version> {

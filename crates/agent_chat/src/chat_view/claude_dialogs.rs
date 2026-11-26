@@ -49,6 +49,7 @@ pub(crate) enum RowAction {
     Shell {
         label: SharedString,
         arguments: Vec<String>,
+        confirmation: SharedString,
     },
     Authenticate {
         label: SharedString,
@@ -280,7 +281,7 @@ pub(crate) fn sandbox_sections(response: &Value) -> Vec<DialogSection> {
 const MCP_TRANSPORTS: [&str; 3] = ["http", "sse", "stdio"];
 const MCP_SCOPES: [&str; 3] = ["local", "user", "project"];
 
-pub(crate) fn mcp_sections(response: &Value) -> Vec<DialogSection> {
+pub(crate) fn mcp_sections(response: &Value, live_run: bool) -> Vec<DialogSection> {
     let mut sections = Vec::new();
     for server in items(response, "mcpServers") {
         let Some(name) = text(server, "name") else {
@@ -295,23 +296,27 @@ pub(crate) fn mcp_sections(response: &Value) -> Vec<DialogSection> {
             request["enabled"] = json!(enabled);
             control(label, request)
         };
+        // Reconnecting and the OAuth callback need a CLI process that outlives the request, which a one-off process doesn't.
+        let reconnect = || control(t!("Reconnect"), named("mcp_reconnect"));
         let mut actions = match status.as_ref() {
             "connected" => {
-                let mut actions = vec![
-                    toggle(t!("Disable"), false),
-                    control(t!("Reconnect"), named("mcp_reconnect")),
-                ];
+                let mut actions = vec![toggle(t!("Disable"), false)];
+                actions.extend(live_run.then(reconnect));
                 if matches!(server["config"]["type"].as_str(), Some("http" | "sse")) {
                     actions.push(control(t!("Clear authentication"), named("mcp_clear_auth")));
                 }
                 actions
             }
             "disabled" => vec![toggle(t!("Enable"), true)],
-            "failed" => vec![control(t!("Reconnect"), named("mcp_reconnect"))],
-            "needs-auth" => vec![RowAction::Authenticate {
-                label: t!("Authenticate"),
-                request: named("mcp_authenticate"),
-            }],
+            "pending" => vec![toggle(t!("Disable"), false)],
+            "failed" => live_run.then(reconnect).into_iter().collect(),
+            "needs-auth" => live_run
+                .then(|| RowAction::Authenticate {
+                    label: t!("Authenticate"),
+                    request: named("mcp_authenticate"),
+                })
+                .into_iter()
+                .collect(),
             _ => Vec::new(),
         };
         let scope = text(server, "scope");
@@ -321,9 +326,14 @@ pub(crate) fn mcp_sections(response: &Value) -> Vec<DialogSection> {
         {
             actions.push(RowAction::Shell {
                 label: t!("Remove"),
-                arguments: ["mcp", "remove", "--scope", scope, name_text]
+                arguments: ["mcp", "remove", "--scope", scope, "--", name_text]
                     .map(String::from)
                     .into(),
+                confirmation: t!(
+                    "Removed {name} from {scope} config. Running sessions keep it until restarted.",
+                    name = name_text,
+                    scope = scope
+                ),
             });
         }
         let tool_count = items(server, "tools").count();
@@ -340,28 +350,35 @@ pub(crate) fn mcp_sections(response: &Value) -> Vec<DialogSection> {
 }
 
 fn add_server_arguments(transport: &str, scope: &str, name: &str, target: &str) -> Vec<String> {
-    [
+    let mut arguments: Vec<String> = [
         "mcp",
         "add",
-        "--transport",
-        transport,
         "--scope",
         scope,
+        "--transport",
+        transport,
+        "--",
         name,
-        target,
     ]
     .map(String::from)
-    .into()
+    .into();
+    if transport == "stdio" {
+        // shortcut: a stdio command is split on whitespace, so quoted arguments are not supported; upgrade when a server needs one.
+        arguments.extend(target.split_whitespace().map(String::from));
+    } else {
+        arguments.push(target.to_string());
+    }
+    arguments
 }
 
-/// The CLI would read a leading dash as one of its own options, since the arguments carry no `--` separator.
+/// The name stays a plain word because the CLI would read a leading dash in it as an option of its own.
 fn server_input_error(name: &str, target: &str) -> Option<SharedString> {
     if name.is_empty() {
         Some(t!("Enter a server name."))
     } else if target.is_empty() {
         Some(t!("Enter a URL or a command."))
-    } else if name.starts_with('-') || target.starts_with('-') {
-        Some(t!("The name and the address can't start with a dash."))
+    } else if name.starts_with('-') {
+        Some(t!("The name can't start with a dash."))
     } else {
         None
     }
@@ -429,6 +446,7 @@ pub(crate) struct ClaudeDialog {
     state: DialogState,
     can_add_server: bool,
     form: Option<AddServerForm>,
+    confirmation: Option<SharedString>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
     _pending: Task<()>,
@@ -459,6 +477,7 @@ impl ClaudeDialog {
             state: DialogState::Loading,
             can_add_server: false,
             form: None,
+            confirmation: None,
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
             _pending: Task::ready(()),
@@ -527,14 +546,14 @@ impl ClaudeDialog {
                     )
                 });
                 cx.spawn(async move |_| {
-                    let mut sections = mcp_sections(&status.await?);
+                    let mut sections = mcp_sections(&status.await?, live_run);
                     if !live_run {
                         sections.insert(
                             0,
                             DialogSection {
                                 title: t!("Note"),
                                 rows: vec![DialogRow::new(t!(
-                                    "Start a turn first: enabling, disabling and reconnecting servers applies to the running Claude session."
+                                    "Start a turn first: reconnecting and authenticating servers needs the running Claude session."
                                 ))],
                             },
                         );
@@ -572,6 +591,7 @@ impl ClaudeDialog {
         cx: &mut Context<Self>,
     ) {
         self.state = DialogState::Loading;
+        self.confirmation = None;
         self._pending = cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| match result {
@@ -593,11 +613,24 @@ impl ClaudeDialog {
         self.settle(answer, |this, _, cx| this.reload(cx), cx);
     }
 
-    fn run_shell(&mut self, arguments: Vec<String>, cx: &mut Context<Self>) {
+    /// The reloaded list can still be the running agent's stale one, so `confirmation` says what changed.
+    fn run_shell(
+        &mut self,
+        arguments: Vec<String>,
+        confirmation: SharedString,
+        cx: &mut Context<Self>,
+    ) {
         let finished = self
             .session
             .update(cx, |session, cx| session.run_cli(arguments, cx));
-        self.settle(finished, |this, (), cx| this.reload(cx), cx);
+        self.settle(
+            finished,
+            |this, (), cx| {
+                this.confirmation = Some(confirmation);
+                this.reload(cx);
+            },
+            cx,
+        );
     }
 
     fn authenticate(&mut self, request: Value, cx: &mut Context<Self>) {
@@ -648,8 +681,13 @@ impl ClaudeDialog {
             return;
         }
         let arguments = add_server_arguments(form.transport, form.scope, &name, &target);
+        let confirmation = t!(
+            "Added {name} to {scope} config. It will be available in new sessions.",
+            name = name,
+            scope = form.scope
+        );
         self.form = None;
-        self.run_shell(arguments, cx);
+        self.run_shell(arguments, confirmation, cx);
     }
 
     fn open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -748,12 +786,16 @@ impl ClaudeDialog {
                     })
                     .into_any_element()
             }
-            RowAction::Shell { label, arguments } => {
-                let arguments = arguments.clone();
+            RowAction::Shell {
+                label,
+                arguments,
+                confirmation,
+            } => {
+                let (arguments, confirmation) = (arguments.clone(), confirmation.clone());
                 Button::new(id, label.clone())
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.run_shell(arguments.clone(), cx)),
-                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.run_shell(arguments.clone(), confirmation.clone(), cx)
+                    }))
                     .into_any_element()
             }
             RowAction::Authenticate { label, request } => {
@@ -932,6 +974,14 @@ impl Render for ClaudeDialog {
                     }
                 }
             }
+        }
+        if let (Some(confirmation), DialogState::Loaded(_)) = (&self.confirmation, &self.state)
+            && self.form.is_none()
+        {
+            sections.insert(
+                0,
+                Section::new().child(Label::new(confirmation.clone()).color(Color::Success)),
+            );
         }
         let failed = matches!(self.state, DialogState::Failed(_));
         let can_add = self.can_add_server && matches!(self.state, DialogState::Loaded(_));
@@ -1282,7 +1332,11 @@ mod tests {
     }
 
     fn mcp_row(response: &Value, name: &str) -> DialogRow {
-        mcp_sections(response)
+        mcp_row_in(response, name, true)
+    }
+
+    fn mcp_row_in(response: &Value, name: &str, live_run: bool) -> DialogRow {
+        mcp_sections(response, live_run)
             .into_iter()
             .flat_map(|section| section.rows)
             .find(|row| row.label == name)
@@ -1324,7 +1378,7 @@ mod tests {
             Some("spawn ENOENT")
         );
         assert_eq!(labels("linear"), [t!("Authenticate"), t!("Remove")]);
-        assert_eq!(labels("booting"), Vec::<SharedString>::new());
+        assert_eq!(labels("booting"), [t!("Disable")]);
         assert_eq!(
             labels("plugin"),
             [t!("Disable"), t!("Reconnect"), t!("Clear authentication")]
@@ -1360,11 +1414,36 @@ mod tests {
             github.actions[3],
             RowAction::Shell {
                 label: t!("Remove"),
-                arguments: ["mcp", "remove", "--scope", "project", "github"]
+                arguments: ["mcp", "remove", "--scope", "project", "--", "github"]
                     .map(String::from)
                     .into(),
+                confirmation: t!(
+                    "Removed {name} from {scope} config. Running sessions keep it until restarted.",
+                    name = "github",
+                    scope = "project"
+                ),
             }
         );
+    }
+
+    #[test]
+    fn mcp_rows_without_a_live_run_hide_reconnect_and_authenticate() {
+        let response = json!({
+            "mcpServers": [
+                { "name": "github", "status": "connected", "scope": "project", "config": { "type": "http" } },
+                { "name": "broken", "status": "failed", "scope": "user" },
+                { "name": "linear", "status": "needs-auth", "scope": "user" },
+                { "name": "off", "status": "disabled", "scope": "user" }
+            ]
+        });
+        let labels = |name: &str| action_labels(&mcp_row_in(&response, name, false));
+        assert_eq!(
+            labels("github"),
+            [t!("Disable"), t!("Clear authentication"), t!("Remove")]
+        );
+        assert_eq!(labels("broken"), [t!("Remove")]);
+        assert_eq!(labels("linear"), [t!("Remove")]);
+        assert_eq!(labels("off"), [t!("Enable"), t!("Remove")]);
     }
 
     #[test]
@@ -1374,12 +1453,29 @@ mod tests {
             [
                 "mcp",
                 "add",
-                "--transport",
-                "http",
                 "--scope",
                 "user",
+                "--transport",
+                "http",
+                "--",
                 "github",
                 "https://example.com/mcp"
+            ]
+        );
+        assert_eq!(
+            add_server_arguments("stdio", "local", "notes", "npx -y  some-pkg"),
+            [
+                "mcp",
+                "add",
+                "--scope",
+                "local",
+                "--transport",
+                "stdio",
+                "--",
+                "notes",
+                "npx",
+                "-y",
+                "some-pkg"
             ]
         );
     }
@@ -1388,15 +1484,15 @@ mod tests {
     fn server_names_are_passed_as_single_arguments() {
         let name = "my server; rm -rf /";
         let add = add_server_arguments("stdio", "local", name, "npx");
-        assert_eq!(add.len(), 8);
-        assert_eq!(add[6], name);
+        assert_eq!(add.len(), 9);
+        assert_eq!(add[7], name);
         let response =
             json!({ "mcpServers": [{ "name": name, "status": "disabled", "scope": "local" }] });
         let Some(RowAction::Shell { arguments, .. }) = mcp_row(&response, name).actions.pop()
         else {
             panic!("the row offers no removal");
         };
-        assert_eq!(arguments, ["mcp", "remove", "--scope", "local", name]);
+        assert_eq!(arguments, ["mcp", "remove", "--scope", "local", "--", name]);
     }
 
     #[test]
@@ -1405,7 +1501,7 @@ mod tests {
         assert!(server_input_error("", "https://example.com/mcp").is_some());
         assert!(server_input_error("github", "").is_some());
         assert!(server_input_error("--scope", "https://example.com/mcp").is_some());
-        assert!(server_input_error("github", "--help").is_some());
+        assert!(server_input_error("github", "--help").is_none());
     }
 
     #[test]
