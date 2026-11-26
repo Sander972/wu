@@ -28,13 +28,24 @@ pub(super) enum SidePaneContent {
         target: FileTarget,
         editor: Entity<Editor>,
     },
+    SideQuestions,
+}
+
+/// A `/btw` question that has no answer in the session yet.
+pub(super) enum PendingSideQuestion {
+    Asking(String),
+    Failed {
+        question: String,
+        message: SharedString,
+    },
 }
 
 impl SidePaneContent {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
+    fn focus_handle(&self, cx: &App) -> Option<FocusHandle> {
         match self {
-            SidePaneContent::Subagent { view, .. } => view.focus_handle(cx),
-            SidePaneContent::File { editor, .. } => editor.focus_handle(cx),
+            SidePaneContent::Subagent { view, .. } => Some(view.focus_handle(cx)),
+            SidePaneContent::File { editor, .. } => Some(editor.focus_handle(cx)),
+            SidePaneContent::SideQuestions => None,
         }
     }
 }
@@ -62,7 +73,9 @@ impl ChatView {
                 self.side_pane_openings
             }
         };
-        window.focus(&content.focus_handle(cx), cx);
+        if let Some(focus_handle) = content.focus_handle(cx) {
+            window.focus(&focus_handle, cx);
+        }
         self.side_pane = Some(SidePane { content, opening });
         cx.notify();
     }
@@ -178,12 +191,132 @@ impl ChatView {
         });
     }
 
+    pub(super) fn ask_side_question(
+        &mut self,
+        question: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(
+            self.side_pane_content(),
+            Some(SidePaneContent::SideQuestions)
+        ) {
+            self.show_in_side_pane(SidePaneContent::SideQuestions, window, cx);
+        }
+        let Some(question) = question else {
+            return;
+        };
+        self.pending_side_question = Some(PendingSideQuestion::Asking(question.clone()));
+        let reply = self.session.update(cx, |session, cx| {
+            session.control(
+                serde_json::json!({ "subtype": "side_question", "question": question }),
+                cx,
+            )
+        });
+        self._side_question = cx.spawn(async move |this, cx| {
+            let outcome = reply.await;
+            this.update(cx, |this, cx| {
+                let answer = outcome
+                    .as_ref()
+                    .ok()
+                    .and_then(|reply| reply["response"].as_str());
+                if let Some(answer) = answer {
+                    this.pending_side_question = None;
+                    this.session.update(cx, |session, cx| {
+                        session.push_side_answer(question, answer.to_string(), cx)
+                    });
+                } else {
+                    let message = match outcome {
+                        Ok(_) => t!("The agent had no answer to that question."),
+                        Err(error) => error.to_string().into(),
+                    };
+                    this.pending_side_question =
+                        Some(PendingSideQuestion::Failed { question, message });
+                }
+                cx.notify();
+            })
+            .log_err();
+        });
+    }
+
+    fn render_side_questions(&self, cx: &Context<Self>) -> AnyElement {
+        let answers = self.session.read(cx).side_answers();
+        let question_row = |question: String, index: Option<usize>| {
+            h_flex()
+                .gap(px(6.))
+                .items_start()
+                .child(
+                    Label::new(question)
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                )
+                .children(index.map(|index| {
+                    IconButton::new(("agent-side-answer-remove", index), IconName::Trash)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text(t!("Remove")))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.session
+                                .update(cx, |session, cx| session.remove_side_answer(index, cx))
+                        }))
+                }))
+        };
+        let pending = self.pending_side_question.as_ref().map(|pending| {
+            let (question, note) = match pending {
+                PendingSideQuestion::Asking(question) => (
+                    question.clone(),
+                    Label::new(t!("Waiting for an answer…")).color(Color::Muted),
+                ),
+                PendingSideQuestion::Failed { question, message } => (
+                    question.clone(),
+                    Label::new(message.clone()).color(Color::Error),
+                ),
+            };
+            v_flex()
+                .gap(px(4.))
+                .child(question_row(question, None))
+                .child(note)
+        });
+        let empty = pending.is_none() && answers.is_empty();
+        v_flex()
+            .id("agent-side-questions")
+            .size_full()
+            .overflow_y_scroll()
+            .p(px(12.))
+            .gap(px(16.))
+            .children(pending)
+            .children(
+                answers
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .map(|(index, (question, answer))| {
+                        v_flex()
+                            .gap(px(4.))
+                            .child(question_row(question.clone(), Some(index)))
+                            .child(div().text_sm().child(answer.clone()))
+                    }),
+            )
+            .when(empty, |this| {
+                this.child(
+                    Label::new(t!(
+                        "Ask with /btw and a question. Answers stay here and are not saved with the chat."
+                    ))
+                    .color(Color::Muted),
+                )
+            })
+            .into_any_element()
+    }
+
     pub(super) fn close_side_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._side_pane_load = Task::ready(());
         let Some(pane) = self.side_pane.take() else {
             return;
         };
-        if pane.content.focus_handle(cx).contains_focused(window, cx) {
+        if pane
+            .content
+            .focus_handle(cx)
+            .is_some_and(|focus_handle| focus_handle.contains_focused(window, cx))
+        {
             window.focus(&self.focus_handle(cx), cx);
         }
         cx.notify();
@@ -199,6 +332,7 @@ impl ChatView {
                 self.open_subagent_in_tab(subagent, window, cx)
             }
             SidePaneContent::File { target, .. } => self.open_file_in_tab(target, window, cx),
+            SidePaneContent::SideQuestions => {}
         }
         cx.notify();
     }
@@ -242,6 +376,12 @@ impl ChatView {
                     subagent.title.clone(),
                     None,
                     view.clone().into_any_element(),
+                ),
+                SidePaneContent::SideQuestions => (
+                    IconName::Chat,
+                    t!("Side questions"),
+                    None,
+                    self.render_side_questions(cx),
                 ),
                 SidePaneContent::File { target, editor } => {
                     let cwd = &self.session.read(cx).metadata().cwd;

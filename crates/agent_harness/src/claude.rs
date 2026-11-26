@@ -360,6 +360,7 @@ const HIDDEN_COMMANDS: &[&str] = &[
     "auto-mode-setup",
     "autocompact",
     "bashes",
+    "btw",
     "bug",
     "clear",
     "color",

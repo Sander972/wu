@@ -2207,6 +2207,7 @@ impl ChatView {
             | AppCommand::Rewind
             | AppCommand::Export { .. }
             | AppCommand::Copy { .. }
+            | AppCommand::Btw { .. }
             | AppCommand::Login
             | AppCommand::Logout => return,
         };

@@ -103,12 +103,13 @@ pub(crate) enum AppCommand {
     Usage,
     Export { file: Option<String> },
     Copy { nth: Option<usize> },
+    Btw { question: Option<String> },
     Login,
     Logout,
 }
 
 impl AppCommand {
-    const ALL: [AppCommand; 25] = [
+    const ALL: [AppCommand; 26] = [
         AppCommand::Model,
         AppCommand::New,
         AppCommand::Resume,
@@ -135,6 +136,7 @@ impl AppCommand {
         AppCommand::Usage,
         AppCommand::Export { file: None },
         AppCommand::Copy { nth: None },
+        AppCommand::Btw { question: None },
         AppCommand::Login,
         AppCommand::Logout,
     ];
@@ -164,6 +166,7 @@ impl AppCommand {
             AppCommand::Usage => "usage",
             AppCommand::Export { .. } => "export",
             AppCommand::Copy { .. } => "copy",
+            AppCommand::Btw { .. } => "btw",
             AppCommand::Login => "login",
             AppCommand::Logout => "logout",
         }
@@ -194,6 +197,7 @@ impl AppCommand {
             AppCommand::Usage => t!("Wu: show plan usage and session cost"),
             AppCommand::Export { .. } => t!("Wu: save the conversation to a file"),
             AppCommand::Copy { .. } => t!("Wu: copy a reply to the clipboard"),
+            AppCommand::Btw { .. } => t!("Wu: ask a side question without interrupting the agent"),
             AppCommand::Login => t!("Wu: sign in to Claude"),
             AppCommand::Logout => t!("Wu: sign out of Claude"),
         }
@@ -225,6 +229,7 @@ impl AppCommand {
             | AppCommand::Usage
             | AppCommand::Export { .. }
             | AppCommand::Copy { .. }
+            | AppCommand::Btw { .. }
             | AppCommand::Login
             | AppCommand::Logout => None,
         }
@@ -323,6 +328,9 @@ pub(crate) fn app_command_for_text(text: &str, items: &[CommandItem]) -> Option<
             };
             Some(AppCommand::Copy { nth })
         }
+        CommandTarget::App(AppCommand::Btw { .. }) if item.name == name => Some(AppCommand::Btw {
+            question: (!argument.is_empty()).then(|| argument.to_string()),
+        }),
         CommandTarget::App(command) if item.name == name && argument.is_empty() => {
             Some(command.clone())
         }
@@ -460,6 +468,13 @@ mod tests {
         assert_eq!(parse("/copy 2"), Some(AppCommand::Copy { nth: Some(2) }));
         assert_eq!(parse("/copy 0"), None);
         assert_eq!(parse("/copy two"), None);
+        assert_eq!(parse("/btw"), Some(AppCommand::Btw { question: None }));
+        assert_eq!(
+            parse("/btw what file?"),
+            Some(AppCommand::Btw {
+                question: Some("what file?".into())
+            })
+        );
     }
 
     #[test]

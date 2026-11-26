@@ -176,6 +176,8 @@ pub struct ChatView {
     side_pane: Option<side_pane::SidePane>,
     side_pane_openings: usize,
     _side_pane_load: Task<()>,
+    pending_side_question: Option<side_pane::PendingSideQuestion>,
+    _side_question: Task<()>,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     store: Entity<AgentStore>,
@@ -384,6 +386,8 @@ impl ChatView {
             side_pane: None,
             side_pane_openings: 0,
             _side_pane_load: Task::ready(()),
+            pending_side_question: None,
+            _side_question: Task::ready(()),
             workspace,
             focus_handle: cx.focus_handle(),
             store,
@@ -6390,5 +6394,122 @@ mod tests {
         });
         let unrelated = send_and_record(&view, directory.path(), "something else", cx);
         assert!(!unrelated.contains("mismatched types"), "{unrelated}");
+    }
+
+    async fn side_question_view<'a>(
+        directory: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (
+        Entity<ChatView>,
+        Entity<AgentSession>,
+        &'a mut VisualTestContext,
+    ) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        let store = new_store(directory, cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.to_path_buf(), cx)
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                session.clone(),
+                store,
+                project,
+                WeakEntity::new_invalid(),
+                window,
+                cx,
+            )
+        });
+        (view, session, cx)
+    }
+
+    #[gpui::test]
+    async fn btw_sends_a_side_question_and_keeps_the_newest_20(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (view, session, cx) = side_question_view(directory.path(), cx).await;
+        view.update_in(cx, |view, window, cx| {
+            view.run_app_command(
+                AppCommand::Btw {
+                    question: Some("which-file".into()),
+                },
+                window,
+                cx,
+            )
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.side_answers().is_empty())
+        });
+        session.read_with(cx, |session, _| {
+            assert_eq!(
+                session.side_answers().front(),
+                Some(&("which-file".to_string(), "re: which-file".to_string()))
+            );
+            assert!(session.entries().is_empty());
+        });
+        view.read_with(cx, |view, _| {
+            assert!(matches!(
+                view.side_pane_content(),
+                Some(side_pane::SidePaneContent::SideQuestions)
+            ));
+            assert!(view.pending_side_question.is_none());
+        });
+        session.update(cx, |session, cx| {
+            for number in 0..20 {
+                session.push_side_answer(format!("q{number}"), format!("a{number}"), cx);
+            }
+        });
+        session.read_with(cx, |session, _| {
+            let answers = session.side_answers();
+            assert_eq!(answers.len(), 20);
+            assert_eq!(answers.front().map(|(question, _)| question.as_str()), Some("q0"));
+            assert_eq!(answers.back().map(|(question, _)| question.as_str()), Some("q19"));
+        });
+        session.update(cx, |session, cx| session.remove_side_answer(0, cx));
+        assert_eq!(session.read_with(cx, |session, _| session.side_answers().len()), 19);
+    }
+
+    #[gpui::test]
+    async fn btw_without_text_opens_the_pane(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (view, session, cx) = side_question_view(directory.path(), cx).await;
+        view.update_in(cx, |view, window, cx| {
+            view.run_app_command(AppCommand::Btw { question: None }, window, cx)
+        });
+        view.read_with(cx, |view, _| {
+            assert!(matches!(
+                view.side_pane_content(),
+                Some(side_pane::SidePaneContent::SideQuestions)
+            ));
+            assert!(view.pending_side_question.is_none());
+        });
+        assert!(session.read_with(cx, |session, _| session.side_answers().is_empty()));
+    }
+
+    #[gpui::test]
+    async fn null_response_shows_no_answer_notice(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (view, session, cx) = side_question_view(directory.path(), cx).await;
+        view.update_in(cx, |view, window, cx| {
+            view.run_app_command(
+                AppCommand::Btw {
+                    question: Some("nothing-to-say".into()),
+                },
+                window,
+                cx,
+            )
+        });
+        run_until(cx, |cx| {
+            view.read_with(cx, |view, _| {
+                matches!(
+                    view.pending_side_question,
+                    Some(side_pane::PendingSideQuestion::Failed { .. })
+                )
+            })
+        });
+        assert!(session.read_with(cx, |session, _| session.side_answers().is_empty()));
     }
 }

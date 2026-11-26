@@ -389,6 +389,13 @@ case "$first" in
     *'"subtype":"mcp_status"'*)
       emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$rid\",\"error\":\"MCP servers are unavailable\"}}"
       ;;
+    *'"subtype":"side_question"'*)
+      case "$1" in
+      *'"question":"nothing'*) reply='{"response":null}' ;;
+      *) reply="{\"response\":\"re: $(printf '%s\n' "$1" | sed 's/.*"question":"\([^"]*\)".*/\1/')\",\"synthetic\":false}" ;;
+      esac
+      emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":$reply}}"
+      ;;
     *'"subtype":"rewind_files"'*) answer_rewind "$1" "idle" ;;
     # Scenario login: like the real CLI, the callback and the wait only work in the process that started the flow, and both answer once the code arrives.
     *'"subtype":"claude_authenticate"'*)

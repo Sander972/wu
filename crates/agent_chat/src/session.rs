@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use settings::Settings as _;
 use std::{
+    collections::VecDeque,
     ops::{ControlFlow, RangeInclusive},
     path::{Path, PathBuf},
     sync::Arc,
@@ -27,6 +28,7 @@ use util::ResultExt as _;
 
 use crate::{AgentChatSettings, AgentKind};
 
+const SIDE_ANSWERS_KEPT: usize = 20;
 const FIRST_MESSAGE_TITLE_CHARS: usize = 20;
 const AGENT_TITLE_CHARS: usize = 60;
 const TOOL_OUTPUT_MAX_CHARS: usize = 200_000;
@@ -1218,6 +1220,8 @@ pub struct AgentSession {
     background_tasks: Vec<BackgroundTask>,
     known_tasks: HashMap<String, BackgroundTask>,
     run: Option<ActiveRun>,
+    /// `/btw` questions with their answers, oldest first; never saved with the chat.
+    side_answers: VecDeque<(String, String)>,
     prompt_after_stop: Option<Prompt>,
     user_stopped: bool,
     turn_prompts: usize,
@@ -1294,6 +1298,7 @@ impl AgentSession {
             background_tasks: Vec::new(),
             known_tasks: HashMap::default(),
             run: None,
+            side_answers: VecDeque::new(),
             prompt_after_stop: None,
             user_stopped: false,
             turn_prompts: 0,
@@ -1803,6 +1808,24 @@ impl AgentSession {
 
     pub fn set_draft(&mut self, draft: Prompt) {
         self.draft = Some(draft);
+    }
+
+    pub fn side_answers(&self) -> &VecDeque<(String, String)> {
+        &self.side_answers
+    }
+
+    pub fn push_side_answer(&mut self, question: String, answer: String, cx: &mut Context<Self>) {
+        self.side_answers.push_back((question, answer));
+        if self.side_answers.len() > SIDE_ANSWERS_KEPT {
+            self.side_answers.pop_front();
+        }
+        cx.notify();
+    }
+
+    pub fn remove_side_answer(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.side_answers.remove(index).is_some() {
+            cx.notify();
+        }
     }
 
     pub fn last_user_index(&self) -> Option<usize> {
