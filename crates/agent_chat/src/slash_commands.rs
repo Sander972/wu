@@ -91,10 +91,16 @@ pub(crate) enum AppCommand {
     Plan { task: Option<String>, open: bool },
     Fork { text: Option<String> },
     Rewind,
+    Status,
+    Hooks,
+    Memory,
+    Skills,
+    Sandbox,
+    OutputStyle,
 }
 
 impl AppCommand {
-    const ALL: [AppCommand; 11] = [
+    const ALL: [AppCommand; 17] = [
         AppCommand::Model,
         AppCommand::New,
         AppCommand::Resume,
@@ -109,6 +115,12 @@ impl AppCommand {
         },
         AppCommand::Fork { text: None },
         AppCommand::Rewind,
+        AppCommand::Status,
+        AppCommand::Hooks,
+        AppCommand::Memory,
+        AppCommand::Skills,
+        AppCommand::Sandbox,
+        AppCommand::OutputStyle,
     ];
 
     fn name(&self) -> &'static str {
@@ -124,6 +136,12 @@ impl AppCommand {
             AppCommand::Plan { .. } => "plan",
             AppCommand::Fork { .. } => "fork",
             AppCommand::Rewind => "rewind",
+            AppCommand::Status => "status",
+            AppCommand::Hooks => "hooks",
+            AppCommand::Memory => "memory",
+            AppCommand::Skills => "skills",
+            AppCommand::Sandbox => "sandbox",
+            AppCommand::OutputStyle => "output-style",
         }
     }
 
@@ -140,6 +158,12 @@ impl AppCommand {
             AppCommand::Plan { .. } => t!("Wu: plan before making changes"),
             AppCommand::Fork { .. } => t!("Wu: fork this chat"),
             AppCommand::Rewind => t!("Wu: rewind code or fork from a message"),
+            AppCommand::Status => t!("Wu: show Claude Code status"),
+            AppCommand::Hooks => t!("Wu: list hooks"),
+            AppCommand::Memory => t!("Wu: open memory files"),
+            AppCommand::Skills => t!("Wu: list skills"),
+            AppCommand::Sandbox => t!("Wu: show sandbox settings"),
+            AppCommand::OutputStyle => t!("Wu: choose an output style"),
         }
     }
 
@@ -156,7 +180,13 @@ impl AppCommand {
             | AppCommand::Stop
             | AppCommand::Plan { .. }
             | AppCommand::Fork { .. }
-            | AppCommand::Rewind => None,
+            | AppCommand::Rewind
+            | AppCommand::Status
+            | AppCommand::Hooks
+            | AppCommand::Memory
+            | AppCommand::Skills
+            | AppCommand::Sandbox
+            | AppCommand::OutputStyle => None,
         }
     }
 }

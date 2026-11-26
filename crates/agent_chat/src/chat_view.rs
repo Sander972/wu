@@ -1,5 +1,6 @@
 mod attachments;
 mod background_tasks;
+mod claude_dialogs;
 mod completion;
 mod composer;
 mod dictation;

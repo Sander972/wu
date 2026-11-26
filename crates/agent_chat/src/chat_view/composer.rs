@@ -1464,25 +1464,12 @@ impl ChatView {
         cx.spawn_in(window, async move |_, cx| {
             let message = match plan.await {
                 Ok(plan) => match plan["path"].as_str().filter(|_| plan["exists"] == true) {
-                    Some(path) => {
-                        let opening = workspace.update_in(cx, |workspace, window, cx| {
-                            workspace.open_abs_path(
-                                path.into(),
-                                OpenOptions {
-                                    visible: Some(OpenVisible::None),
-                                    ..Default::default()
-                                },
-                                window,
-                                cx,
-                            )
-                        })?;
-                        match opening.await {
-                            Ok(_) => return Ok(()),
-                            Err(error) => {
-                                t!("Couldn't open the plan: {error}", error = error).to_string()
-                            }
+                    Some(path) => match open_path(&workspace, path.into(), cx).await {
+                        Ok(()) => return Ok(()),
+                        Err(error) => {
+                            t!("Couldn't open the plan: {error}", error = error).to_string()
                         }
-                    }
+                    },
                     None => t!("No plan yet").to_string(),
                 },
                 Err(error) => error.to_string(),
@@ -1496,7 +1483,30 @@ impl ChatView {
         })
         .detach_and_log_err(cx);
     }
+}
 
+/// Opens a file in an editor tab without adding its folder to the project.
+pub(super) async fn open_path(
+    workspace: &WeakEntity<Workspace>,
+    path: std::path::PathBuf,
+    cx: &mut gpui::AsyncWindowContext,
+) -> anyhow::Result<()> {
+    let opening = workspace.update_in(cx, |workspace, window, cx| {
+        workspace.open_abs_path(
+            path,
+            OpenOptions {
+                visible: Some(OpenVisible::None),
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+    })?;
+    opening.await?;
+    Ok(())
+}
+
+impl ChatView {
     fn render_plan_comments(&self, question_id: &str, cx: &Context<Self>) -> Option<AnyElement> {
         let colors = cx.theme().colors();
         let editors = self.permission_editors.get(question_id)?;

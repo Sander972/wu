@@ -222,12 +222,21 @@ impl ChatView {
         let (kind, cwd) = self.session_kind_and_cwd(cx);
         let catalog = self.store.read(cx).commands(kind, &cwd);
         let mut items = command_items(catalog.map_or(&[], |catalog| catalog.commands.as_slice()));
-        // Other agents have no plan mode, which would quietly fall back to Auto, and no file checkpoints.
+        // Other agents have no plan mode, which would quietly fall back to Auto, no file checkpoints and no Claude Code dialogs.
         if kind != AgentKind::Claude {
             items.retain(|item| {
                 !matches!(
                     item.target,
-                    CommandTarget::App(AppCommand::Plan { .. } | AppCommand::Rewind)
+                    CommandTarget::App(
+                        AppCommand::Plan { .. }
+                            | AppCommand::Rewind
+                            | AppCommand::Status
+                            | AppCommand::Hooks
+                            | AppCommand::Memory
+                            | AppCommand::Skills
+                            | AppCommand::Sandbox
+                            | AppCommand::OutputStyle
+                    )
                 )
             });
         }
@@ -790,6 +799,12 @@ impl ChatView {
                     .map_or_else(|| window.mouse_position(), |bounds| bounds.origin);
                 self.show_rewind_menu(index, position, window, cx);
             }
+            AppCommand::Status
+            | AppCommand::Hooks
+            | AppCommand::Memory
+            | AppCommand::Skills
+            | AppCommand::Sandbox
+            | AppCommand::OutputStyle => self.show_claude_dialog(&command, window, cx),
             AppCommand::Settings | AppCommand::Diff | AppCommand::Files | AppCommand::Terminal => {
                 let Some(name) = command.action_name() else {
                     return;
