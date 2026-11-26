@@ -10,6 +10,7 @@ pub(crate) enum Frame {
     Assistant(MessageFrame),
     User(MessageFrame),
     RateLimit(RateLimitFrame),
+    PromptSuggestion(PromptSuggestionFrame),
     Result(ResultFrame),
     ControlRequest(ControlRequestFrame),
     Other,
@@ -158,6 +159,12 @@ pub(crate) struct ContentBlock {
 pub(crate) struct RateLimitFrame {
     #[serde(default)]
     pub rate_limit_info: RateLimitInfo,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct PromptSuggestionFrame {
+    #[serde(default)]
+    pub suggestion: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -310,6 +317,7 @@ pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
         "assistant" => Frame::Assistant(serde_json::from_value(value)?),
         "user" => Frame::User(serde_json::from_value(value)?),
         "rate_limit_event" => Frame::RateLimit(serde_json::from_value(value)?),
+        "prompt_suggestion" => Frame::PromptSuggestion(serde_json::from_value(value)?),
         "result" => Frame::Result(serde_json::from_value(value)?),
         "control_request" => Frame::ControlRequest(serde_json::from_value(value)?),
         _ => Frame::Other,
@@ -484,9 +492,14 @@ pub(crate) const PRESAVE_CALLBACK_ID: &str = "wu-presave";
 /// The in-process MCP server a run offers; its tools reach the model as `mcp__ide__<tool>`.
 pub(crate) const IDE_MCP_SERVER: &str = "ide";
 
-pub(crate) fn initialize_request_line(request_id: &str, for_run: bool) -> String {
+pub(crate) fn initialize_request_line(
+    request_id: &str,
+    for_run: bool,
+    prompt_suggestions: bool,
+) -> String {
     let mut request = json!({ "subtype": "initialize" });
     if for_run {
+        request["promptSuggestions"] = json!(prompt_suggestions);
         request["sdkMcpServers"] = json!([IDE_MCP_SERVER]);
         request["hooks"] = json!({
             "PreToolUse": [{
@@ -673,6 +686,24 @@ mod tests {
             Frame::Other
         ));
         assert!(parse_frame("not json").is_err());
+    }
+
+    #[test]
+    fn parses_prompt_suggestion_frames() {
+        match parse_frame(r#"{"type":"prompt_suggestion","suggestion":"run the tests","uuid":"u","session_id":"s"}"#)
+            .expect("parses")
+        {
+            Frame::PromptSuggestion(frame) => assert_eq!(frame.suggestion, "run the tests"),
+            other => panic!("unexpected frame: {other:?}"),
+        }
+        for enabled in [true, false] {
+            let line: Value =
+                serde_json::from_str(&initialize_request_line("r", true, enabled)).expect("json");
+            assert_eq!(line["request"]["promptSuggestions"], enabled);
+        }
+        let probe: Value =
+            serde_json::from_str(&initialize_request_line("r", false, true)).expect("json");
+        assert!(probe["request"].get("promptSuggestions").is_none());
     }
 
     #[test]

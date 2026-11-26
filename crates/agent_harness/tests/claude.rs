@@ -58,6 +58,7 @@ fn request(prompt: &str) -> RunRequest {
         drop_prompt: None,
         ephemeral: false,
         resume_interrupted: false,
+        prompt_suggestions: false,
         context: Vec::new(),
     }
 }
@@ -540,6 +541,22 @@ async fn files_are_saved_before_claude_reads_them() {
             error: None,
             session_id: Some("sess-hook".into()),
         })
+    );
+}
+
+#[tokio::test]
+async fn a_prompt_suggestion_follows_the_turn_when_asked_for() {
+    let cwd = tempfile::tempdir().expect("temporary directory");
+    let mut req = request("scenario:suggest");
+    req.cwd = cwd.path().display().to_string();
+    req.prompt_suggestions = true;
+    let (controls, _steer, _token) = controls("Allow");
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        events.contains(&AgentEvent::PromptSuggestion {
+            suggestion: "run the tests".into()
+        }),
+        "{events:?}"
     );
 }
 

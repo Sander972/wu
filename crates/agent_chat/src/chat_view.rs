@@ -196,6 +196,8 @@ pub struct ChatView {
     search_refresh_pending: bool,
     _search_refresh: Task<()>,
     has_rendered: bool,
+    /// The suggestion the composer shows as its placeholder; `None` means the usual hint.
+    suggestion_placeholder: Option<String>,
     update_check_due: bool,
     window_active: bool,
     images: Entity<image_viewer::ChatImageCache>,
@@ -337,6 +339,10 @@ impl ChatView {
             }),
             cx.subscribe(&composer, |this, _, event: &EditorEvent, cx| match event {
                 EditorEvent::BufferEdited => {
+                    if !this.composer.read(cx).is_empty(cx) {
+                        this.session
+                            .update(cx, |session, cx| session.clear_prompt_suggestion(cx));
+                    }
                     this.update_command_menu(cx);
                     cx.notify();
                 }
@@ -413,6 +419,7 @@ impl ChatView {
             search_refresh_pending: false,
             _search_refresh: Task::ready(()),
             has_rendered: false,
+            suggestion_placeholder: None,
             update_check_due: false,
             window_active: window.is_window_active(),
             images,
@@ -4331,6 +4338,9 @@ impl ChatView {
                 self.start_lookups(cx);
             }
         }
+        if self.subagent.is_none() {
+            self.sync_prompt_suggestion(window, cx);
+        }
         self.sync_transcript(cx);
         self.update_scroll_state();
         self.refresh_diagrams(cx);
@@ -4449,6 +4459,7 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::select_next_command))
             .on_action(cx.listener(Self::accept_command))
             .on_action(cx.listener(Self::dismiss_commands))
+            .on_action(cx.listener(Self::accept_prompt_suggestion))
             .on_action(cx.listener(Self::toggle_dictation))
             .on_action(cx.listener(Self::rename_chat))
             .on_action(cx.listener(Self::toggle_thinking_blocks))
@@ -4522,6 +4533,14 @@ impl EventEmitter<ItemEvent> for ChatView {}
 
 impl Item for ChatView {
     type Event = ItemEvent;
+
+    fn deactivated(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.subagent.is_none() {
+            self.session.update(cx, |session, cx| {
+                session.set_prompt_suggestions_paused(true, cx)
+            });
+        }
+    }
 
     fn tab_content(&self, params: TabContentParams, _: &Window, cx: &App) -> AnyElement {
         let session = self.session.read(cx);
@@ -4739,9 +4758,11 @@ fn tab_dot(needs_input: bool, working: bool, unseen: bool) -> Option<TabDot> {
 mod tests {
     use super::*;
     use crate::{
-        AcceptCommand, AgentKind, DismissCommands, SelectNextCommand, SelectPreviousCommand,
-        session::tests::{feed_prompt, new_store, run_until},
+        AcceptCommand, AcceptPromptSuggestion, AgentKind, DismissCommands, SelectNextCommand,
+        SelectPreviousCommand,
+        session::tests::{feed_events, feed_prompt, new_store, run_until},
     };
+    use agent_harness::{AgentEvent, DoneStatus};
     use editor::CodeActionProvider as _;
     use gpui::{KeyBinding, TestAppContext, VisualTestContext};
     use project::FakeFs;
@@ -4775,6 +4796,11 @@ mod tests {
                 KeyBinding::new("down", SelectNextCommand, menu),
                 KeyBinding::new("enter", AcceptCommand, menu),
                 KeyBinding::new("escape", DismissCommands, menu),
+                KeyBinding::new(
+                    "tab",
+                    AcceptPromptSuggestion,
+                    Some("AgentComposer && prompt_suggestion && !command_menu > Editor"),
+                ),
             ]);
         });
     }
@@ -6029,6 +6055,161 @@ mod tests {
         cx.simulate_input("lib");
         cx.run_until_parked();
         assert_eq!(matches(&view, cx), ["lib.rs", "lib"]);
+    }
+
+    async fn chat_with_suggestion<'a>(
+        suggestion: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (
+        Entity<AgentSession>,
+        Entity<ChatView>,
+        &'a mut VisualTestContext,
+    ) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            editor::init(cx);
+        });
+        bind_composer_keys(cx);
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| store.skip_plan_usage());
+        let project = project::Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                session.clone(),
+                store.clone(),
+                project,
+                WeakEntity::new_invalid(),
+                window,
+                cx,
+            )
+        });
+        view.update_in(cx, |view, window, cx| {
+            window.focus(&view.composer.focus_handle(cx), cx)
+        });
+        feed_events(
+            &session,
+            vec![
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+                AgentEvent::PromptSuggestion {
+                    suggestion: suggestion.into(),
+                },
+            ],
+            cx,
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (session, view, cx)
+    }
+
+    fn suggestion_of(session: &Entity<AgentSession>, cx: &mut VisualTestContext) -> Option<String> {
+        session.read_with(cx, |session, _| {
+            session.prompt_suggestion().map(str::to_string)
+        })
+    }
+
+    #[gpui::test]
+    async fn tab_accepts_the_suggestion_only_when_empty(cx: &mut TestAppContext) {
+        let (session, view, cx) = chat_with_suggestion("run the tests", cx).await;
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.shown_prompt_suggestion(cx)),
+            Some("run the tests".to_string())
+        );
+        assert_eq!(
+            view.update(cx, |view, cx| view
+                .composer
+                .update(cx, |editor, cx| editor.placeholder_text(cx))),
+            Some("run the tests".to_string())
+        );
+        cx.simulate_keystrokes("tab");
+        assert_eq!(composer_text(&view, cx), "run the tests");
+        assert_eq!(suggestion_of(&session, cx), None);
+        assert!(session.read_with(cx, |session, _| session.entries().is_empty()));
+
+        feed_events(
+            &session,
+            vec![
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+                AgentEvent::PromptSuggestion {
+                    suggestion: "and the docs".into(),
+                },
+            ],
+            cx,
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.shown_prompt_suggestion(cx)),
+            None
+        );
+        cx.simulate_keystrokes("tab");
+        assert!(composer_text(&view, cx).starts_with("run the tests"));
+    }
+
+    #[gpui::test]
+    async fn typing_clears_the_suggestion(cx: &mut TestAppContext) {
+        let (session, view, cx) = chat_with_suggestion("run the tests", cx).await;
+        cx.simulate_input("h");
+        assert_eq!(suggestion_of(&session, cx), None);
+        view.update_in(cx, |view, window, cx| {
+            view.composer
+                .update(cx, |editor, cx| editor.clear(window, cx))
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.shown_prompt_suggestion(cx)),
+            None
+        );
+        assert_eq!(
+            view.update(cx, |view, cx| view
+                .composer
+                .update(cx, |editor, cx| editor.placeholder_text(cx))),
+            Some("Ask the agent. @ for files, / for commands".to_string())
+        );
+    }
+
+    #[gpui::test]
+    async fn a_hidden_chat_pauses_suggestions_and_a_shown_one_resumes_them(
+        cx: &mut TestAppContext,
+    ) {
+        let (session, view, cx) = chat_with_suggestion("run the tests", cx).await;
+        let paused = |cx: &mut VisualTestContext| {
+            session.read_with(cx, |session, _| session.prompt_suggestions_paused())
+        };
+        assert!(paused(cx), "a window that isn't active counts as hidden");
+        cx.update(|window, _| window.activate_window());
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(!paused(cx));
+        view.update_in(cx, |view, window, cx| Item::deactivated(view, window, cx));
+        assert!(paused(cx));
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(!paused(cx));
     }
 
     #[gpui::test]

@@ -930,6 +930,7 @@ impl ClaudeHarness {
             drop_prompt: None,
             ephemeral: resume.is_none(),
             resume_interrupted: false,
+            prompt_suggestions: false,
             context: Vec::new(),
         };
         let mut cmd = self.build_command(&exe, &launch, None);
@@ -1110,7 +1111,11 @@ impl ClaudeHarness {
         let commands_scan =
             (!request.cwd.is_empty()).then(|| (PathBuf::from(&request.cwd), self.config_dir()));
         if commands_scan.is_some() {
-            let line = wire::initialize_request_line(RUN_INITIALIZE_REQUEST, true);
+            let line = wire::initialize_request_line(
+                RUN_INITIALIZE_REQUEST,
+                true,
+                request.prompt_suggestions,
+            );
             stdin_tx.send(StdinMsg::Line(line)).ok();
         }
 
@@ -2202,6 +2207,7 @@ mod tests {
                 drop_prompt: None,
                 ephemeral: false,
                 resume_interrupted: false,
+                prompt_suggestions: false,
                 context: Vec::new(),
             };
             flag_settings(&launch).get("alwaysThinkingEnabled").cloned()
@@ -2470,6 +2476,7 @@ mod tests {
             drop_prompt: None,
             ephemeral: false,
             resume_interrupted: false,
+            prompt_suggestions: false,
             context: Vec::new(),
         };
         request.model_options.insert("thinking".into(), json!("off"));
@@ -2499,6 +2506,7 @@ mod tests {
             drop_prompt: None,
             ephemeral: false,
             resume_interrupted: false,
+            prompt_suggestions: false,
             context: Vec::new(),
         };
         let harness = ClaudeHarness::new();
@@ -2537,6 +2545,7 @@ mod tests {
             drop_prompt: None,
             ephemeral: false,
             resume_interrupted: false,
+            prompt_suggestions: false,
             context: Vec::new(),
         };
         let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
@@ -2566,6 +2575,7 @@ mod tests {
             drop_prompt: None,
             ephemeral: false,
             resume_interrupted: false,
+            prompt_suggestions: false,
             context: Vec::new(),
         };
         let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
@@ -2598,6 +2608,7 @@ mod tests {
             drop_prompt: None,
             ephemeral: false,
             resume_interrupted: false,
+            prompt_suggestions: false,
             context: Vec::new(),
         };
         let command = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request, None);
@@ -2632,6 +2643,7 @@ mod tests {
             drop_prompt: None,
             ephemeral: false,
             resume_interrupted: false,
+            prompt_suggestions: false,
             context: Vec::new(),
         };
         let harness = ClaudeHarness::new();

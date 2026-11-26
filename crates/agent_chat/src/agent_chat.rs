@@ -62,6 +62,8 @@ actions!(
         AcceptCommand,
         /// Closes the slash command menu.
         DismissCommands,
+        /// Fills the empty chat box with the prompt the agent suggests.
+        AcceptPromptSuggestion,
         /// Starts or stops dictation in the chat box.
         ToggleDictation,
         /// Renames the chat from its tab.

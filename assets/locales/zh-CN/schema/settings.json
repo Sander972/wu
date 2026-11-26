@@ -475,6 +475,7 @@
   "Show the launchpad with recent projects (no tabs).": "显示包含最近的项目的启动页（无标签页）。",
   "Show the minimap on the active editor only.": "只在当前编辑器中显示缩略图。",
   "Show the minimap thumb only when the mouse is hovering over the minimap.": "只在鼠标悬停在缩略图上时显示缩略图滑块。",
+  "Show the next prompt Claude Code suggests in the empty message box after each turn; Tab accepts it.\n\nDefault: true": "在每轮结束后，于空的消息框中显示 Claude Code 建议的下一条提示词；按 Tab 接受。\n\n默认值：true",
   "Show the scrollbar if there's important information or\nfollow the system's configured behavior.": "有重要信息时显示滚动条，否则遵循系统的配置。",
   "Show unstaged hunks hollow and staged hunks with a filled background.": "未暂存的差异块显示为空心，已暂存的差异块显示为填充背景。",
   "Show unstaged hunks with a filled background and staged hunks hollow.": "未暂存的差异块显示为填充背景，已暂存的差异块显示为空心。",

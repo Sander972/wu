@@ -8364,7 +8364,7 @@ fn agent_chat_page() -> SettingsPage {
         ]
     }
 
-    fn agents_section() -> [SettingsPageItem; 10] {
+    fn agents_section() -> [SettingsPageItem; 11] {
         [
             SettingsPageItem::SectionHeader(n!("Agents")),
             SettingsPageItem::SettingItem(SettingItem {
@@ -8386,6 +8386,30 @@ fn agent_chat_page() -> SettingsPage {
                             .agent_chat
                             .get_or_insert_default()
                             .claude_in_chrome = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: n!("Suggested Prompts"),
+                description: n!(
+                    "Show the next prompt Claude Code suggests in the empty message box after each turn. Press Tab to accept it. Applies from the next message."
+                ),
+                field: Box::new(SettingField {
+                    json_path: Some("agent_chat.prompt_suggestions"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent_chat
+                            .as_ref()?
+                            .prompt_suggestions
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_chat
+                            .get_or_insert_default()
+                            .prompt_suggestions = value;
                     },
                 }),
                 metadata: None,

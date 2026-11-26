@@ -1288,6 +1288,12 @@
     },
   },
   {
+    "context": "AgentComposer && prompt_suggestion && !command_menu > Editor",
+    "bindings": {
+      "tab": "agent_chat::AcceptPromptSuggestion",
+    },
+  },
+  {
     "context": "AgentQuestion",
     "bindings": {
       "escape": "agent_chat::Stop",

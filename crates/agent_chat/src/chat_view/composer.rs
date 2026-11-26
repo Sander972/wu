@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    AgentKind,
+    AcceptPromptSuggestion, AgentKind,
     chat_style::{composer_surface, icon, icon_size_px, tracked_upper, working_animation},
     session::AgentUpdateStatus,
 };
@@ -366,6 +366,55 @@ impl ChatView {
             }))
     }
 
+    /// The suggestion only counts while the composer is empty, and goes away once the user starts typing.
+    pub(super) fn shown_prompt_suggestion(&self, cx: &App) -> Option<String> {
+        let session = self.session.read(cx);
+        if !AgentChatSettings::get_global(cx).prompt_suggestions
+            || session.is_working()
+            || !self.composer.read(cx).is_empty(cx)
+        {
+            return None;
+        }
+        session.prompt_suggestion().map(str::to_string)
+    }
+
+    pub(super) fn sync_prompt_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paused = !window.is_window_active();
+        if self.session.read(cx).prompt_suggestions_paused() != paused {
+            self.session.update(cx, |session, cx| {
+                session.set_prompt_suggestions_paused(paused, cx)
+            });
+        }
+        let wanted = self.shown_prompt_suggestion(cx);
+        if wanted != self.suggestion_placeholder {
+            let placeholder = wanted
+                .clone()
+                .unwrap_or_else(|| t!("Ask the agent. @ for files, / for commands").to_string());
+            self.composer.update(cx, |editor, cx| {
+                editor.set_placeholder_text(&placeholder, window, cx)
+            });
+            self.suggestion_placeholder = wanted;
+        }
+    }
+
+    pub(super) fn accept_prompt_suggestion(
+        &mut self,
+        _: &AcceptPromptSuggestion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(suggestion) = self.shown_prompt_suggestion(cx) else {
+            cx.propagate();
+            return;
+        };
+        self.session
+            .update(cx, |session, cx| session.clear_prompt_suggestion(cx));
+        self.composer.update(cx, |editor, cx| {
+            editor.set_text(suggestion, window, cx);
+            editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+        });
+    }
+
     pub(super) fn render_pill(
         &self,
         radius: f32,
@@ -382,6 +431,8 @@ impl ChatView {
         }
         if show_commands {
             key_context.add("command_menu");
+        } else if self.shown_prompt_suggestion(cx).is_some() {
+            key_context.add("prompt_suggestion");
         }
         let new_chat = {
             let session = self.session.read(cx);

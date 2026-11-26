@@ -77,6 +77,7 @@ fn request(prompt: &str) -> RunRequest {
         drop_prompt: None,
         ephemeral: false,
         resume_interrupted: false,
+        prompt_suggestions: false,
         context: Vec::new(),
     }
 }

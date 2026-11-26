@@ -160,6 +160,9 @@ pub struct RunRequest {
     /// Runs again the turn that `resume`'s session was in the middle of when it was cut off, instead of sending `prompt`. Only Claude Code supports it.
     #[serde(default)]
     pub resume_interrupted: bool,
+    /// Asks the agent to suggest the next prompt after each turn. Only Claude Code supports it.
+    #[serde(default)]
+    pub prompt_suggestions: bool,
 }
 
 /// How long after a chat was cut off mid-turn its turn may still run again.
@@ -510,6 +513,10 @@ pub enum AgentEvent {
     },
     Compacting {
         active: bool,
+    },
+    /// The agent's guess at what the user sends next; an empty string withdraws it.
+    PromptSuggestion {
+        suggestion: String,
     },
     #[serde(rename_all = "camelCase")]
     TaskStarted {

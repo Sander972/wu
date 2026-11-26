@@ -157,6 +157,8 @@
     "prevent_idle_sleep": true,
     // Lets Claude Code chats use Chrome through the Claude in Chrome extension.
     "claude_in_chrome": true,
+    // Shows the next prompt Claude Code suggests in the empty message box after each turn; Tab accepts it.
+    "prompt_suggestions": true,
     // Saves unsaved changes in an open file before Claude Code reads or edits it.
     "autosave": true,
     // Sends the lines selected in the editor with your next message to Claude Code.

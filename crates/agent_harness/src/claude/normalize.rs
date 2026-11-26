@@ -814,6 +814,10 @@ impl Normalizer {
                 out
             }
 
+            Frame::PromptSuggestion(f) => vec![AgentEvent::PromptSuggestion {
+                suggestion: f.suggestion,
+            }],
+
             Frame::ControlRequest(_) | Frame::Other => Vec::new(),
         }
     }

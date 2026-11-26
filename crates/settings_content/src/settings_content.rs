@@ -1187,6 +1187,10 @@ pub struct AgentChatSettingsContent {
     ///
     /// Default: true
     pub claude_in_chrome: Option<bool>,
+    /// Show the next prompt Claude Code suggests in the empty message box after each turn; Tab accepts it.
+    ///
+    /// Default: true
+    pub prompt_suggestions: Option<bool>,
     /// Save unsaved changes in an open file before Claude Code reads or edits it.
     ///
     /// Default: true

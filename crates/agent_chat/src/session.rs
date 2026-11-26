@@ -1229,6 +1229,8 @@ pub struct AgentSession {
     working_since: Option<Instant>,
     /// Running again the turn Wu quit in the middle of.
     continuing_turn: bool,
+    prompt_suggestion: Option<String>,
+    prompt_suggestions_paused: bool,
     run_failed: bool,
     harness: Arc<dyn Harness>,
     restart_on_next_send: bool,
@@ -1311,6 +1313,8 @@ impl AgentSession {
             directory,
             working_since: None,
             continuing_turn: false,
+            prompt_suggestion: None,
+            prompt_suggestions_paused: false,
             run_failed: false,
             harness,
             restart_on_next_send: false,
@@ -1494,6 +1498,42 @@ impl AgentSession {
 
     pub fn is_working(&self) -> bool {
         self.working
+    }
+
+    pub fn prompt_suggestion(&self) -> Option<&str> {
+        self.prompt_suggestion.as_deref()
+    }
+
+    pub fn clear_prompt_suggestion(&mut self, cx: &mut Context<Self>) {
+        if self.prompt_suggestion.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn prompt_suggestions_paused(&self) -> bool {
+        self.prompt_suggestions_paused
+    }
+
+    /// A hidden chat has the agent hold back its suggestions, which it would otherwise spend a request on.
+    pub fn set_prompt_suggestions_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
+        if self.prompt_suggestions_paused == paused {
+            return;
+        }
+        self.prompt_suggestions_paused = paused;
+        if self.has_live_run() {
+            self.send_prompt_suggestions_pause(cx);
+        }
+    }
+
+    fn send_prompt_suggestions_pause(&mut self, cx: &mut Context<Self>) {
+        if self.metadata.kind != AgentKind::Claude {
+            return;
+        }
+        let request = serde_json::json!({
+            "subtype": "set_prompt_suggestions_paused",
+            "paused": self.prompt_suggestions_paused,
+        });
+        self.control(request, cx).detach_and_log_err(cx);
     }
 
     /// Without a live run, a control request goes to a one-off process, so session-scoped changes are lost.
@@ -1728,6 +1768,7 @@ impl AgentSession {
             return;
         }
         self.keep_unseen = false;
+        self.prompt_suggestion = None;
         let stopping = self.run.as_ref().is_some_and(ActiveRun::stopping);
         if self.working && self.run.is_some() && !stopping {
             if AgentChatSettings::get_global(cx).steer_while_working {
@@ -2589,6 +2630,7 @@ impl AgentSession {
             ephemeral: false,
             context: prompt.context.clone(),
             resume_interrupted: self.continuing_turn && prompt.is_empty(),
+            prompt_suggestions: AgentChatSettings::get_global(cx).prompt_suggestions,
         };
         let (steering_tx, steering_rx) = tokio::sync::mpsc::channel(32);
         let interrupt = CancellationToken::new();
@@ -2688,6 +2730,9 @@ impl AgentSession {
             permission: permission_tx,
             _events: events,
         });
+        if self.prompt_suggestions_paused {
+            self.send_prompt_suggestions_pause(cx);
+        }
         cx.notify();
     }
 
@@ -2967,6 +3012,9 @@ impl AgentSession {
                 self.turn_prompt_id.get_or_insert(id);
             }
             AgentEvent::TitleChanged { title } => self.adopt_agent_title(&title, cx),
+            AgentEvent::PromptSuggestion { suggestion } => {
+                self.prompt_suggestion = (!suggestion.trim().is_empty()).then_some(suggestion);
+            }
             AgentEvent::GeneratedImage { path, .. } => {
                 self.transcript.text_block_open = false;
                 self.transcript.entries.push(Entry::Image { path: path.into() });

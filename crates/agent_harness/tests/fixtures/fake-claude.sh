@@ -611,6 +611,19 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"listed","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-mcp"}'
   ;;
 
+*scenario:suggest*)
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-suggest"}'
+  case "$init_line" in
+  *'"promptSuggestions":true'*) ;;
+  *)
+    emit '{"type":"result","subtype":"error_during_execution","errors":["initialize did not ask for suggestions"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-suggest"}'
+    exit 0
+    ;;
+  esac
+  emit '{"type":"result","subtype":"success","result":"done","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-suggest"}'
+  emit '{"type":"prompt_suggestion","suggestion":"run the tests","uuid":"sg-1","session_id":"sess-suggest"}'
+  ;;
+
 *scenario:commands*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-commands"}'
   emit '{"type":"result","subtype":"success","result":"done","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-commands"}'
