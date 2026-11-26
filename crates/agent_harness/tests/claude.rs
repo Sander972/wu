@@ -1712,10 +1712,11 @@ async fn cloud_sessions_are_filtered_to_the_repository() {
             "https://someone:secret@github.com/example-owner/example-repo.git",
         ],
     ] {
-        let status = std::process::Command::new("git")
+        let status = tokio::process::Command::new("git")
             .args(arguments)
             .current_dir(project.path())
             .status()
+            .await
             .expect("git runs");
         assert!(status.success());
     }
