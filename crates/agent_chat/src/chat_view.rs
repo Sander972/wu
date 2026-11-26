@@ -2483,7 +2483,7 @@ impl ChatView {
         };
         let asks_to_sign_in = *is_error
             && self.session.read(cx).kind() == AgentKind::Claude
-            && text.to_lowercase().contains("not logged in");
+            && agent_harness::claude::asks_to_sign_in(text);
         let text = crate::session::translated_notice(text);
         if asks_to_sign_in {
             v_flex()

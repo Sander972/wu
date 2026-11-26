@@ -39,6 +39,12 @@ pub const PERMISSION_ALLOW: &str = "Allow";
 pub const PERMISSION_DENY: &str = "Deny";
 pub const PERMISSION_HEADER: &str = "Permission";
 pub const QUESTION_HEADER: &str = n!("Question");
+/// The notice for a turn Claude refused because it isn't signed in; kept untranslated so the chat can tell it apart and offer to sign in.
+pub const SIGN_IN_REQUIRED: &str = n!("Authentication failed. Sign in to Claude again.");
+
+pub fn asks_to_sign_in(notice: &str) -> bool {
+    notice == SIGN_IN_REQUIRED
+}
 pub const DENY_STOP: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
 pub const DENY_REASON_PREFIX: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). The user provided the following reason for the rejection: ";
 pub const KEEP_PLANNING: &str = "User chose to stay in plan mode and continue planning";
@@ -825,13 +831,15 @@ fn web_url(response: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Splits a pasted `code#state`; a bare code takes the state of the sign-in address.
-fn pasted_code(pasted: &str, authenticate: &Value) -> Result<(String, String), HarnessError> {
+const LOGIN_START_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Splits a pasted `code#state`; a bare code takes the state of the sign-in address, or none.
+fn pasted_code(pasted: &str, authenticate: &Value) -> (String, String) {
     let pasted = pasted.trim();
-    let (code, state) = match pasted.split_once('#') {
-        Some((code, state)) => (code, Some(state.to_owned())),
+    match pasted.split_once('#') {
+        Some((code, state)) => (code.to_owned(), state.to_owned()),
         None => (
-            pasted,
+            pasted.to_owned(),
             authenticate
                 .get("manualUrl")
                 .and_then(Value::as_str)
@@ -841,15 +849,9 @@ fn pasted_code(pasted: &str, authenticate: &Value) -> Result<(String, String), H
                         .split('&')
                         .find_map(|pair| pair.strip_prefix("state="))
                 })
-                .map(str::to_owned),
+                .unwrap_or_default()
+                .to_owned(),
         ),
-    };
-    match state {
-        Some(state) if !code.is_empty() && !state.is_empty() => Ok((code.to_owned(), state)),
-        _ => Err(HarnessError::Protocol(
-            t!("That doesn't look like a sign-in code. Copy the whole code from the sign-in page.")
-                .to_string(),
-        )),
     }
 }
 
@@ -944,13 +946,22 @@ impl ClaudeHarness {
         urls: tokio::sync::oneshot::Sender<LoginUrls>,
         mut codes: mpsc::Receiver<String>,
     ) -> Result<Value, HarnessError> {
-        let mut session = self.control_session(cwd).await?;
-        let authenticate = session
-            .call(serde_json::json!({
-                "subtype": "claude_authenticate",
-                "loginWithClaudeAi": true,
-            }))
-            .await?;
+        let (mut session, authenticate) = tokio::time::timeout(LOGIN_START_TIMEOUT, async {
+            let mut session = self.control_session(cwd).await?;
+            let authenticate = session
+                .call(serde_json::json!({
+                    "subtype": "claude_authenticate",
+                    "loginWithClaudeAi": true,
+                }))
+                .await?;
+            Ok::<_, HarnessError>((session, authenticate))
+        })
+        .await
+        .map_err(|_| {
+            HarnessError::Protocol(
+                t!("Claude Code didn't start the sign-in within a minute. Try again.").to_string(),
+            )
+        })??;
         urls.send(LoginUrls {
             automatic: web_url(&authenticate, "automaticUrl"),
             manual: web_url(&authenticate, "manualUrl"),
@@ -964,7 +975,7 @@ impl ClaudeHarness {
         tokio::select! {
             completed = &mut completion => completed,
             Some(pasted) = codes.recv() => {
-                let (code, state) = pasted_code(&pasted, &authenticate)?;
+                let (code, state) = pasted_code(&pasted, &authenticate);
                 let callback = session
                     .send(serde_json::json!({
                         "subtype": "claude_oauth_callback",
@@ -2098,15 +2109,18 @@ mod tests {
         let authenticate =
             json!({ "manualUrl": "https://claude.example/manual?code=true&state=from-url" });
         assert_eq!(
-            pasted_code(" abc#xyz\n", &authenticate).ok(),
-            Some(("abc".to_owned(), "xyz".to_owned()))
+            pasted_code(" abc#xyz\n", &authenticate),
+            ("abc".to_owned(), "xyz".to_owned())
         );
         assert_eq!(
-            pasted_code("abc", &authenticate).ok(),
-            Some(("abc".to_owned(), "from-url".to_owned()))
+            pasted_code("abc", &authenticate),
+            ("abc".to_owned(), "from-url".to_owned())
         );
-        assert!(pasted_code("abc", &json!({})).is_err());
-        assert!(pasted_code("#xyz", &authenticate).is_err());
+        // Like the extension, a code without a state still goes to the CLI, which explains a refusal.
+        assert_eq!(
+            pasted_code("abc", &json!({})),
+            ("abc".to_owned(), String::new())
+        );
     }
 
     async fn answer_to(

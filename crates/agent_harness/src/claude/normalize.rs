@@ -9,7 +9,7 @@ use super::wire::{ContentBlock, Frame, SystemFrame};
 
 fn assistant_error_text(code: &str) -> String {
     match code {
-        "authentication_failed" => t!("Authentication failed. Sign in to Claude again."),
+        "authentication_failed" => return super::SIGN_IN_REQUIRED.to_string(),
         "oauth_org_not_allowed" => t!("This organization isn't allowed to use Claude here."),
         "billing_error" => t!("Billing error. Check your Claude plan or payment method."),
         "rate_limit" => t!("Claude usage limit reached. Try again after the limit resets."),
@@ -876,6 +876,30 @@ mod tests {
     fn normalize_one(raw: &str) -> Vec<AgentEvent> {
         let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
         Normalizer::new().normalize(frame, false)
+    }
+
+    #[test]
+    fn a_signed_out_turn_asks_to_sign_in() {
+        // Captured from CLI 2.1.332 with an empty CLAUDE_CONFIG_DIR.
+        let frames = [
+            r#"{"type":"assistant","message":{"diagnostics":null,"id":"175d1ea6-09bd-4835-b799-984a7da4e36f","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"Not logged in · Please run /login"}],"context_management":null},"parent_tool_use_id":null,"session_id":"551720df-054b-49f0-9cd0-4ad0a0d79ef2","uuid":"f7d98206-f0a0-42af-8ab1-b50ba6a5a6aa","timestamp":"2026-11-26T09:25:41.479Z","error":"authentication_failed","is_api_error_message":true}"#,
+            r#"{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"551720df-054b-49f0-9cd0-4ad0a0d79ef2","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"modelUsage":{},"permission_denials":[],"terminal_reason":"api_error","is_error":true,"num_turns":1,"subtype":"success","api_error_status":null,"result":"Not logged in · Please run /login","type":"result","duration_ms":160,"uuid":"4dab8f08-8cb0-4349-8d52-ddd2191cf9d1"}"#,
+        ];
+        let mut normalizer = Normalizer::new();
+        let events: Vec<AgentEvent> = frames
+            .iter()
+            .flat_map(|raw| {
+                let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
+                normalizer.normalize(frame, false)
+            })
+            .collect();
+        let sign_in_notices = events
+            .iter()
+            .filter(|event| {
+                matches!(event, AgentEvent::Error { message } if super::super::asks_to_sign_in(message))
+            })
+            .count();
+        assert_eq!(sign_in_notices, 1, "{events:?}");
     }
 
     #[test]
