@@ -50,6 +50,7 @@ const SAVE_INTERVAL_WHILE_WORKING: Duration = Duration::from_secs(5);
 const RUN_INPUT_BATCH: usize = 128;
 const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const AUTO_ARCHIVE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const AUTO_ARCHIVE_STARTUP_DELAY: Duration = Duration::from_secs(60);
 const IDLE_RECHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const USAGE_FORCED_MIN_INTERVAL: Duration = Duration::from_secs(30);
@@ -3510,6 +3511,7 @@ pub struct AgentStore {
     released: HashMap<String, WeakEntity<AgentSession>>,
     idle_watch: Option<Task<()>>,
     auto_archive_watch: Option<Task<()>>,
+    auto_archive_ready: bool,
     languages: Arc<LanguageRegistry>,
     harnesses: HashMap<AgentKind, Arc<dyn Harness>>,
     catalogs: HashMap<AgentKind, ModelCatalog>,
@@ -3780,6 +3782,7 @@ impl AgentStore {
             released: HashMap::default(),
             idle_watch: None,
             auto_archive_watch: None,
+            auto_archive_ready: false,
             languages,
             harnesses: HashMap::default(),
             catalogs: HashMap::default(),
@@ -3809,7 +3812,9 @@ impl AgentStore {
         .detach();
         cx.observe_global::<settings::SettingsStore>(|store, cx| {
             store.update_idle_sleep_guard(cx);
-            store.auto_archive_stale(cx);
+            if store.auto_archive_ready {
+                store.auto_archive_stale(cx);
+            }
         })
         .detach();
         if AgentChatSettings::get_global(cx).enabled {
@@ -3978,7 +3983,6 @@ impl AgentStore {
                         }
                     }
                     this.sort();
-                    this.auto_archive_stale(cx);
                     this.watch_auto_archive(cx);
                     cx.notify();
                 })
@@ -4814,21 +4818,33 @@ impl AgentStore {
     }
 
     /// A chat held in memory is open in a tab, running, or waiting for an answer, and the store only releases it once none of that applies.
+    /// A chat is archived together with its side chats, so one side chat that must stay keeps its parent too.
     fn auto_archive_stale(&mut self, cx: &mut Context<Self>) {
         let days = AgentChatSettings::get_global(cx).archive_inactive_days;
         let now = now();
+        let may_archive = |metadata: &SessionMetadata| {
+            metadata.archived
+                || should_auto_archive(
+                    metadata,
+                    now,
+                    days,
+                    self.loaded_session(&metadata.id).is_some(),
+                    self.list_prefs.is_grouped(&metadata.id),
+                )
+        };
         let stale: Vec<String> = self
             .sessions
             .iter()
             .filter(|metadata| {
                 !metadata.archived
-                    && should_auto_archive(
-                        metadata,
-                        now,
-                        days,
-                        self.loaded_session(&metadata.id).is_some(),
-                        self.list_prefs.is_grouped(&metadata.id),
-                    )
+                    && may_archive(metadata)
+                    && self
+                        .sessions
+                        .iter()
+                        .filter(|side| {
+                            side.side_chat && side.parent_id.as_deref() == Some(&metadata.id)
+                        })
+                        .all(may_archive)
             })
             .map(|metadata| metadata.id.clone())
             .collect();
@@ -4837,16 +4853,26 @@ impl AgentStore {
         }
     }
 
+    /// The first pass waits so that chats left open in tabs have been restored, which is what marks them as open.
     fn watch_auto_archive(&mut self, cx: &mut Context<Self>) {
         self.auto_archive_watch = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(AUTO_ARCHIVE_STARTUP_DELAY)
+                .await;
+            if this
+                .update(cx, |this, _| this.auto_archive_ready = true)
+                .is_err()
+            {
+                return;
+            }
             loop {
-                cx.background_executor().timer(AUTO_ARCHIVE_INTERVAL).await;
                 if this
                     .update(cx, |this, cx| this.auto_archive_stale(cx))
                     .is_err()
                 {
                     return;
                 }
+                cx.background_executor().timer(AUTO_ARCHIVE_INTERVAL).await;
             }
         }));
     }
@@ -8461,6 +8487,107 @@ done
             assert_eq!(archived(&ids[0]), Some(false));
             assert_eq!(archived(&ids[1]), Some(true));
         });
+    }
+
+    /// Saves chats that were last used long ago, each as `(side chat's parent, pinned)`, and returns their ids.
+    fn save_stale_chats(
+        directory: &Path,
+        chats: &[(Option<usize>, bool)],
+        cx: &mut TestAppContext,
+    ) -> Vec<String> {
+        let store = new_store(directory, cx);
+        let ids: Vec<String> = store.update(cx, |store, cx| {
+            chats
+                .iter()
+                .map(|_| {
+                    let session =
+                        store.create_session(AgentKind::Claude, directory.to_path_buf(), cx);
+                    session.update(cx, |session, cx| session.touch(cx));
+                    session.read(cx).metadata().id.clone()
+                })
+                .collect()
+        });
+        store.update(cx, |store, cx| {
+            store.live.clear();
+            for (id, (parent, pinned)) in ids.iter().zip(chats) {
+                let parent_id = parent.map(|parent| ids[parent].clone());
+                store.update_session_metadata(
+                    id,
+                    |metadata| {
+                        metadata.updated_at = 1;
+                        metadata.side_chat = parent_id.is_some();
+                        metadata.parent_id = parent_id;
+                        metadata.pinned = *pinned;
+                    },
+                    cx,
+                );
+            }
+        });
+        cx.run_until_parked();
+        ids
+    }
+
+    fn archived_ids(store: &Entity<AgentStore>, cx: &mut TestAppContext) -> Vec<String> {
+        store.read_with(cx, |store, _| {
+            store
+                .sessions_metadata()
+                .filter(|metadata| metadata.archived)
+                .map(|metadata| metadata.id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn auto_archive_waits_for_open_chats_to_be_restored(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let ids = save_stale_chats(directory.path(), &[(None, false), (None, false)], cx);
+        let store = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        assert!(archived_ids(&store, cx).is_empty());
+
+        let restoring = store.update(cx, |store, cx| {
+            store.open_saved_session(ids[0].clone().into(), cx)
+        });
+        let restored = restoring.await.expect("restored chat");
+        cx.executor()
+            .advance_clock(AUTO_ARCHIVE_STARTUP_DELAY + Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(archived_ids(&store, cx), [ids[1].clone()]);
+        drop(restored);
+    }
+
+    #[gpui::test]
+    async fn auto_archive_keeps_a_chat_whose_side_chat_must_stay(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let ids = save_stale_chats(
+            directory.path(),
+            &[
+                (None, false),
+                (Some(0), true),
+                (None, false),
+                (Some(2), false),
+                (None, false),
+                (Some(4), false),
+            ],
+            cx,
+        );
+        let store = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        let open_side_chat = store
+            .update(cx, |store, cx| {
+                store.open_saved_session(ids[3].clone().into(), cx)
+            })
+            .await
+            .expect("open side chat");
+        cx.executor()
+            .advance_clock(AUTO_ARCHIVE_STARTUP_DELAY + Duration::from_secs(1));
+        cx.run_until_parked();
+        let mut expected = [ids[4].clone(), ids[5].clone()];
+        expected.sort();
+        assert_eq!(archived_ids(&store, cx), expected);
+        drop(open_side_chat);
     }
 
     #[gpui::test]
