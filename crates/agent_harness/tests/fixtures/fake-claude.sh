@@ -405,7 +405,19 @@ case "$first" in
   # A run's turn or a one-off control call (the request comes right after initialize); a `hang` request is never answered.
   answer_control() {
     rid=$(request_id "$1")
+    # Only a test that created the log wants to know which requests were sent.
+    if [ -f .cloud-requests ]; then printf '%s\n' "$1" >> .cloud-requests; fi
     case "$1" in
+    # Cloud reads answer from the anonymized fixtures; the second transcript page ends the transcript.
+    *'"subtype":"list_cloud_sessions"'*)
+      emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":$(tr -d '\r\n' < "${0%fake-claude.sh}claude/cloud-sessions.json")}}"
+      ;;
+    *'"subtype":"get_cloud_session_transcript"'*'"cursor":"cursor-page-2"'* | *'"cursor":"cursor-page-2"'*'"subtype":"get_cloud_session_transcript"'*)
+      emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{\"status\":\"ok\",\"entries\":[{\"type\":\"assistant\",\"uuid\":\"00000000-0000-4000-8000-0000000000a4\",\"parentUuid\":\"00000000-0000-4000-8000-0000000000a3\",\"sessionId\":\"00000000-0000-4000-8000-000000000001\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Example answer\"}]}}]}}}"
+      ;;
+    *'"subtype":"get_cloud_session_transcript"'*)
+      emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":$(tr -d '\r\n' < "${0%fake-claude.sh}claude/cloud-transcript.json")}}"
+      ;;
     *'"subtype":"get_plan"'*)
       emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{\"exists\":true,\"content\":\"the plan\",\"path\":\"plan.md\"}}}"
       ;;

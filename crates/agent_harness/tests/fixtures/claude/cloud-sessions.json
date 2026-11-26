@@ -1,0 +1,32 @@
+{
+  "status": "ok",
+  "sessions": [
+    {
+      "id": "session_01AAAAAAAAAAAAAAAAAAAAAAAA",
+      "title": "Example task one",
+      "updated_at": "2026-11-20T10:15:30.123Z",
+      "status": "idle",
+      "environment_kind": "anthropic_cloud",
+      "repository": { "owner": "example-owner", "name": "example-repo" },
+      "branch": "claude/example-branch-one"
+    },
+    {
+      "id": "session_01BBBBBBBBBBBBBBBBBBBBBBBB",
+      "title": "Example task two",
+      "updated_at": "2026-11-22T08:00:00Z",
+      "status": "running",
+      "environment_kind": "anthropic_cloud",
+      "repository": { "owner": "other-owner", "name": "other-repo" },
+      "branch": "claude/example-branch-two"
+    },
+    {
+      "id": "session_01CCCCCCCCCCCCCCCCCCCCCCCC",
+      "title": "",
+      "updated_at": "2026-11-21T12:00:00.000Z",
+      "status": "requires_action",
+      "environment_kind": "bridge",
+      "repository": { "owner": "Example-Owner", "name": "example-repo" }
+    }
+  ],
+  "truncated": false
+}

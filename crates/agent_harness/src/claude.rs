@@ -1,4 +1,5 @@
 pub mod catalog;
+mod cloud;
 mod discovery;
 mod history;
 pub use history::append_custom_title;
@@ -752,6 +753,55 @@ impl Harness for ClaudeHarness {
         tokio::task::spawn_blocking(move || history::read_history(&config_dir, &cwd, &session_id))
             .await
             .map_err(|error| HarnessError::Protocol(error.to_string()))?
+    }
+
+    async fn cloud_sessions(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Option<Vec<ExternalSession>>, HarnessError> {
+        if self.resolve_executable().is_err() {
+            return Ok(None);
+        }
+        let repository = cloud::origin_repository(cwd).await;
+        let response = cloud::bounded(async {
+            self.control_session(cwd)
+                .await?
+                .call(
+                    serde_json::json!({ "subtype": "list_cloud_sessions", "user_initiated": true }),
+                )
+                .await
+        })
+        .await?;
+        cloud::listed_sessions(&response, repository.as_deref())
+    }
+
+    async fn cloud_history(
+        &self,
+        cwd: &std::path::Path,
+        session_id: &str,
+    ) -> Result<Vec<AgentEvent>, HarnessError> {
+        let mut session = cloud::bounded(self.control_session(cwd)).await?;
+        let mut entries = Vec::new();
+        let mut cursor = None;
+        for _ in 0..cloud::MAX_TRANSCRIPT_PAGES {
+            let mut request = serde_json::json!({
+                "subtype": "get_cloud_session_transcript",
+                "session_id": session_id,
+            });
+            if let Some(cursor) = cursor.take() {
+                request["cursor"] = Value::String(cursor);
+            }
+            let (page, next_cursor) =
+                cloud::transcript_page(cloud::bounded(session.call(request)).await?)?;
+            entries.extend(page);
+            match next_cursor {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => return Ok(history::history_events(&entries)),
+            }
+        }
+        Err(HarnessError::Protocol(
+            n!("This cloud chat is too long to open here.").into(),
+        ))
     }
 
     async fn rename_transcript(

@@ -204,7 +204,7 @@ fn assistant_events(content: &Value) -> Vec<AgentEvent> {
     events
 }
 
-fn history_events(records: &[Value]) -> Vec<AgentEvent> {
+pub(super) fn history_events(records: &[Value]) -> Vec<AgentEvent> {
     let mut events = Vec::new();
     for record in active_branch(records) {
         let content = record.pointer("/message/content").unwrap_or(&Value::Null);

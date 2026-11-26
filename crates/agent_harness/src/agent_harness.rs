@@ -219,6 +219,23 @@ pub trait Harness: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The account's cloud chats for the GitHub repository of `cwd`, newest first; `None` when the sign-in has no cloud chats.
+    async fn cloud_sessions(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> Result<Option<Vec<ExternalSession>>, HarnessError> {
+        Ok(None)
+    }
+
+    /// A cloud chat replayed as events like `external_history`; the cloud chat itself is only read.
+    async fn cloud_history(
+        &self,
+        _cwd: &std::path::Path,
+        _session_id: &str,
+    ) -> Result<Vec<AgentEvent>, HarnessError> {
+        Ok(Vec::new())
+    }
+
     /// Writes a user-chosen chat title where the agent's own CLI reads titles from, so both apps agree.
     async fn rename_transcript(
         &self,

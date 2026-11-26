@@ -1682,3 +1682,111 @@ async fn a_slow_start_of_a_continued_turn_is_not_given_up_on() {
         "{events:?}"
     );
 }
+
+/// Every control request the fake CLI got after `initialize`, once a test created the log in `project`.
+fn cloud_requests(project: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(project.join(".cloud-requests"))
+        .expect("request log")
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("json line")["request"].clone()
+        })
+        .collect()
+}
+
+fn logged_project() -> tempfile::TempDir {
+    let project = tempfile::tempdir().expect("project folder");
+    std::fs::write(project.path().join(".cloud-requests"), "").expect("request log");
+    project
+}
+
+#[tokio::test]
+async fn cloud_sessions_are_filtered_to_the_repository() {
+    let project = logged_project();
+    for arguments in [
+        &["init", "--quiet"][..],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://someone:secret@github.com/example-owner/example-repo.git",
+        ],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(project.path())
+            .status()
+            .expect("git runs");
+        assert!(status.success());
+    }
+
+    let sessions = harness()
+        .cloud_sessions(project.path())
+        .await
+        .expect("listed")
+        .expect("a claude.ai sign-in");
+
+    let listed: Vec<(&str, &str, i64)> = sessions
+        .iter()
+        .map(|session| {
+            (
+                session.id.as_str(),
+                session.title.as_str(),
+                session.updated_at,
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("session_01CCCCCCCCCCCCCCCCCCCCCCCC", "", 1_795_262_400),
+            (
+                "session_01AAAAAAAAAAAAAAAAAAAAAAAA",
+                "Example task one",
+                1_795_169_730
+            ),
+        ]
+    );
+    assert_eq!(
+        cloud_requests(project.path()),
+        [serde_json::json!({"subtype": "list_cloud_sessions", "user_initiated": true})]
+    );
+}
+
+#[tokio::test]
+async fn cloud_transcript_pages_until_no_cursor() {
+    let project = logged_project();
+
+    let events = harness()
+        .cloud_history(project.path(), "session_01AAAAAAAAAAAAAAAAAAAAAAAA")
+        .await
+        .expect("transcript");
+
+    let summary: Vec<String> = events
+        .iter()
+        .map(|event| match event {
+            AgentEvent::UserMessage { text } => format!("user:{text}"),
+            AgentEvent::TextDelta { text } => format!("text:{text}"),
+            AgentEvent::ReasoningDelta { text } => format!("thinking:{text}"),
+            AgentEvent::ToolCall { id, .. } => format!("call:{id}"),
+            AgentEvent::ToolResult { id, .. } => format!("result:{id}"),
+            AgentEvent::AssistantMessageCompleted { .. } => "end".into(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            "user:Example request",
+            "thinking:Example thought",
+            "call:toolu_01EXAMPLE",
+            "result:toolu_01EXAMPLE",
+            "text:Example answer",
+            "end",
+        ]
+    );
+    let first = serde_json::json!({"subtype": "get_cloud_session_transcript", "session_id": "session_01AAAAAAAAAAAAAAAAAAAAAAAA"});
+    let mut second = first.clone();
+    second["cursor"] = "cursor-page-2".into();
+    assert_eq!(cloud_requests(project.path()), [first, second]);
+}

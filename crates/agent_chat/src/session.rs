@@ -5500,6 +5500,18 @@ impl AgentStore {
         })
     }
 
+    /// The account's cloud chats for the repository of `cwd`; `None` when the sign-in has none.
+    pub fn cloud_sessions(
+        &mut self,
+        kind: AgentKind,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<Vec<ExternalSession>>>> {
+        let harness = self.harness(kind);
+        let listing = spawn_agent_work(cx, async move { harness.cloud_sessions(&cwd).await });
+        cx.background_spawn(async move { Ok(listing.await??) })
+    }
+
     /// The agent copies the saved chat on the first message, so the original stays as it was.
     pub fn continue_external(
         &mut self,
@@ -5508,11 +5520,39 @@ impl AgentStore {
         external: ExternalSession,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<AgentSession>>> {
+        self.continue_saved(kind, cwd, external, false, cx)
+    }
+
+    /// Reads the cloud chat once into a new local chat, whose first message carries that history; the cloud chat is never resumed or changed.
+    pub fn continue_cloud(
+        &mut self,
+        kind: AgentKind,
+        cwd: PathBuf,
+        external: ExternalSession,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<AgentSession>>> {
+        self.continue_saved(kind, cwd, external, true, cx)
+    }
+
+    fn continue_saved(
+        &mut self,
+        kind: AgentKind,
+        cwd: PathBuf,
+        external: ExternalSession,
+        cloud: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<AgentSession>>> {
         let harness = self.harness(kind);
         let history = spawn_agent_work(cx, {
             let cwd = cwd.clone();
             let id = external.id.clone();
-            async move { harness.external_history(&cwd, &id).await }
+            async move {
+                if cloud {
+                    harness.cloud_history(&cwd, &id).await
+                } else {
+                    harness.external_history(&cwd, &id).await
+                }
+            }
         });
         cx.spawn(async move |this, cx| {
             let events = history.await??;
@@ -5520,7 +5560,7 @@ impl AgentStore {
                 let mut metadata =
                     SessionMetadata::new(kind, cwd, this.new_chat_settings(kind, cx));
                 metadata.title = agent_title(&external.title);
-                metadata.fork_source = Some(external.id);
+                metadata.fork_source = (!cloud).then_some(external.id);
                 let session =
                     this.insert_session(metadata, SavedTranscript::EntriesOnly(Vec::new()), cx);
                 session.update(cx, |session, cx| {
@@ -6014,6 +6054,60 @@ pub(crate) mod tests {
         });
         let reply = reply.await.expect("the CLI answered");
         assert_eq!(reply["exists"], true);
+    }
+
+    #[gpui::test]
+    async fn imported_chat_is_a_local_copy(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        // The fake CLI logs each control request it gets into this file once it exists.
+        let requests = directory.path().join(".cloud-requests");
+        std::fs::write(&requests, "").expect("request log");
+        let cloud_chat = ExternalSession {
+            id: "session_01AAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            title: "Example task one".into(),
+            updated_at: 0,
+        };
+
+        let opening = store.update(cx, |store, cx| {
+            store.continue_cloud(
+                AgentKind::Claude,
+                directory.path().to_path_buf(),
+                cloud_chat,
+                cx,
+            )
+        });
+        let session = opening.await.expect("imported");
+
+        session.read_with(cx, |session, _| {
+            let metadata = session.metadata();
+            assert_eq!(metadata.title, "Example task one");
+            assert!(
+                metadata.native_session_id.is_none() && metadata.fork_source.is_none(),
+                "the cloud chat is never resumed"
+            );
+            let context = metadata
+                .fork_context
+                .clone()
+                .expect("history for the first message");
+            assert!(context.contains("Example request") && context.contains("Example answer"));
+        });
+        let subtypes: Vec<String> = std::fs::read_to_string(&requests)
+            .expect("request log")
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).expect("json line")["request"]
+                    ["subtype"]
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            subtypes,
+            [
+                "\"get_cloud_session_transcript\"",
+                "\"get_cloud_session_transcript\""
+            ]
+        );
     }
 
     fn next_remote_control_call(receiver: &mut tokio::sync::mpsc::Receiver<Steer>) -> ControlCall {

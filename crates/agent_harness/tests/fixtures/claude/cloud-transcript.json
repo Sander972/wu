@@ -1,0 +1,64 @@
+{
+  "status": "ok",
+  "entries": [
+    {
+      "parentUuid": null,
+      "isSidechain": false,
+      "userType": "external",
+      "cwd": "/home/user/example-repo",
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "version": "2.1.0",
+      "gitBranch": "claude/example-branch-one",
+      "type": "user",
+      "message": { "role": "user", "content": "Example request" },
+      "uuid": "00000000-0000-4000-8000-0000000000a1",
+      "timestamp": "2026-11-20T10:00:00.000Z"
+    },
+    {
+      "parentUuid": "00000000-0000-4000-8000-0000000000a1",
+      "isSidechain": false,
+      "userType": "external",
+      "cwd": "/home/user/example-repo",
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "version": "2.1.0",
+      "gitBranch": "claude/example-branch-one",
+      "message": {
+        "id": "msg_01EXAMPLE",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-example",
+        "content": [
+          { "type": "thinking", "thinking": "Example thought", "signature": "example-signature" },
+          { "type": "tool_use", "id": "toolu_01EXAMPLE", "name": "Bash", "input": { "command": "ls", "description": "Example description" } }
+        ],
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+        "usage": { "input_tokens": 1, "output_tokens": 1 }
+      },
+      "requestId": "req_01EXAMPLE",
+      "type": "assistant",
+      "uuid": "00000000-0000-4000-8000-0000000000a2",
+      "timestamp": "2026-11-20T10:00:01.000Z"
+    },
+    {
+      "parentUuid": "00000000-0000-4000-8000-0000000000a2",
+      "isSidechain": false,
+      "userType": "external",
+      "cwd": "/home/user/example-repo",
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "version": "2.1.0",
+      "gitBranch": "claude/example-branch-one",
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          { "tool_use_id": "toolu_01EXAMPLE", "type": "tool_result", "content": "example-output", "is_error": false }
+        ]
+      },
+      "uuid": "00000000-0000-4000-8000-0000000000a3",
+      "timestamp": "2026-11-20T10:00:02.000Z",
+      "toolUseResult": { "stdout": "example-output", "stderr": "", "interrupted": false, "isImage": false }
+    }
+  ],
+  "next_cursor": "cursor-page-2"
+}
