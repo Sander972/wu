@@ -1,0 +1,19 @@
+{
+  "type": "control_response",
+  "response": {
+    "subtype": "success",
+    "request_id": "panes",
+    "response": {
+      "panes": [
+        {
+          "id": "wu-draw-test-pane",
+          "title": "Draw test",
+          "plugin": "wu-draw-test"
+        }
+      ],
+      "shown_id": "wu-draw-test-pane",
+      "focused_id": null,
+      "focus_requested_id": null
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "type": "system",
+  "subtype": "init",
+  "capabilities": [
+    "interrupt_receipt_v1",
+    "interrupt_cancel_queued_v1",
+    "interrupt_send_now_v1",
+    "interrupt_requeue_taken_v1",
+    "msg_lifecycle_v1",
+    "request_marker_lists_v1",
+    "ask_user_question_unanswered_v1",
+    "lifecycle_wakeup_source_v1",
+    "sdk_mcp_tools_list_changed",
+    "sdk_mcp_manifests",
+    "mcp_read_resource_v1",
+    "mcp_tool_ui_meta_v1",
+    "ui_surface_v1",
+    "prompts_screened_v1",
+    "mcp_call_result_not_for_model_v1",
+    "mcp_call_soft_error_result_v1",
+    "mcp_call_check_permissions_v1",
+    "voice_call_talk_line_v1",
+    "withdrawn_files_note_v2",
+    "withdrawn_tools_v1",
+    "ui_pane_widget_v1",
+    "reload_plugins_refuse_if_busy_v1",
+    "get_usage_detached_v1",
+    "silent_resend_files_v1"
+  ]
+}

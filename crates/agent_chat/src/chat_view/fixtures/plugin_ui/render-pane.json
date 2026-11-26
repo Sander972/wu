@@ -1,0 +1,74 @@
+{
+  "type": "control_response",
+  "response": {
+    "subtype": "success",
+    "request_id": "render-pane",
+    "response": {
+      "tree": {
+        "type": "Box",
+        "props": {
+          "flexDirection": "column"
+        },
+        "children": [
+          {
+            "type": "Text",
+            "children": [
+              "Pane text"
+            ]
+          },
+          {
+            "type": "Link",
+            "props": {
+              "href": "https://example.com/docs"
+            },
+            "children": [
+              "Docs"
+            ]
+          },
+          {
+            "type": "Input",
+            "props": {
+              "key": "name",
+              "label": "Name",
+              "placeholder": "type here"
+            },
+            "press": {
+              "plugin": "wu-draw-test",
+              "handle": 976571765
+            }
+          },
+          {
+            "type": "Select",
+            "props": {
+              "key": "color",
+              "options": [
+                {
+                  "value": "red",
+                  "label": "Red"
+                },
+                {
+                  "value": "blue"
+                }
+              ],
+              "label": "Color",
+              "value": "red"
+            },
+            "press": {
+              "plugin": "wu-draw-test",
+              "handle": 976571766
+            }
+          }
+        ],
+        "part": {
+          "plugin": "wu-draw-test"
+        }
+      },
+      "props": {},
+      "rewritten": false,
+      "hooked": true,
+      "drawn_by": [
+        "wu-draw-test"
+      ]
+    }
+  }
+}

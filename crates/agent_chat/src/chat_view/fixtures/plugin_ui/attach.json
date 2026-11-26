@@ -1,0 +1,12 @@
+{
+  "type": "control_response",
+  "response": {
+    "subtype": "success",
+    "request_id": "attach-vscode",
+    "response": {
+      "surfaces": [
+        "vscode"
+      ]
+    }
+  }
+}

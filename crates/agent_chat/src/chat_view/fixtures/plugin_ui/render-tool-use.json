@@ -1,0 +1,65 @@
+{
+  "type": "control_response",
+  "response": {
+    "subtype": "success",
+    "request_id": "render-tool-use",
+    "response": {
+      "tree": {
+        "type": "Box",
+        "props": {
+          "flexDirection": "column"
+        },
+        "children": [
+          {
+            "type": "engine",
+            "ref": 1
+          },
+          {
+            "type": "Text",
+            "props": {
+              "dimColor": true
+            },
+            "children": [
+              "wu-draw-test line"
+            ]
+          },
+          {
+            "type": "Button",
+            "props": {
+              "key": "ping",
+              "label": "Ping"
+            },
+            "press": {
+              "plugin": "wu-draw-test",
+              "handle": 976571764
+            }
+          }
+        ],
+        "part": {
+          "plugin": "wu-draw-test"
+        }
+      },
+      "props": {
+        "tool_use_id": "toolu_wu_draw_test_1",
+        "tool": "Bash",
+        "input": {
+          "command": "echo hi",
+          "description": "Print hi"
+        },
+        "isRunning": false,
+        "isErrored": false,
+        "isInterrupted": false,
+        "output": {
+          "stdout": "hi\n",
+          "stderr": "",
+          "interrupted": false
+        }
+      },
+      "rewritten": true,
+      "hooked": true,
+      "drawn_by": [
+        "wu-draw-test"
+      ]
+    }
+  }
+}
