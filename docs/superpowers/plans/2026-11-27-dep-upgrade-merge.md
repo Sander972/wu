@@ -6,7 +6,14 @@
 
 ## Progress (2026-11-27)
 
-- Plan written. Nothing merged yet.
+- Tasks 1-5 done: merged in `a852b1c` with the two semantic-conflict fixes. Workspace check and clippy are clean (only the two known lints allowed). Open: Task 6 (manual smoke test, user) and Task 7 (cleanup, needs the user's OK).
+- Only those two semantic conflicts existed: the full workspace check found nothing else.
+- Test failures after the merge, none caused by it:
+  - `agent_harness --test opencode` (23 tests): fixtures use `cwd: "/tmp"`, which on Windows resolves to `	mp` on the current drive. The repo is on E: and `E:	mp` doesn't exist, so the folder check from `66df5f1` (older than the merge base) rejects it. Environmental; would pass from C:, where `C:	mp` exists.
+  - `editor` `code_lens::tests::test_code_lens_resolve_only_visible`: also fails at the merge base `faf1774` with the old dependencies, with the same sets (`{60, 70, 80, 90}` vs `{70, 80, 90}`). Pre-existing.
+  - `language` `test_bracket_colorization_indices_remain_stable_across_row_chunks` and `agent_chat` `send_now_shows_the_message_and_queue_order_survives_idle`: fail only under the full multi-crate run, pass alone (twice each). Load-dependent.
+  - `markdown` `test_metadata_blocks_store_table_rows`: on the upgrade's known-failing list.
+- The two "modified" agent_chat files on `main` differ only in CRLF line endings (index LF, `core.autocrlf=true`); left as they are.
 
 ## Analysis
 
@@ -30,34 +37,34 @@
 
 ### Task 1: Prepare
 
-- [ ] **Step 1:** Confirm `E:\Ale\wu-dep-upgrade` has no uncommitted changes and `dep-upgrade` is at `97359c6`.
-- [ ] **Step 2:** Clear the two metadata-only "modified" files on `main` (`git update-index --refresh`); keep `claude-parity_session-report.md` untracked and untouched.
+- [x] **Step 1:** Confirm `E:\Ale\wu-dep-upgrade` has no uncommitted changes and `dep-upgrade` is at `97359c6`.
+- [x] **Step 2:** Clear the two metadata-only "modified" files on `main` (`git update-index --refresh`); keep `claude-parity_session-report.md` untracked and untouched.
 
 ### Task 2: Merge and resolve the manifest conflicts
 
-- [ ] **Step 1:** `git merge --no-ff --no-commit dep-upgrade`.
-- [ ] **Step 2:** Take `dep-upgrade`'s `Cargo.toml` (`git checkout --theirs Cargo.toml`).
-- [ ] **Step 3:** Take `dep-upgrade`'s `Cargo.lock`, then run `cargo metadata` (or the first `cargo check`) so cargo adds the dependency edges `main`'s `agent_chat` gained (`async-tungstenite`, `lsp`, `smol`, `sysinfo`, `terminal`, `wu_actions`).
-- [ ] **Step 4:** Verify the `Cargo.lock` diff against `dep-upgrade` only adds those edges: no package versions change.
+- [x] **Step 1:** `git merge --no-ff --no-commit dep-upgrade`.
+- [x] **Step 2:** Take `dep-upgrade`'s `Cargo.toml` (`git checkout --theirs Cargo.toml`).
+- [x] **Step 3:** Take `dep-upgrade`'s `Cargo.lock`, then run `cargo metadata` (or the first `cargo check`) so cargo adds the dependency edges `main`'s `agent_chat` gained (`async-tungstenite`, `lsp`, `smol`, `sysinfo`, `terminal`, `wu_actions`).
+- [x] **Step 4:** Verify the `Cargo.lock` diff against `dep-upgrade` only adds those edges: no package versions change.
 
 ### Task 3: Fix the semantic conflicts
 
-- [ ] **Step 1:** `cargo check -p agent_harness -p agent_chat -p terminal --all-targets`.
-- [ ] **Step 2:** `model_context.rs`: `hex::encode(hash.finalize())` in `with_launch`.
-- [ ] **Step 3:** `process_is_alive`: handle the `Result` from `System::new_with_specifics` (an error means "can't tell", so pick the answer that is safe for its caller).
-- [ ] **Step 4:** Fix whatever else Step 1 reports, then rerun it until clean.
+- [x] **Step 1:** `cargo check -p agent_harness -p agent_chat -p terminal --all-targets`.
+- [x] **Step 2:** `model_context.rs`: `hex::encode(hash.finalize())` in `with_launch`.
+- [x] **Step 3:** `process_is_alive`: handle the `Result` from `System::new_with_specifics` (an error means "can't tell", so pick the answer that is safe for its caller).
+- [x] **Step 4:** Fix whatever else Step 1 reports, then rerun it until clean.
 
 ### Task 4: Full verification
 
-- [ ] **Step 1:** `cargo check --workspace --all-targets` is clean.
-- [ ] **Step 2:** `./script/clippy` shows only the two known lints listed above.
-- [ ] **Step 3:** Tests for the crates both branches touched: `agent_harness`, `agent_chat`, `terminal`, `sqlez`, `util`, `rpc`, `language`, `editor`, `markdown`, `dictation`, `git_ui`. Every failure is checked against the known flaky list and against pre-merge `main`.
-- [ ] **Step 4:** `rustfmt --edition 2024` on files touched by the fixes.
+- [x] **Step 1:** `cargo check --workspace --all-targets` is clean.
+- [x] **Step 2:** `./script/clippy` shows only the two known lints listed above.
+- [x] **Step 3:** Tests for the crates both branches touched: `agent_harness`, `agent_chat`, `terminal`, `sqlez`, `util`, `rpc`, `language`, `editor`, `markdown`, `dictation`, `git_ui`. Every failure is checked against the known flaky list and against pre-merge `main`.
+- [x] **Step 4:** `rustfmt --edition 2024` on files touched by the fixes.
 
 ### Task 5: Commit
 
-- [ ] **Step 1:** One merge commit containing the conflict resolution and the Task 3 fixes, so every commit on `main` builds. The message lists the fixes.
-- [ ] **Step 2:** Update this plan's Progress section and commit it.
+- [x] **Step 1:** One merge commit containing the conflict resolution and the Task 3 fixes, so every commit on `main` builds. The message lists the fixes.
+- [x] **Step 2:** Update this plan's Progress section and commit it.
 
 ### Task 6: Manual smoke test (user)
 
