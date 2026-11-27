@@ -44,7 +44,7 @@ wgpu = { workspace = true, features = ["webgl"] }
 
 [dev-dependencies]
 criterion.workspace = true
-naga = { version = "29.0.4", features = ["wgsl-in"] }
+naga = { version = "30.0.2", features = ["wgsl-in"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 pollster.workspace = true

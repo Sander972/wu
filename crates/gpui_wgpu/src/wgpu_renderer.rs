@@ -472,6 +472,7 @@ impl WgpuRenderer {
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: clamped_width.max(1),
             height: clamped_height.max(1),
             present_mode: config
@@ -1599,7 +1600,7 @@ impl WgpuRenderer {
             return false;
         }
 
-        frame.present();
+        self.resources().queue.present(frame);
         self.failed_frame_count = 0;
         true
     }

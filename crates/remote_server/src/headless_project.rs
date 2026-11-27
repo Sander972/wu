@@ -1268,7 +1268,7 @@ impl HeadlessProject {
                 .with_cmd(UpdateKind::Always),
         );
 
-        for process in System::new_with_specifics(refresh_kind)
+        for process in System::new_with_specifics(refresh_kind)?
             .processes()
             .values()
         {

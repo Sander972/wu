@@ -38,7 +38,9 @@ fn start_memory_usage_logging(workspace_store: Entity<WorkspaceStore>, cx: &App)
             return;
         };
         let refresh_kind = ProcessRefreshKind::nothing().with_memory();
-        let mut system = System::new();
+        let Some(mut system) = System::new().log_err() else {
+            return;
+        };
         let mut last_logged_resident: Option<u64> = None;
         let mut last_logged_at = Instant::now();
         loop {

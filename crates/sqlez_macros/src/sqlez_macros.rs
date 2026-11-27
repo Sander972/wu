@@ -22,7 +22,7 @@ pub fn sql(tokens: TokenStream) -> TokenStream {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let error: Option<(String, usize)> = None;
 
-    let formatted_sql = sqlformat::format(&sql, &sqlformat::QueryParams::None, Default::default());
+    let formatted_sql = sqlformat::format(&sql, &sqlformat::QueryParams::None, &Default::default());
 
     if let Some((error, error_offset)) = error {
         create_error(spans, error_offset, error, &formatted_sql)
@@ -77,6 +77,10 @@ fn flatten_stream(tokens: TokenStream, result: &mut Vec<(String, Span)>) {
             }
             TokenTree::Ident(ident) => {
                 result.push((format!("{} ", ident), ident.span()));
+            }
+            // sqlformat 0.5 reads `=?1` as an operator followed by `1`, so keep `?` apart from a preceding operator.
+            TokenTree::Punct(punct) if punct.as_char() == '?' => {
+                result.push((" ?".to_string(), punct.span()));
             }
             leaf_tree => result.push((leaf_tree.to_string(), leaf_tree.span())),
         }

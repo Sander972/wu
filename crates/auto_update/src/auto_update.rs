@@ -89,7 +89,7 @@ fn verify_digest(hasher: Sha256, expected_digest: Option<&str>, url: &str) -> Re
         log::warn!("no digest published for {url}, skipping download verification");
         return Ok(());
     };
-    let actual_digest = format!("{:x}", hasher.finalize());
+    let actual_digest = hex::encode(hasher.finalize());
     anyhow::ensure!(
         actual_digest.eq_ignore_ascii_case(expected_digest),
         "download from {url} failed SHA-256 verification: expected {expected_digest}, got {actual_digest}"

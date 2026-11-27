@@ -801,7 +801,7 @@ async fn write_and_hash(mut reader: impl AsyncRead + Unpin, path: &Path) -> Resu
         hasher.update(&buffer[..bytes_read]);
     }
     file.flush().await?;
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn path_with_node_binary_prepended(node_binary: &Path) -> Option<OsString> {

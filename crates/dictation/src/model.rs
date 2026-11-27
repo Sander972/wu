@@ -10,7 +10,7 @@ use i18n::{SharedString, t};
 use parakeet_rs::{ParakeetTDT, Transcriber as _};
 use sha2::{Digest, Sha256};
 use std::{
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, PoisonError,
@@ -353,7 +353,7 @@ async fn receive_verified(
         on_chunk(chunk.len() as u64);
     }
     ensure!(
-        received_bytes == file.size && format!("{:x}", hasher.finalize()) == file.sha256,
+        received_bytes == file.size && hex::encode(hasher.finalize()) == file.sha256,
         t!("Checksum verification failed")
     );
     Ok(staging)
@@ -545,9 +545,16 @@ fn verify_checksums<'a>(
         let mut input = std::fs::File::open(&path)
             .with_context(|| t!("The speech model is missing {file}", file = file.name))?;
         let mut hasher = Sha256::new();
-        std::io::copy(&mut input, &mut hasher)?;
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let read = input.read(&mut buffer)?;
+            let Some(chunk) = buffer.get(..read).filter(|chunk| !chunk.is_empty()) else {
+                break;
+            };
+            hasher.update(chunk);
+        }
         ensure!(
-            format!("{:x}", hasher.finalize()) == file.sha256,
+            hex::encode(hasher.finalize()) == file.sha256,
             t!("The speech model is damaged. Download it again.")
         );
     }
@@ -585,7 +592,7 @@ mod tests {
         ModelFile {
             name,
             size: bytes.len() as u64,
-            sha256: Box::leak(format!("{:x}", Sha256::digest(bytes)).into_boxed_str()),
+            sha256: Box::leak(hex::encode(Sha256::digest(bytes)).into_boxed_str()),
         }
     }
 

@@ -8,7 +8,7 @@ use picker::{Picker, PickerDelegate};
 use project::Project;
 use rpc::proto;
 use task::ZedDebugConfig;
-use util::debug_panic;
+use util::{ResultExt as _, debug_panic};
 
 use std::sync::Arc;
 
@@ -397,7 +397,10 @@ fn get_processes_for_project(project: &Entity<Project>, cx: &mut App) -> Task<Ar
                 .without_tasks()
                 .with_cmd(UpdateKind::Always),
         );
-        let mut processes: Box<[_]> = System::new_with_specifics(refresh_kind)
+        let Some(system) = System::new_with_specifics(refresh_kind).log_err() else {
+            return Task::ready(Arc::default());
+        };
+        let mut processes: Box<[_]> = system
             .processes()
             .values()
             .map(|process| {

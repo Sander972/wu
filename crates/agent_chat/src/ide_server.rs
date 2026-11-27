@@ -460,10 +460,12 @@ fn temporary_lock_pid(path: &Path) -> Option<u32> {
 }
 
 fn process_is_alive(pid: u32) -> bool {
-    let system = sysinfo::System::new_with_specifics(
+    // When the process list can't be read, report the process as alive so its lock file is kept rather than deleted under a running server.
+    sysinfo::System::new_with_specifics(
         sysinfo::RefreshKind::nothing().with_processes(sysinfo::ProcessRefreshKind::nothing()),
-    );
-    system.process(sysinfo::Pid::from_u32(pid)).is_some()
+    )
+    .log_err()
+    .is_none_or(|system| system.process(sysinfo::Pid::from_u32(pid)).is_some())
 }
 
 struct GlobalIdeServer {

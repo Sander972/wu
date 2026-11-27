@@ -15,6 +15,18 @@ actions!(
     ]
 );
 
+fn total_memory() -> u64 {
+    match System::new_with_specifics(
+        RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
+    ) {
+        Ok(system) => system.total_memory(),
+        Err(error) => {
+            log::error!("failed to read total system memory: {error}");
+            0
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct SystemSpecs {
     app_version: String,
@@ -37,10 +49,7 @@ impl SystemSpecs {
     ) -> Task<Self> {
         let app_version = AppVersion::global(cx).to_string();
         let release_channel = ReleaseChannel::global(cx);
-        let system = System::new_with_specifics(
-            RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
-        );
-        let memory = system.total_memory();
+        let memory = total_memory();
         let architecture = env::consts::ARCH;
         let commit_sha = match release_channel {
             ReleaseChannel::Dev => {
@@ -79,10 +88,7 @@ impl SystemSpecs {
         os_name: String,
         os_version: String,
     ) -> Self {
-        let system = System::new_with_specifics(
-            RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
-        );
-        let memory = system.total_memory();
+        let memory = total_memory();
         let architecture = env::consts::ARCH;
         let commit_sha = match release_channel {
             ReleaseChannel::Dev => app_commit_sha.map(|sha| sha.full()),

@@ -19,6 +19,7 @@ async-tar.workspace = true
 async_zip.workspace = true
 cpal.workspace = true
 futures.workspace = true
+hex.workspace = true
 http_client.workspace = true
 i18n.workspace = true
 log.workspace = true

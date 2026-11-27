@@ -70,7 +70,7 @@ impl std::fmt::Debug for LanguageServerState {
 const PROCESS_MEMORY_CACHE_DURATION: Duration = Duration::from_secs(5);
 
 struct ProcessMemoryCache {
-    system: System,
+    system: Option<System>,
     memory_usage: HashMap<u32, u64>,
     last_refresh: Option<Instant>,
 }
@@ -78,7 +78,7 @@ struct ProcessMemoryCache {
 impl ProcessMemoryCache {
     fn new() -> Self {
         Self {
-            system: System::new(),
+            system: System::new().log_err(),
             memory_usage: HashMap::new(),
             last_refresh: None,
         }
@@ -93,7 +93,9 @@ impl ProcessMemoryCache {
         if cache_expired {
             let refresh_kind = RefreshKind::nothing()
                 .with_processes(ProcessRefreshKind::nothing().without_tasks().with_memory());
-            self.system.refresh_specifics(refresh_kind);
+            if let Some(system) = &mut self.system {
+                system.refresh_specifics(refresh_kind);
+            }
             self.memory_usage.clear();
             self.last_refresh = Some(Instant::now());
         }
@@ -102,17 +104,19 @@ impl ProcessMemoryCache {
             return memory;
         }
 
+        let Some(system) = &self.system else {
+            return 0;
+        };
+
         let root_pid = Pid::from_u32(process_id);
 
-        let parent_map: HashMap<Pid, Pid> = self
-            .system
+        let parent_map: HashMap<Pid, Pid> = system
             .processes()
             .iter()
             .filter_map(|(&pid, process)| Some((pid, process.parent()?)))
             .collect();
 
-        let total_memory = self
-            .system
+        let total_memory = system
             .processes()
             .iter()
             .filter(|(pid, _)| self.is_descendant_of(**pid, root_pid, &parent_map))

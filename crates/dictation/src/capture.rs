@@ -156,13 +156,18 @@ impl Capture {
         )));
         let on_error = {
             let audio = audio.clone();
-            move |_| audio.failed.store(true, Ordering::Release)
+            move |error: cpal::Error| {
+                // cpal 0.18 reports xruns through the error callback on more backends, and a glitch must not abort the recording.
+                if error.kind() != cpal::ErrorKind::Xrun {
+                    audio.failed.store(true, Ordering::Release);
+                }
+            }
         };
         macro_rules! build_stream {
             ($sample:ty) => {{
                 let audio = audio.clone();
                 device.build_input_stream(
-                    &config.into(),
+                    config.into(),
                     move |data: &[$sample], _| {
                         record_peak_level(data, channels, &input_level);
                         audio.append(data, channels, sample_rate);

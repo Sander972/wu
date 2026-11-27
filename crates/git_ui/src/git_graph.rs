@@ -612,7 +612,9 @@ fn timestamp_format(date_format: GitGraphDateFormat) -> &'static [BorrowedFormat
         ),
         GitGraphDateFormat::Iso => (&ISO_FORMAT, "[year]-[month]-[day] [hour]:[minute]:[second]"),
     };
-    format.get_or_init(|| time::format_description::parse(description).unwrap_or_default())
+    format.get_or_init(|| {
+        time::format_description::parse_borrowed::<1>(description).unwrap_or_default()
+    })
 }
 
 fn format_timestamp(timestamp: i64, date_format: GitGraphDateFormat) -> String {
